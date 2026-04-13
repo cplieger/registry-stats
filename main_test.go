@@ -1570,10 +1570,11 @@ func TestCollectWithGHCRRefs(t *testing.T) {
 	cfg := &config{
 		GHCRRepos: []repoRef{{Owner: "testowner", Repo: "testpkg"}},
 	}
-	// Will fail to reach github.com, but exercises the GHCR branch of collect()
+	// Will fail to reach github.com, but exercises the GHCR branch of collect().
+	// Partial failure: snapshot is saved with 0-download entry, so collect returns true.
 	ok := collect(t.Context(), cfg)
-	if ok {
-		t.Error("expected ok=false when GHCR is unreachable")
+	if !ok {
+		t.Error("expected ok=true when snapshot saved (partial failure)")
 	}
 }
 
@@ -1583,9 +1584,11 @@ func TestCollectWithBothRegistries(t *testing.T) {
 		DockerHubRepos: []repoRef{{Owner: "testowner", Repo: "testrepo"}},
 		GHCRRepos:      []repoRef{{Owner: "testowner", Repo: "testpkg"}},
 	}
+	// Both registries unreachable, but GHCR still records a 0-download entry,
+	// so the snapshot is saved and collect returns true (partial failure).
 	ok := collect(t.Context(), cfg)
-	if ok {
-		t.Error("expected ok=false when both registries are unreachable")
+	if !ok {
+		t.Error("expected ok=true when snapshot saved (partial failure)")
 	}
 }
 
@@ -3119,9 +3122,10 @@ func TestCollectPartialSuccessDockerHubOnly(t *testing.T) {
 	}
 	ok := collect(t.Context(), cfg)
 
-	// ok should be false because GHCR failed, but snapshot should still be saved
-	if ok {
-		t.Error("collect() = true, want false (GHCR failed)")
+	// ok should be true because the snapshot was saved successfully.
+	// Partial failure is logged as a warning but does not mark unhealthy.
+	if !ok {
+		t.Error("collect() = false, want true (snapshot saved despite GHCR failure)")
 	}
 	dates, _ := listDates()
 	if len(dates) != 1 {

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026.04.13-98ff0b3 (2026-04-13)
+
+### Changed
+
+- Refactor(registry-stats): improve error handling, logging, and collection resilience
+- Update Go toolchain configuration
+
+### Dependencies
+
+- Update go to v1.26.2
+- Update golang:1.26-alpine docker digest to c2a1f7b
+
 ## 2026.04.07-b2c47de (2026-04-08)
 
 ### Changed

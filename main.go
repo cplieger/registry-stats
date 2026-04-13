@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
@@ -121,6 +122,10 @@ func main() {
 	setHealthy(collect(ctx, &cfg))
 	pruneSnapshots(&cfg)
 
+	if cfg.PollInterval == 0 {
+		slog.Info("one-shot mode, serving collected data", "addr", listenAddr)
+	}
+
 	if cfg.PollInterval > 0 {
 		slog.Info("scheduled mode", "interval", cfg.PollInterval, "jitter", "±10%")
 
@@ -221,8 +226,9 @@ var httpClient = &http.Client{Timeout: 30 * time.Second}
 // collect runs a single collection cycle for all configured registries,
 // saves the snapshot, and returns true if all collections succeeded.
 func collect(ctx context.Context, cfg *config) bool {
+	start := time.Now()
 	slog.Info("starting collection")
-	snap := snapshot{Timestamp: time.Now().UTC()}
+	snap := snapshot{Timestamp: start.UTC()}
 	ok := true
 
 	if len(cfg.DockerHubRepos) > 0 {
@@ -256,8 +262,16 @@ func collect(ctx context.Context, cfg *config) bool {
 		return false
 	}
 
-	slog.Info("collection complete", "docker_hub", len(snap.DockerHub), "ghcr", len(snap.GHCR))
-	return ok
+	if !ok {
+		slog.Warn("partial collection failure, snapshot saved with available data",
+			"docker_hub", len(snap.DockerHub), "ghcr", len(snap.GHCR))
+	}
+
+	slog.Info("collection complete",
+		"docker_hub", len(snap.DockerHub),
+		"ghcr", len(snap.GHCR),
+		"duration", time.Since(start).Round(time.Millisecond))
+	return true
 }
 
 // collectDockerHub collects stats for all configured Docker Hub repos.
@@ -405,17 +419,12 @@ func collectDockerHubTags(ctx context.Context, client *http.Client, repo string)
 	return tags
 }
 
-// collectGHCR collects download counts for all configured GHCR packages.
-// Wildcard refs (owner/*) are expanded by scraping the owner's packages page,
-// then each package is scraped individually. Results are deduplicated.
-func collectGHCR(ctx context.Context, client *http.Client, refs []repoRef) ([]ghcrStats, bool) {
-	var results []ghcrStats
+// buildGHCRPackageList deduplicates wildcard and explicit GHCR refs
+// into a single package list. Wildcard refs are expanded by scraping
+// the owner's packages page; explicit refs are appended if not already
+// covered by a wildcard.
+func buildGHCRPackageList(ctx context.Context, client *http.Client, refs []repoRef) []repoRef {
 	seen := make(map[string]bool)
-	failures := 0
-	parseFailures := 0
-	total := 0
-
-	// Build the full list of packages to scrape (wildcards first, then explicit)
 	var packages []repoRef
 	for _, ref := range refs {
 		if ref.Repo != "*" {
@@ -445,6 +454,18 @@ func collectGHCR(ctx context.Context, client *http.Client, refs []repoRef) ([]gh
 			packages = append(packages, ref)
 		}
 	}
+	return packages
+}
+
+// collectGHCR collects download counts for all configured GHCR packages.
+// Wildcard refs (owner/*) are expanded by scraping the owner's packages page,
+// then each package is scraped individually. Results are deduplicated.
+func collectGHCR(ctx context.Context, client *http.Client, refs []repoRef) ([]ghcrStats, bool) {
+	var results []ghcrStats
+	failures := 0
+	parseFailures := 0
+	total := 0
+	packages := buildGHCRPackageList(ctx, client, refs)
 
 	for i, ref := range packages {
 		// Space out requests with randomized delay to avoid rate limits
@@ -649,7 +670,7 @@ func saveSnapshot(snap snapshot) error {
 		return fmt.Errorf("rename snapshot: %w", err)
 	}
 
-	slog.Info("snapshot saved", "file", filename)
+	slog.Info("snapshot saved", "file", filename, "size", len(data))
 	return nil
 }
 
@@ -727,6 +748,7 @@ func pruneSnapshots(cfg *config) {
 		return
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -cfg.RetentionDays).Format("2006-01-02")
+	slog.Debug("checking snapshot retention", "cutoff", cutoff, "retention_days", cfg.RetentionDays)
 	dates, err := listDates()
 	if err != nil {
 		slog.Error("failed to list dates for pruning", "error", err)
@@ -935,6 +957,7 @@ func handlePulls(w http.ResponseWriter, r *http.Request) {
 		return strings.Compare(a.Repo, b.Repo)
 	})
 
+	slog.Debug("pulls response", "dates", len(dates), "rows", len(rows))
 	writeJSON(w, rows)
 }
 
@@ -993,6 +1016,7 @@ func handlePullsDaily(w http.ResponseWriter, r *http.Request) {
 		return strings.Compare(a.Repo, b.Repo)
 	})
 
+	slog.Debug("daily pulls response", "dates", len(dates), "rows", len(rows))
 	writeJSON(w, rows)
 }
 
@@ -1030,6 +1054,9 @@ func handleSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	if includeGHCR {
 		for _, gh := range snap.GHCR {
+			if gh.DownloadCount == 0 {
+				continue
+			}
 			if repoFilter != nil && !repoFilter[gh.Package] {
 				continue
 			}
@@ -1102,6 +1129,7 @@ func doGet(ctx context.Context, client *http.Client, reqURL string) ([]byte, err
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Error("failed to write JSON response", "error", err)
 	}
@@ -1112,9 +1140,13 @@ func setHealthy(ok bool) {
 	if ok {
 		if f, err := os.Create(healthFile); err == nil {
 			f.Close()
+		} else {
+			slog.Warn("failed to create health marker", "error", err)
 		}
 	} else {
-		os.Remove(healthFile)
+		if err := os.Remove(healthFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("failed to remove health marker", "error", err)
+		}
 	}
 }
 

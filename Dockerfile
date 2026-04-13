@@ -5,7 +5,9 @@ ENV GOTOOLCHAIN=auto
 WORKDIR /src
 ARG TARGETOS
 ARG TARGETARCH
-COPY go.mod main.go ./
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /registry-stats main.go
