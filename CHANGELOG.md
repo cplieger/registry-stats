@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026.04.16-fa6ec67 (2026-04-17)
+
+### Dependencies
+
+- Update golang:1.26-alpine docker digest to 27f8293
+- Update golang:1.26-alpine docker digest to f853308
+
 ## 2026.04.15-79fc55c (2026-04-16)
 
 ### Dependencies
