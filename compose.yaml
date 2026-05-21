@@ -4,12 +4,12 @@ services:
     container_name: registry-stats
     restart: unless-stopped
     user: "1000:1000"  # match your host user
-    mem_limit: 64m
 
     environment:
       TZ: "Europe/Paris"
-      DOCKERHUB_REPOS: "\\owner1/*,owner2/app2"  # owner/repo or owner/* format, comma-separated
-      GHCR_REPOS: "\\owner1/*,owner2/app2"  # owner/package or owner/* format, comma-separated
+      DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
+      GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
+      LOG_LEVEL: "info"
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
       RETENTION_DAYS: "90"  # 0 = keep forever
 
@@ -18,13 +18,3 @@ services:
 
     volumes:
       - "/opt/appdata/registry-stats:/data"  # daily JSON snapshots
-
-    healthcheck:
-      test:
-        - CMD
-        - /registry-stats
-        - health
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s

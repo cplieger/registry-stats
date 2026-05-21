@@ -11,29 +11,24 @@ Docker Hub and GHCR download tracker with Grafana dashboard
 ## Overview
 
 Collects download statistics from Docker Hub and GHCR for your public
-container images and serves the data via a lightweight HTTP API. Designed
-for Grafana dashboards but works with any tool that can query JSON APIs.
+container images. Exposes the data two ways:
+
+- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped
+  by Alloy/Prometheus into Mimir/Thanos for native Grafana dashboards
+- **JSON API** (`/api/*`) — raw data for scripts, automation, or any
+  tool that speaks HTTP
 
 Supports both explicit repos (`myuser/myapp`) and owner wildcards
 (`myuser/*`) to automatically discover and track all public repos
 for an owner. Wildcards are resolved on each poll cycle, so newly
 published images are picked up automatically.
 
-Data is stored as one JSON file per day, overwritten on each poll cycle.
-Old snapshots are automatically pruned based on a configurable retention
-period. Historical time-series data builds up locally as snapshots
-accumulate — the registries only expose current totals.
+Either surface can be disabled independently via environment variables
+(`ENABLE_METRICS`, `ENABLE_JSON_API`) to save resources.
 
 This is a distroless, rootless container — it runs as `nonroot` on
 `gcr.io/distroless/static` with no shell or package manager. It has
 zero external Go dependencies (stdlib-only).
-
-**Example use case:** You publish Docker images to GHCR and Docker Hub
-and want to track download trends over time. Configure your repos
-(or use `owner/*` wildcards to auto-discover all of them), point
-Grafana at the HTTP API, and get a dashboard showing cumulative
-downloads, daily deltas, and per-package breakdowns — no external
-analytics service required.
 
 ### Limitations
 
@@ -77,12 +72,12 @@ services:
     container_name: registry-stats
     restart: unless-stopped
     user: "1000:1000"  # match your host user
-    mem_limit: 64m
 
     environment:
       TZ: "Europe/Paris"
-      DOCKERHUB_REPOS: "\\owner1/*,owner2/app2"  # owner/repo or owner/* format, comma-separated
-      GHCR_REPOS: "\\owner1/*,owner2/app2"  # owner/package or owner/* format, comma-separated
+      DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
+      GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
+      LOG_LEVEL: "info"
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
       RETENTION_DAYS: "90"  # 0 = keep forever
 
@@ -91,16 +86,6 @@ services:
 
     volumes:
       - "/opt/appdata/registry-stats:/data"  # daily JSON snapshots
-
-    healthcheck:
-      test:
-        - CMD
-        - /registry-stats
-        - health
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
 ```
 
 ## Deployment
@@ -134,8 +119,9 @@ services:
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `TZ` | Container timezone | `Europe/Paris` | No |
-| `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`) | `\owner1/*,owner2/app2` | No |
-| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | `\owner1/*,owner2/app2` | No |
+| `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
+| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
+| `LOG_LEVEL` | - | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve the API (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
 | `RETENTION_DAYS` | Number of days to keep snapshot files. Older snapshots are automatically deleted. Set to 0 to keep all snapshots forever | `90` | No |
 
@@ -173,8 +159,22 @@ comma-separated or passed as repeated parameters.
 
 #### `GET /api/health`
 
-Returns `{"status":"ok"}`. Used as the Docker healthcheck endpoint
-and as the Grafana Infinity datasource health check URL.
+Returns `{"status":"ok"}` when healthy, or `{"status":"unready","reason":"..."}` with HTTP 503
+during startup (before the first successful collect). Used as the Docker healthcheck endpoint.
+
+#### `GET /metrics`
+
+Prometheus text format metrics. Includes:
+- `registrystats_image_pulls_total{registry,owner,repo}` — current pull count per image
+- `registrystats_image_tags{registry,owner,repo}` — tag count per image
+- `registrystats_http_requests_total{method,path,status}` — HTTP request counters
+- `registrystats_http_request_duration_seconds` — request latency histogram
+- `registrystats_collects_total{source}` — successful collects per source
+- `registrystats_collect_errors_total{source}` — failed collects per source
+- `registrystats_collect_duration_seconds` — collect cycle duration histogram
+- `process_goroutines`, `process_heap_bytes`, `process_uptime_seconds` — runtime metrics
+
+Disabled when `ENABLE_METRICS=false`.
 
 #### `GET /api/summary`
 
@@ -202,11 +202,24 @@ merged (summed) per day.
 #### `GET /api/pulls/daily`
 
 Daily download deltas — the difference in pull counts between
-consecutive days. Counter resets are clamped to zero. The first
-day always shows zero (no previous day to compare).
+consecutive days. Counter resets are clamped to zero. Missing
+days (transient scrape failures) are smoothed by dividing the
+delta across the gap, so a one-day outage doesn't show as a
+spike the day after.
+
+When a repo is present in both registries and one scrape
+transiently fails, the missing registry's value is carried
+forward from the last successful day so the merged daily delta
+reflects only the real per-registry change.
+
+The first day a repo appears in the retained snapshot window
+reports `daily_pulls: 0` (no previous day to compare) and
+carries a `first_seen: true` flag so dashboards can annotate it
+rather than misread the zero as a drop in activity.
 
 ```json
 [
+  {"timestamp":"2025-01-15T00:00:00Z","repo":"myuser/myapp","daily_pulls":0,"first_seen":true},
   {"timestamp":"2025-01-16T00:00:00Z","repo":"myuser/myapp","daily_pulls":42}
 ]
 ```
@@ -243,65 +256,58 @@ tool.
 
 ## Grafana Integration
 
-Registry Stats is designed to work with Grafana's
-[Infinity datasource](https://grafana.com/grafana/plugins/yesoreyeram-infinity-datasource/)
-plugin. A ready-to-import dashboard template is included in the
-repository. If you use a different dashboard tool, see the
-[API Reference](#api-reference) section for endpoint documentation
-and examples.
+Registry Stats exposes Prometheus metrics at `/metrics`. The included
+`grafana-dashboard.json` uses PromQL and requires only a standard
+Prometheus datasource — no plugins needed.
 
-### 1. Install the Infinity Plugin
+### Setup
 
-Add the plugin to your Grafana instance. In Docker Compose:
+1. Add a scrape target for `registry-stats:9100` in your
+   Prometheus/Alloy/Grafana Agent config
+2. Import `grafana-dashboard.json` in Grafana
+3. Select your Prometheus/Mimir datasource when prompted
 
-```yaml
-environment:
-  GF_PLUGINS_PREINSTALL: "yesoreyeram-infinity-datasource"
+**Alloy example:**
+
+```alloy
+prometheus.scrape "registry_stats" {
+  targets         = [{ __address__ = "registry-stats:9100" }]
+  forward_to      = [prometheus.remote_write.default.receiver]
+  scrape_interval = "60s"
+  job_name        = "registry-stats"
+  metrics_path    = "/metrics"
+}
 ```
 
-Restart Grafana after adding the plugin.
+**Prometheus example (`prometheus.yml`):**
 
-### 2. Configure the Datasource
+```yaml
+scrape_configs:
+  - job_name: registry-stats
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["registry-stats:9100"]
+```
 
-In Grafana, go to **Connections → Data sources → Add data source**
-and select **Infinity**. Configure:
+The dashboard shows cumulative downloads, daily deltas, package
+overview, and tracked package count — all via standard PromQL.
 
-- **URL:** `http://registry-stats:9100` (adjust if your container
-  has a different hostname or port mapping)
-- **Health check → Custom health check URL:**
-  `http://registry-stats:9100/api/health`
+To save disk I/O, set `ENABLE_JSON_API=false` once the Prometheus
+path is confirmed working. This stops writing daily JSON snapshot
+files to disk.
 
-Save and test — the health check should return a green checkmark.
+### Non-Grafana / non-Prometheus ingestion
 
-### 3. Import the Dashboard
+The JSON API provides the same data in a tool-agnostic format for
+any HTTP client (scripts, custom dashboards, Slack bots, spreadsheet
+imports):
 
-Import `grafana-dashboard.json` from this repository:
+- `GET /api/summary` — current pull counts per package
+- `GET /api/pulls` — cumulative pull counts over time
+- `GET /api/pulls/daily` — daily download deltas
 
-1. In Grafana, go to **Dashboards → Import**
-2. Upload the JSON file or paste its contents
-3. Select your Infinity datasource when prompted
-
-The dashboard includes:
-- **Total Downloads** — sum across all packages and registries
-- **Tracked Packages** — number of unique packages being monitored
-- **Package Overview** — table with per-package download totals,
-  merged across registries
-- **Cumulative Downloads** — line chart showing download growth
-  over time
-- **Daily Download Delta** — bar chart showing new downloads per
-  day (requires 2+ days of data)
-
-Both the **Repository** and **Registry** dropdowns are dynamic and
-populate automatically from your configured packages. When using
-wildcards, newly discovered repos appear in the dropdowns on the
-next poll cycle without any dashboard changes.
-
-### 4. Customization
-
-The included dashboard is a starting point. Common customizations:
-- Adjust the default time range (default: 30 days)
-- Add alert rules on download count thresholds
-- Create additional panels using the API endpoints above
+Set `ENABLE_METRICS=false` if you only use the JSON API and don't
+run a Prometheus scraper.
 
 ## Docker Healthcheck
 
@@ -339,9 +345,9 @@ docker inspect --format='{{json .State.Health.Log}}' registry-stats | python3 -m
 
 | Metric | Value |
 |--------|-------|
-| [Test Coverage](https://go.dev/blog/cover) | 87.7% |
-| Tests | 202 |
-| [Cyclomatic Complexity](https://en.wikipedia.org/wiki/Cyclomatic_complexity) (avg) | 4.0 |
+| [Test Coverage](https://go.dev/blog/cover) | 82.1% |
+| Tests | 244 |
+| [Cyclomatic Complexity](https://en.wikipedia.org/wiki/Cyclomatic_complexity) (avg) | 4.1 |
 | [Cognitive Complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) (avg) | 4.1 |
 | [Mutation Efficacy](https://en.wikipedia.org/wiki/Mutation_testing) | 84.7% (59 runs) |
 | Test Framework | Property-based ([rapid](https://github.com/flyingmutant/rapid)) + table-driven |
@@ -352,9 +358,11 @@ persistence (save, load, list, prune with boundary dates, path
 traversal rejection), Docker Hub and GHCR collection (wildcard
 expansion, pagination, partial failures, deduplication), daily
 delta calculation with counter-reset clamping, config validation,
-and JSON serialization round-trips. Property-based tests verify
-that parsing functions never panic on arbitrary input and that
-URL segments are safely validated.
+JSON serialization round-trips, HTTP retry backoff with
+Retry-After header parsing, and atomic snapshot writes with
+cleanup on failure. Property-based tests verify that parsing
+functions never panic on arbitrary input and that URL segments
+are safely validated.
 
 Not tested: `main()` and the HTTP server bind — thin runtime
 wrappers around the tested core logic. GHCR HTML scraping is
@@ -378,15 +386,22 @@ changes their markup.
 Read-only JSON API designed for internal Grafana consumption.
 No authentication required (standard for internal metrics APIs).
 Stdlib-only (zero external Go dependencies). Runs as `nonroot`
-on a distroless base image with no shell.
+on a distroless base image with no shell. The HTTP client
+refuses cross-host redirects
+(`CheckRedirect = ErrUseLastResponse`) so a compromised or
+misconfigured upstream cannot bounce the polling request to a
+third-party host.
 
 **Details for advanced users:** URL path segments validated via
 `isSafeURLSegment` (rejects `/%\?#@:`). Snapshot filenames are
 date-format-validated before disk access (prevents path
 traversal). Response bodies capped via `io.LimitReader` (10 MB
 JSON, 4 MB HTML). HTTP server sets all five timeouts. Atomic
-writes (temp file + rename) prevent snapshot corruption. Semgrep
-flags `math/rand/v2` usage, which is correct for jitter timing
+writes (temp file + rename) prevent snapshot corruption; stale
+temp files from interrupted writes are swept on startup.
+Retry-After response headers are honoured on 429/503 responses
+(capped at the configured retry backoff ceiling). Semgrep flags
+`math/rand/v2` usage, which is correct for jitter timing
 (not crypto).
 
 ## Dependencies
@@ -397,6 +412,8 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 |------------|---------|--------|
 | golang | `1.26-alpine` | [Go](https://hub.docker.com/_/golang) |
 | gcr.io/distroless/static-debian13 | `nonroot` | [Distroless](https://github.com/GoogleContainerTools/distroless) |
+| golang.org/x/sync | `v0.20.0` | [Go stdlib](https://pkg.go.dev/golang.org/x/sync) |
+| pgregory.net/rapid | `v1.3.0` | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
 
 ## Design Principles
 

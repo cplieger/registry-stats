@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026.05.19-20790a4 (2026-05-21)
+
+### Added
+
+- Prometheus /metrics endpoint with image pull gauges
+- Refactor to modular internal architecture with interfaces and composition
+- Add file-based healthcheck for distroless container
+- Add file-based healthcheck for distroless containers
+- Style(registry-stats): add blank line in statusRecorder struct
+
+### Fixed
+
+- Resolve golangci-lint findings from cycle 1
+- Refactor health probe to enable unit testing
+- Refactor health probe to enable unit testing
+- Fix overlapping x-axis labels on Daily Download Delta panel
+
+### Changed
+
+- Refactor(registry-stats): cycle 1+2 structural improvements
+- Move healthcheck to Dockerfile and standardize resource limits
+- Refactor(registry-stats): replace magic string with named constant
+- Keep the same hardening, inline less of it
+- Harden runtime, honour Retry-After, refuse cross-host redirects
+
+### Dependencies
+
+- Update gcr.io/distroless/static-debian13:nonroot docker digest to 963fa6c
+- Update golang:1.26-alpine docker digest to 91eda97
+- Update third-party dependencies
+- fix(deps): update module golang.org/x/sync to v0.20.0
+- fix(deps): update module pgregory.net/rapid to v1.3.0
+
 ## 2026.04.16-fa6ec67 (2026-04-17)
 
 ### Dependencies

@@ -1,17 +1,17 @@
 {
   "__inputs": [
     {
-      "name": "DS_REGISTRY_STATS",
-      "label": "Registry Stats",
-      "description": "Infinity datasource configured with your registry-stats base URL",
+      "name": "DS_MIMIR",
+      "label": "Mimir",
+      "description": "Prometheus-compatible datasource (Mimir, Prometheus, or Grafana Cloud)",
       "type": "datasource",
-      "pluginId": "yesoreyeram-infinity-datasource",
-      "pluginName": "Infinity"
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
     }
   ],
   "title": "Registry Stats",
   "uid": "registry-stats",
-  "description": "Docker Hub and GHCR image download tracking and registry analytics",
+  "description": "Docker Hub and GHCR image download tracking via Prometheus metrics",
   "tags": ["registry", "docker", "ghcr", "downloads"],
   "timezone": "browser",
   "refresh": "1h",
@@ -22,94 +22,24 @@
         "name": "repo",
         "label": "Repository",
         "type": "query",
-        "datasource": {
-          "type": "yesoreyeram-infinity-datasource",
-          "uid": "${DS_REGISTRY_STATS}"
-        },
-        "query": {
-          "refId": "variable",
-          "type": "json",
-          "source": "url",
-          "url": "http://registry-stats:9100/api/summary",
-          "format": "table",
-          "parser": "backend",
-          "queryType": "infinity",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "name", "text": "name", "type": "string" }
-          ],
-          "infinityQuery": {
-            "refId": "",
-            "type": "json",
-            "source": "url",
-            "url": "http://registry-stats:9100/api/summary",
-            "format": "table",
-            "parser": "backend",
-            "root_selector": "",
-            "url_options": { "data": "", "method": "GET" },
-            "columns": [
-              { "selector": "name", "text": "name", "type": "string" }
-            ],
-            "filters": [],
-            "data": ""
-          }
-        },
-        "definition": "",
+        "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
+        "query": "label_values(registrystats_image_pulls_total, repo)",
         "includeAll": true,
-        "allValue": "",
-        "current": { "text": ["All"], "value": ["$__all"] },
         "multi": true,
-        "options": [],
-        "refresh": 1,
-        "regex": "",
+        "current": { "text": ["All"], "value": ["$__all"] },
+        "refresh": 2,
         "sort": 1
       },
       {
         "name": "registry",
         "label": "Registry",
         "type": "query",
-        "datasource": {
-          "type": "yesoreyeram-infinity-datasource",
-          "uid": "${DS_REGISTRY_STATS}"
-        },
-        "query": {
-          "refId": "variable",
-          "type": "json",
-          "source": "url",
-          "url": "http://registry-stats:9100/api/summary",
-          "format": "table",
-          "parser": "backend",
-          "queryType": "infinity",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "registry", "text": "registry", "type": "string" }
-          ],
-          "infinityQuery": {
-            "refId": "",
-            "type": "json",
-            "source": "url",
-            "url": "http://registry-stats:9100/api/summary",
-            "format": "table",
-            "parser": "backend",
-            "root_selector": "",
-            "url_options": { "data": "", "method": "GET" },
-            "columns": [
-              { "selector": "registry", "text": "registry", "type": "string" }
-            ],
-            "filters": [],
-            "data": ""
-          }
-        },
-        "definition": "",
+        "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
+        "query": "label_values(registrystats_image_pulls_total, registry)",
         "includeAll": true,
-        "allValue": "",
-        "current": { "text": "All", "value": "$__all" },
         "multi": false,
-        "options": [],
-        "refresh": 1,
-        "regex": "",
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2,
         "sort": 1
       }
     ]
@@ -121,10 +51,7 @@
       "description": "Sum of all downloads across all tracked packages and registries",
       "type": "stat",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
-      "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "${DS_REGISTRY_STATS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -136,98 +63,20 @@
               { "color": "yellow", "value": 100000 }
             ]
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "/pull_count/", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value"
       },
-      "pluginVersion": "12.4.0",
       "targets": [
         {
           "refId": "A",
-          "type": "json",
-          "source": "url",
-          "url": "/api/summary?repo=${repo}&registry=${registry}",
-          "format": "table",
-          "parser": "backend",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "pull_count", "text": "pull_count", "type": "number" }
-          ]
-        }
-      ]
-    },
-    {
-      "id": 1,
-      "title": "Package Overview",
-      "description": "Downloads per package merged across registries",
-      "type": "table",
-      "gridPos": { "h": 10, "w": 18, "x": 6, "y": 0 },
-      "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "${DS_REGISTRY_STATS}"
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "name" },
-            "properties": [{ "id": "displayName", "value": "Package" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "pull_count (sum)" },
-            "properties": [{ "id": "displayName", "value": "Total Downloads" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "tag_count (sum)" },
-            "properties": [{ "id": "displayName", "value": "Tags" }]
-          },
-          {
-            "matcher": { "id": "byName", "options": "pull_count (sum)" },
-            "properties": [
-              { "id": "custom.footer.reducers", "value": ["sum"] }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "cellHeight": "sm",
-        "showHeader": true,
-        "sortBy": [{ "displayName": "Total Downloads", "desc": true }]
-      },
-      "pluginVersion": "12.4.0",
-      "targets": [
-        {
-          "refId": "A",
-          "type": "json",
-          "source": "url",
-          "url": "/api/summary?repo=${repo}&registry=${registry}",
-          "format": "table",
-          "parser": "backend",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "name", "text": "name", "type": "string" },
-            { "selector": "pull_count", "text": "pull_count", "type": "number" },
-            { "selector": "tag_count", "text": "tag_count", "type": "number" }
-          ]
-        }
-      ],
-      "transformations": [
-        {
-          "id": "groupBy",
-          "options": {
-            "fields": {
-              "name": { "aggregations": [], "operation": "groupby" },
-              "pull_count": { "aggregations": ["sum"], "operation": "aggregate" },
-              "tag_count": { "aggregations": ["sum"], "operation": "aggregate" }
-            }
-          }
+          "expr": "sum(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"})",
+          "legendFormat": "Total",
+          "instant": true
         }
       ]
     },
@@ -237,10 +86,7 @@
       "description": "Number of unique packages being tracked",
       "type": "stat",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 5 },
-      "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "${DS_REGISTRY_STATS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -248,29 +94,64 @@
             "mode": "absolute",
             "steps": [{ "color": "purple", "value": 0 }]
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
-        "reduceOptions": { "calcs": ["count"], "fields": "/name/", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "value"
       },
-      "pluginVersion": "12.4.0",
       "targets": [
         {
           "refId": "A",
-          "type": "json",
-          "source": "url",
-          "url": "/api/summary?repo=${repo}&registry=${registry}",
-          "format": "table",
-          "parser": "backend",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "name", "text": "name", "type": "string" }
-          ]
+          "expr": "count(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"})",
+          "legendFormat": "Packages",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "title": "Package Overview",
+      "description": "Downloads per package",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 18, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "repo" },
+            "properties": [{ "id": "displayName", "value": "Package" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "Total Downloads" }]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Total Downloads", "desc": true }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}",
+          "legendFormat": "{{owner}}/{{repo}}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "owner": true, "hostname": true },
+            "renameByName": { "registry": "Registry", "repo": "Package", "Value": "Downloads" }
+          }
         }
       ]
     },
@@ -280,10 +161,7 @@
       "description": "Total download count over time per repo",
       "type": "timeseries",
       "gridPos": { "h": 13, "w": 12, "x": 0, "y": 10 },
-      "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "${DS_REGISTRY_STATS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -295,90 +173,53 @@
             "showPoints": "auto",
             "spanNulls": true
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [],
-          "showLegend": true
-        },
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "pluginVersion": "12.4.0",
       "targets": [
         {
           "refId": "A",
-          "type": "json",
-          "source": "url",
-          "url": "/api/pulls?repo=${repo}&registry=${registry}",
-          "format": "timeseries",
-          "parser": "backend",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "timestamp", "text": "Timestamp", "type": "timestamp" },
-            { "selector": "pull_count", "text": " ", "type": "number" },
-            { "selector": "repo", "text": "Repo", "type": "string" }
-          ]
+          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}",
+          "legendFormat": "{{repo}} ({{registry}})"
         }
       ]
     },
     {
       "id": 3,
       "title": "Daily Download Delta",
-      "description": "New downloads per day per repo — needs 2+ days of data",
-      "type": "barchart",
+      "description": "New downloads per day per repo",
+      "type": "timeseries",
       "gridPos": { "h": 13, "w": 12, "x": 12, "y": 10 },
-      "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "${DS_REGISTRY_STATS}"
-      },
+      "datasource": { "type": "prometheus", "uid": "${DS_MIMIR}" },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "custom": {
+            "drawStyle": "bars",
             "fillOpacity": 80,
-            "gradientMode": "none"
+            "gradientMode": "none",
+            "lineWidth": 0,
+            "stacking": { "mode": "normal", "group": "A" }
           }
-        },
-        "overrides": []
+        }
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [],
-          "showLegend": true
-        },
-        "tooltip": { "mode": "multi", "sort": "desc" },
-        "xTickLabelRotation": 0,
-        "stacking": "normal",
-        "barWidth": 0.1,
-        "showValue": "never"
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
       },
-      "pluginVersion": "12.4.0",
       "targets": [
         {
           "refId": "A",
-          "type": "json",
-          "source": "url",
-          "url": "/api/pulls/daily?repo=${repo}&registry=${registry}",
-          "format": "timeseries",
-          "parser": "backend",
-          "root_selector": "",
-          "url_options": { "data": "", "method": "GET" },
-          "columns": [
-            { "selector": "timestamp", "text": "Timestamp", "type": "timestamp" },
-            { "selector": "daily_pulls", "text": " ", "type": "number" },
-            { "selector": "repo", "text": "Repo", "type": "string" }
-          ]
+          "expr": "increase(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}[1d])",
+          "legendFormat": "{{repo}} ({{registry}})",
+          "interval": "1d"
         }
       ]
     }
   ],
   "schemaVersion": 42,
-  "version": 1
+  "version": 2
 }
