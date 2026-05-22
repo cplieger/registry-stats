@@ -71,6 +71,3 @@ linters:
           - usetesting
           - noctx
           - revive
-      - text: "G404:"
-        linters:
-          - gosec
