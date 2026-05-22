@@ -192,7 +192,7 @@ func Retry(ctx context.Context, client *http.Client, reqURL string, opts Options
 			delay := overrideWait
 			if delay <= 0 {
 				delay = time.Duration(1<<attempt)*baseDelay +
-					time.Duration(rand.IntN(500))*time.Millisecond
+					time.Duration(rand.IntN(500))*time.Millisecond //nolint:gosec // G404: backoff jitter
 			}
 			overrideWait = 0
 			timer := time.NewTimer(delay)

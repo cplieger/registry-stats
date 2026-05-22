@@ -123,7 +123,7 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 		}
 		var jitter time.Duration
 		if pacingJitter > 0 {
-			jitter = time.Duration(rand.Int64N(int64(pacingJitter)))
+			jitter = time.Duration(rand.Int64N(int64(pacingJitter))) //nolint:gosec // G404: jitter, not crypto
 		}
 		delay := pacingMin + jitter
 		timer := time.NewTimer(delay)

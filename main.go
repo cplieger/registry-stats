@@ -235,7 +235,7 @@ func runScheduled(
 		// against a sub-nanosecond /5 rounding to 0 so rand.IntN never
 		// sees a non-positive argument.
 		jitterMax := max(1, int(cfg.PollInterval/5))
-		jitter := time.Duration(rand.IntN(jitterMax))
+		jitter := time.Duration(rand.IntN(jitterMax)) //nolint:gosec // G404: scheduling jitter
 		delay := cfg.PollInterval - cfg.PollInterval/10 + jitter
 		timer := time.NewTimer(delay)
 
