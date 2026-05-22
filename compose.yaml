@@ -1,6 +1,6 @@
 services:
   registry-stats:
-    image: ghcr.io/cplieger/registry-stats:latest@sha256:2301bb1718a317e76edff3d64d141681a82bbc6b9a277336a662da9ac4a87fbc
+    image: ghcr.io/cplieger/registry-stats:latest
     container_name: registry-stats
     restart: unless-stopped
     user: "1000:1000"  # match your host user
