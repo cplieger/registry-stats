@@ -6,29 +6,23 @@
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)
 
-Docker Hub and GHCR download tracker with Grafana dashboard
+Track how many times your container images are pulled — with a ready-made Grafana dashboard.
 
-## Overview
+## What it does
 
-Collects download statistics from Docker Hub and GHCR for your public
-container images. Exposes the data two ways:
+When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded — but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule, recording the download counts, and making the data available for dashboards and scripts.
 
-- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped
-  by Alloy/Prometheus into Mimir/Thanos for native Grafana dashboards
-- **JSON API** (`/api/*`) — raw data for scripts, automation, or any
-  tool that speaks HTTP
+- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped by Alloy/Prometheus into Mimir/Thanos for native Grafana dashboards
+- **JSON API** (`/api/*`) — raw data for scripts, automation, or any tool that speaks HTTP
+- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to automatically discover and track all public repos for an owner. Wildcards are resolved on each poll cycle, so newly published images are picked up automatically.
+- Either surface can be disabled independently via environment variables (`ENABLE_METRICS`, `ENABLE_JSON_API`) to save resources.
 
-Supports both explicit repos (`myuser/myapp`) and owner wildcards
-(`myuser/*`) to automatically discover and track all public repos
-for an owner. Wildcards are resolved on each poll cycle, so newly
-published images are picked up automatically.
+### Why this design
 
-Either surface can be disabled independently via environment variables
-(`ENABLE_METRICS`, `ENABLE_JSON_API`) to save resources.
-
-This is a distroless, rootless container — it runs as `nonroot` on
-`gcr.io/distroless/static` with no shell or package manager. It has
-zero external Go dependencies (stdlib-only).
+- **Zero external Go dependencies** — stdlib-only means no transitive supply-chain risk and trivial auditing.
+- **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static` with no shell or package manager, minimising attack surface.
+- **Public repos only** — avoids credential management entirely; Docker Hub uses the unauthenticated API and GHCR counts are scraped from public package pages.
+- **Dual output (Prometheus + JSON)** — lets you choose the ingestion path that fits your stack without running two tools.
 
 ### Limitations
 
@@ -43,27 +37,9 @@ zero external Go dependencies (stdlib-only).
   Time-series data is built locally as snapshots accumulate. If you
   start today, you only have data from today forward.
 
+## Quick start
 
-## Container Registries
-
-This image is published to both GHCR and Docker Hub:
-
-| Registry | Image |
-|----------|-------|
-| GHCR | `ghcr.io/cplieger/registry-stats` |
-| Docker Hub | `docker.io/cplieger/registry-stats` |
-
-```bash
-# Pull from GHCR
-docker pull ghcr.io/cplieger/registry-stats:latest
-
-# Pull from Docker Hub
-docker pull cplieger/registry-stats:latest
-```
-
-Both registries receive identical images and tags. Use whichever you prefer.
-
-## Quick Start
+The image is published to both `ghcr.io/cplieger/registry-stats` and `docker.io/cplieger/registry-stats` — use whichever registry you prefer.
 
 ```yaml
 services:
@@ -88,33 +64,9 @@ services:
       - "/opt/appdata/registry-stats:/data"  # daily JSON snapshots
 ```
 
-## Deployment
+## Configuration reference
 
-1. Set `DOCKERHUB_REPOS` to a comma-separated list of Docker Hub
-   repositories in `owner/repo` format
-   (e.g. `myuser/myapp,myuser/otherapp`). Use `owner/*` to
-   automatically track all public repos for an owner
-   (e.g. `myuser/*`).
-2. Set `GHCR_REPOS` to a comma-separated list of public GHCR packages
-   in `owner/package` format. Use `owner/*` to automatically track
-   all public packages for an owner. Only public packages are
-   supported.
-3. You can mix wildcards and explicit refs freely
-   (e.g. `myuser/*,otheruser/specific-app`). Duplicates are
-   automatically deduplicated — if `myuser/*` discovers `myapp` and
-   you also list `myuser/myapp`, it's only collected once.
-4. Mount a persistent directory to `/data` for snapshot storage.
-5. The container starts collecting immediately and serves the HTTP API
-   on port 9100. With the default 1-hour poll interval, you'll have
-   your first data point within minutes.
-6. For Grafana integration, see the
-   [Grafana Integration](#grafana-integration) section below. If you
-   use a different dashboard tool, see the
-   [API Reference](#api-reference) for endpoint documentation and
-   examples.
-
-
-## Environment Variables
+### Environment variables
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
@@ -124,21 +76,22 @@ services:
 | `LOG_LEVEL` | - | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve the API (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
 | `RETENTION_DAYS` | Number of days to keep snapshot files. Older snapshots are automatically deleted. Set to 0 to keep all snapshots forever | `90` | No |
+| `ENABLE_METRICS` | Enable Prometheus metrics endpoint | `true` | No |
+| `ENABLE_JSON_API` | Enable JSON API and daily snapshot files | `true` | No |
 
-
-## Volumes
+### Volumes
 
 | Mount | Description |
 |-------|-------------|
 | `/data` | Snapshot storage directory. Contains one JSON file per day (e.g. `2025-01-15.json`) within the configured retention period. Size is minimal — typically under 2 MB for 90 days of data. |
 
-## Ports
+### Ports
 
 | Port | Description |
 |------|-------------|
 | `9100` | HTTP API for Grafana and other consumers |
 
-## API Reference
+## API reference
 
 The HTTP API serves JSON on port 9100. All endpoints return `[]`
 (not `null`) for empty results and use ISO 8601 timestamps.
@@ -231,7 +184,7 @@ all Docker Hub tag metadata and GHCR download counts. Accepts
 `?date=YYYY-MM-DD` to fetch a specific day (defaults to the most
 recent snapshot).
 
-### Using Without Grafana
+### Using without Grafana
 
 The API returns standard JSON that any HTTP client, dashboard tool,
 or script can consume. Examples:
@@ -254,7 +207,7 @@ For periodic reporting, point a cron job at `/api/summary` and pipe
 the output to your notification system, spreadsheet, or monitoring
 tool.
 
-## Grafana Integration
+## Grafana integration
 
 Registry Stats exposes Prometheus metrics at `/metrics`. The included
 `grafana-dashboard.json` uses PromQL and requires only a standard
@@ -296,52 +249,11 @@ To save disk I/O, set `ENABLE_JSON_API=false` once the Prometheus
 path is confirmed working. This stops writing daily JSON snapshot
 files to disk.
 
-### Non-Grafana / non-Prometheus ingestion
+## Healthcheck
 
-The JSON API provides the same data in a tool-agnostic format for
-any HTTP client (scripts, custom dashboards, Slack bots, spreadsheet
-imports):
+The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. After each successful collection cycle the main process creates this file; if all configured registries fail or the snapshot cannot be written, the file is removed. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. On startup the container collects immediately — if both registries are unreachable on first boot it starts unhealthy and recovers automatically on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
-- `GET /api/summary` — current pull counts per package
-- `GET /api/pulls` — cumulative pull counts over time
-- `GET /api/pulls/daily` — daily download deltas
-
-Set `ENABLE_METRICS=false` if you only use the JSON API and don't
-run a Prometheus scraper.
-
-## Docker Healthcheck
-
-The container includes a built-in Docker healthcheck. After each
-collection cycle, the main process creates or removes a marker file
-at `/tmp/.healthy`. The `health` subcommand checks for this file.
-
-**When it becomes unhealthy:**
-- All configured Docker Hub repos fail to respond (partial failures
-  are tolerated — one successful repo keeps the container healthy)
-- All configured GHCR packages fail to scrape
-- The snapshot file cannot be written to disk
-- Wildcard expansion failures alone do not cause unhealthy status
-  if explicit repos still succeed
-
-**When it recovers:**
-- The next collection cycle where at least one registry responds
-  successfully recreates the marker file. No restart required.
-
-**On startup:** The container collects immediately. If both registries
-are unreachable on first boot, it starts unhealthy and recovers on
-the next successful poll.
-
-To check health manually:
-```bash
-docker inspect --format='{{json .State.Health.Log}}' registry-stats | python3 -m json.tool
-```
-
-| Type | Command | Meaning |
-|------|---------|---------|
-| Docker | `/registry-stats health` | Exit 0 = last collection succeeded |
-
-
-## Code Quality
+## Code quality
 
 | Metric | Value |
 |--------|-------|
@@ -369,7 +281,7 @@ wrappers around the tested core logic. GHCR HTML scraping is
 tested against captured page fragments but may break if GitHub
 changes their markup.
 
-## Security Review
+## Security
 
 **No vulnerabilities found.** All scans clean across 8 tools.
 
@@ -415,18 +327,14 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | golang.org/x/sync | `v0.20.0` | [Go stdlib](https://pkg.go.dev/golang.org/x/sync) |
 | pgregory.net/rapid | `v1.3.0` | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
 
-## Design Principles
-
-- **Always up to date**: Base images, packages, and libraries are updated automatically via Renovate. Unlike many community Docker images that ship outdated or abandoned dependencies, these images receive continuous updates.
-- **Minimal attack surface**: When possible, pure Go apps use `gcr.io/distroless/static:nonroot` (no shell, no package manager, runs as non-root). Apps requiring system packages use Alpine with the minimum necessary privileges.
-- **Digest-pinned**: Every `FROM` instruction pins a SHA256 digest. All GitHub Actions are digest-pinned.
-- **Multi-platform**: Built for `linux/amd64` and `linux/arm64`.
-- **Healthchecks**: Every container includes a Docker healthcheck.
-- **Provenance**: Build provenance is attested via GitHub Actions, verifiable with `gh attestation verify`.
-
 ## Credits
 
 This is an original tool that builds upon [Docker Hub API](https://docs.docker.com/docker-hub/api/latest/).
+
+## Contributing
+
+Issues and pull requests are welcome. Please open an issue first for
+larger changes so the approach can be discussed before implementation.
 
 ## Disclaimer
 
