@@ -96,17 +96,17 @@ func TestParseRegistryFilter_unknown_falls_back_to_include_all(t *testing.T) {
 
 func TestParseRepoFilter(t *testing.T) {
 	cases := []struct {
+		want   map[string]bool
 		name   string
 		values []string
-		want   map[string]bool
 	}{
-		{"empty", nil, nil},
-		{"single-empty", []string{""}, nil},
-		{"grafana-all", []string{"$__all"}, nil},
-		{"single", []string{"owner/a"}, map[string]bool{"owner/a": true}},
-		{"comma", []string{"owner/a,owner/b"}, map[string]bool{"owner/a": true, "owner/b": true}},
-		{"repeated", []string{"owner/a", "owner/b"}, map[string]bool{"owner/a": true, "owner/b": true}},
-		{"braces", []string{"{owner/a,owner/b}"}, map[string]bool{"owner/a": true, "owner/b": true}},
+		{name: "empty", values: nil, want: nil},
+		{name: "single-empty", values: []string{""}, want: nil},
+		{name: "grafana-all", values: []string{"$__all"}, want: nil},
+		{name: "single", values: []string{"owner/a"}, want: map[string]bool{"owner/a": true}},
+		{name: "comma", values: []string{"owner/a,owner/b"}, want: map[string]bool{"owner/a": true, "owner/b": true}},
+		{name: "repeated", values: []string{"owner/a", "owner/b"}, want: map[string]bool{"owner/a": true, "owner/b": true}},
+		{name: "braces", values: []string{"{owner/a,owner/b}"}, want: map[string]bool{"owner/a": true, "owner/b": true}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

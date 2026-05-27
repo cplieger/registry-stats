@@ -15,14 +15,14 @@ import (
 // fakeSource is a canned-response api.RegistrySource used to exercise
 // the orchestrator in isolation from any real HTTP path.
 type fakeSource struct {
-	name      string
-	source    model.RegistrySource
-	entries   []model.RegistryEntry
-	attempted int
-	healthy   bool
+	name string
 	// lastRefs captures the refs Collect saw so tests can assert the
 	// orchestrator plumbs RefsFor(name) through correctly.
-	lastRefs []model.RepoRef
+	entries   []model.RegistryEntry
+	lastRefs  []model.RepoRef
+	attempted int
+	source    model.RegistrySource
+	healthy   bool
 }
 
 // Compile-time assertion: *fakeSource satisfies api.RegistrySource.

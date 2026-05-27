@@ -423,11 +423,11 @@ func TestHandlePulls_filters(t *testing.T) {
 	// Each case seeds the store, issues a GET with query params, and
 	// asserts status + returned repo names.
 	type testCase struct {
-		name      string
 		setup     func(*testsupport.MemStore)
+		name      string
 		query     string
-		wantCode  int
 		wantRepos []string // sorted; nil means "assert empty array"
+		wantCode  int
 	}
 	cases := []testCase{
 		{
@@ -614,11 +614,11 @@ func TestHandlePulls_skipsCorruptSnapshot(t *testing.T) {
 func TestHandlePullsDaily_filters(t *testing.T) {
 	// Table-driven consolidation of filter/edge tests for /api/pulls/daily.
 	type testCase struct {
-		name     string
 		setup    func(*testsupport.MemStore)
+		check    func(t *testing.T, body []byte)
+		name     string
 		query    string
 		wantCode int
-		check    func(t *testing.T, body []byte)
 	}
 	cases := []testCase{
 		{
