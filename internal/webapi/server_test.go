@@ -193,9 +193,9 @@ func TestWriteJSON_variousTypes(t *testing.T) {
 		{"nil slice", []string(nil), "null\n"},
 		{"empty map", map[string]int{}, "{}\n"},
 		{"nested struct", struct {
-			A int    `json:"a"`
 			B string `json:"b"`
-		}{1, "x"}, "{\"a\":1,\"b\":\"x\"}\n"},
+			A int    `json:"a"`
+		}{"x", 1}, "{\"b\":\"x\",\"a\":1}\n"},
 		{"integer", 42, "42\n"},
 		{"boolean", true, "true\n"},
 	}
