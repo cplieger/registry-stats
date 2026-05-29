@@ -162,12 +162,18 @@ func (s *FS) Load(_ context.Context, date string) (*model.Snapshot, error) {
 	// time.Parse already constrains `date` to digits+hyphens, but this
 	// guard catches (a) future refactors that weaken that validation
 	// and (b) dev-host (Windows) path separators that time.Parse
-	// wouldn't reject.
-	if filepath.Dir(path) != filepath.Clean(s.dir) {
+	// wouldn't reject. Use filepath.Clean + HasPrefix containment
+	// (rather than the previous Dir-equality check) because CodeQL's
+	// go/path-injection analyzer recognises this pattern as a
+	// sanitiser, while the Dir comparison alone wasn't enough to
+	// prove safety to the dataflow engine.
+	cleanPath := filepath.Clean(path)
+	cleanDir := filepath.Clean(s.dir) + string(filepath.Separator)
+	if !strings.HasPrefix(cleanPath, cleanDir) {
 		return nil, fmt.Errorf("path traversal blocked: %q", date)
 	}
 
-	info, err := os.Stat(path)
+	info, err := os.Stat(cleanPath)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +191,7 @@ func (s *FS) Load(_ context.Context, date string) (*model.Snapshot, error) {
 			return cached, nil
 		}
 
-		f, openErr := os.Open(path)
+		f, openErr := os.Open(cleanPath)
 		if openErr != nil {
 			return nil, openErr
 		}
