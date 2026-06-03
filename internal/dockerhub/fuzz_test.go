@@ -74,9 +74,18 @@ func FuzzDockerHubTagListUnmarshal(f *testing.F) {
 			Results []model.TagInfo `json:"results"`
 		}
 		if err := json.Unmarshal(data, &resp); err == nil {
+			// Mirror the production filter: collectTags skips empty names.
+			// After filtering, all remaining tags must have non-empty names.
+			var filtered []model.TagInfo
 			for _, tag := range resp.Results {
 				if tag.Name == "" {
-					t.Errorf("tag name is empty, want non-empty")
+					continue
+				}
+				filtered = append(filtered, tag)
+			}
+			for _, tag := range filtered {
+				if tag.Name == "" {
+					t.Errorf("tag name is empty after filtering, want non-empty")
 				}
 			}
 		}

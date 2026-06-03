@@ -299,7 +299,12 @@ func collectTags(ctx context.Context, c *Client, repo string) []model.TagInfo {
 			break
 		}
 
-		tags = append(tags, resp.Results...)
+		for _, tag := range resp.Results {
+			if tag.Name == "" {
+				continue
+			}
+			tags = append(tags, tag)
+		}
 
 		if resp.Next == "" {
 			hitCap = false
