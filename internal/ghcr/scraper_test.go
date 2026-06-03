@@ -15,6 +15,7 @@ import (
 	"registry-stats/internal/httpx"
 	"registry-stats/internal/model"
 	"registry-stats/internal/testsupport"
+	"registry-stats/internal/urlsafe"
 )
 
 // Compile-time assertion kept here so a change that narrows
@@ -583,12 +584,20 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Add("<html>nothing here</html>", "owner")
 	f.Add("", "owner")
 	f.Add(`<a href="/users/owner/packages/container/package/good">good</a>`, "owner")
+	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">traversal</a>`, "owner")
 	f.Fuzz(func(t *testing.T, html, owner string) {
 		pkgs, err := ParsePackageList(html, owner)
 		if err == nil && len(pkgs) == 0 {
 			// ParsePackageList returns ErrHTMLFormatChanged when no packages found,
 			// so err==nil with empty result should not happen.
 			t.Errorf("ParsePackageList returned nil error with 0 packages")
+		}
+		// All returned names must pass IsSafeURLSegment — the production code
+		// filters them, so this invariant must hold for any input.
+		for _, name := range pkgs {
+			if !urlsafe.IsSafeURLSegment(name) {
+				t.Errorf("ParsePackageList returned unsafe name %q", name)
+			}
 		}
 	})
 }
