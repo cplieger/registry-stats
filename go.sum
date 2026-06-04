@@ -1,7 +1,10 @@
 github.com/cplieger/httpx v1.0.1 h1:CkkHm7iobFw0meTLSKpfh57BeTbNfWxzKnFc1Zbp/wo=
 github.com/cplieger/httpx v1.0.1/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
+github.com/cplieger/httpx v1.0.2/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
 github.com/cplieger/metrics v1.0.1 h1:R6uV8UDnsMB+XMuQsKnzVyVb47a1mSGqgZMmgwTSbJ4=
 github.com/cplieger/metrics v1.0.1/go.mod h1:Q+d/UoGECpuuyJ2runs5dU+H8p5ZVI+EwcjQtVZReaM=
+github.com/cplieger/metrics v1.0.2 h1:BwC1dLIUFnURKg5Yrb+EaTzlmcoXHcSDQflMIm1Ra+w=
+github.com/cplieger/metrics v1.0.2/go.mod h1:Q+d/UoGECpuuyJ2runs5dU+H8p5ZVI+EwcjQtVZReaM=
 golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
 golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
