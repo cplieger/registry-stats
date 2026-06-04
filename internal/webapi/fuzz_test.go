@@ -15,7 +15,7 @@ func FuzzParseRepoFilter(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, input string) {
 		result := parseRepoFilter([]string{input})
-		if result != nil && len(result) > 1000 {
+		if len(result) > 1000 {
 			t.Errorf("result map unexpectedly large: %d", len(result))
 		}
 	})
