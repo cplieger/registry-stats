@@ -1,13 +1,14 @@
 package metrics
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
 func TestMetricsHandler(t *testing.T) {
-	HTTPRequests.Inc("GET", "/metrics", "200")
+	HTTPRequests.Inc(http.MethodGet, "/metrics", "200")
 	CollectsTotal.Inc("dockerhub")
 	CollectErrors.Inc("ghcr")
 	HTTPDuration.Observe(0.013)
