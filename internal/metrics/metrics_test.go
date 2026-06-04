@@ -17,7 +17,7 @@ func TestMetricsHandler(t *testing.T) {
 		{Registry: "ghcr", Owner: "cplieger", Repo: "vibekit", Pulls: 56, Tags: 0},
 	})
 
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	Handler()(w, r)
 	body := w.Body.String()
@@ -59,7 +59,7 @@ func TestSetImageMetricsResets(t *testing.T) {
 		{Registry: "dockerhub", Owner: "a", Repo: "z", Pulls: 3, Tags: 3},
 	})
 
-	r := httptest.NewRequest("GET", "/metrics", nil)
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	Handler()(w, r)
 	body := w.Body.String()
