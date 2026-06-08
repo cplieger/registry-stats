@@ -118,6 +118,7 @@ during startup (before the first successful collect). Used as the Docker healthc
 #### `GET /metrics`
 
 Prometheus text format metrics. Includes:
+
 - `registrystats_image_pulls_total{registry,owner,repo}` — current pull count per image
 - `registrystats_image_tags{registry,owner,repo}` — tag count per image
 - `registrystats_http_requests_total{method,path,status}` — HTTP request counters
