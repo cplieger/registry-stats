@@ -64,8 +64,9 @@ type HealthSignal interface {
 
 // HTTPDoer is the subset of *http.Client that the registry clients use.
 // Kept as an interface so tests can inject a mock without a real
-// *http.Client. httpx.NewClient returns a concrete *http.Client which
-// satisfies this structurally.
+// *http.Client. main.go constructs a concrete *http.Client (with the
+// httpx.DockerGitHubRedirectPolicy allowlist) which satisfies this
+// structurally.
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }

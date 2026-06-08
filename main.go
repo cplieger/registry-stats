@@ -10,17 +10,18 @@ package main
 // Data is stored as /data/YYYY-MM-DD.json (one file per day, overwritten each poll).
 // The HTTP API serves current + historical data for Grafana dashboards.
 //
-// main.go is a pure composition root: it wires config → httpx.Client →
-// store.FS → dockerhub.Client + ghcr.Client → health.Marker → webapi.Server,
-// threads those concrete values through runCollect / runScheduled /
-// pruneOnce, and handles the signal-driven lifecycle. All business logic
-// lives in internal/*; this file contains no shims, globals, or type
-// aliases.
+// main.go is a pure composition root: it wires config → *http.Client
+// (with httpx.DockerGitHubRedirectPolicy) → store.FS → dockerhub.Client +
+// ghcr.Client → health.Marker → webapi.Server, threads those concrete
+// values through runCollect / runScheduled / pruneOnce, and handles the
+// signal-driven lifecycle. All business logic lives in internal/*; this
+// file contains no shims, globals, or type aliases.
 
 import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -28,12 +29,12 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/internal/config"
 	"github.com/cplieger/registry-stats/internal/dockerhub"
 	"github.com/cplieger/registry-stats/internal/ghcr"
-	"github.com/cplieger/registry-stats/internal/httpx"
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/store"
@@ -61,7 +62,15 @@ func main() {
 	marker.Set(false)
 	defer marker.Cleanup()
 
-	httpClient := httpx.NewClient(30 * time.Second)
+	// Construct the shared client directly rather than via httpx.NewClient:
+	// the library's NewClient installs DefaultRedirectPolicy (same-host
+	// only), but registry-stats must follow Docker Hub / GHCR redirects
+	// across the docker.com / github.com / githubusercontent.com family,
+	// so we wire httpx.DockerGitHubRedirectPolicy as CheckRedirect.
+	httpClient := &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
+	}
 	var storeOpts []store.Option
 	if !cfg.EnableJSONAPI {
 		storeOpts = append(storeOpts, store.WithDisableWrite())
@@ -76,8 +85,8 @@ func main() {
 		slog.Warn("cleanup stale tmp failed", "error", err)
 	}
 
-	dh := dockerhub.NewClient(httpClient, httpx.Options{}, 0, slog.Default())
-	gh := ghcr.NewClient(httpClient, httpx.Options{}, ghcr.Options{}, slog.Default())
+	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
+	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
 
 	// Pin {dh, gh} order: DockerHub-then-GHCR is the scrape sequence
 	// Loki dashboards key on in their per-source panels.

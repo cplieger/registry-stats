@@ -5,8 +5,8 @@
 //
 // Contract boundaries kept intact through extraction:
 //   - URL shapes (https://hub.docker.com/v2/repositories/{owner}/...) are
-//     unchanged; RedirectPolicy in internal/httpx still enforces the SSRF
-//     allowlist.
+//     unchanged; httpx.DockerGitHubRedirectPolicy (wired on the shared
+//     *http.Client in main.go) still enforces the SSRF allowlist.
 //   - Response JSON parsing (pull_count, last_updated, per-tag images[])
 //     matches the on-disk model.Snapshot.DockerHub shape byte-for-byte.
 //   - Page caps (owner listing: 10 pages; per-repo tags: 50 pages; 100
@@ -28,8 +28,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/httpx"
 	"github.com/cplieger/registry-stats/internal/model"
 )
 
@@ -48,7 +48,7 @@ const (
 type Client struct {
 	http      *http.Client
 	logger    *slog.Logger
-	retryOpts httpx.Options
+	retryOpts []httpx.Option
 	pageCap   int // overrides MaxOwnerPages + MaxTagPages when non-zero; 0 = use defaults
 }
 
@@ -57,7 +57,7 @@ type Client struct {
 // nil logger falls back to slog.Default. pageCap of 0 means "use the
 // package-default caps"; any non-zero value applies to both owner
 // listing and per-repo tag listing (used by tests to force the cap).
-func NewClient(client *http.Client, retryOpts httpx.Options, pageCap int, logger *slog.Logger) *Client {
+func NewClient(client *http.Client, retryOpts []httpx.Option, pageCap int, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -335,14 +335,12 @@ func Degraded(results []model.RepoStats, attempted int) bool {
 }
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub
-// helper. Body cap defaults to 10 MB (the pre-refactor doGet value) when
-// the caller did not set MaxBodyBytes.
+// helper. The response body is capped at httpx.DefaultMaxBodyBytes
+// (10 MB) by the library unless the caller's retryOpts override it —
+// matching the pre-library doGet ceiling, so no explicit cap is needed
+// here.
 func get(ctx context.Context, c *Client, url string) ([]byte, error) {
-	opts := c.retryOpts
-	if opts.MaxBodyBytes == 0 {
-		opts.MaxBodyBytes = 10 << 20
-	}
-	return httpx.Retry(ctx, c.http, url, opts)
+	return httpx.Retry(ctx, c.http, url, c.retryOpts...)
 }
 
 // ownerPageCap resolves c.pageCap against the default for owner listing.

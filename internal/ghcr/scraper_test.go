@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/httpx"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/testsupport"
 	"github.com/cplieger/registry-stats/internal/urlsafe"
@@ -26,10 +26,10 @@ func mockClient(srv *httptest.Server) *http.Client {
 	return testsupport.MockClient(srv)
 }
 
-// shortRetry returns httpx.Options with a 1 ms base delay so retry
+// shortRetry returns httpx options with a 1 ms base delay so retry
 // tests don't wait a full second between attempts.
-func shortRetry() httpx.Options {
-	return httpx.Options{BaseDelay: time.Millisecond}
+func shortRetry() []httpx.Option {
+	return []httpx.Option{httpx.WithBaseDelay(time.Millisecond)}
 }
 
 // fastPacing returns Options with microsecond pacing/jitter so mock

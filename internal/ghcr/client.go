@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/httpx"
 	"github.com/cplieger/registry-stats/internal/model"
 )
 
@@ -36,7 +36,7 @@ const (
 type Client struct {
 	http      *http.Client
 	logger    *slog.Logger
-	retryOpts httpx.Options
+	retryOpts []httpx.Option
 	opts      Options
 }
 
@@ -45,7 +45,7 @@ type Client struct {
 // httpx.Retry. opts configures GHCR-specific pacing; its zero value
 // selects DefaultPacingMin + DefaultPacingJitter. A nil logger falls
 // back to slog.Default.
-func NewClient(client *http.Client, retryOpts httpx.Options, opts Options, logger *slog.Logger) *Client {
+func NewClient(client *http.Client, retryOpts []httpx.Option, opts Options, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
