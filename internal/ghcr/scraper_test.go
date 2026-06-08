@@ -34,12 +34,12 @@ func shortRetry() []httpx.Option {
 
 // fastPacing returns Options with microsecond pacing/jitter so mock
 // Collect tests don't sit on the 2-5 s production per-package delay
-// baked into DefaultPacingMin / DefaultPacingJitter. Non-mock tests
+// baked into DefaultMinPacing / DefaultPacingJitter. Non-mock tests
 // that intentionally exercise default pacing should keep passing
 // Options{} (zero value falls back to the DefaultPacing* constants).
 func fastPacing() Options {
 	return Options{
-		PacingMin:    time.Microsecond,
+		MinPacing:    time.Microsecond,
 		PacingJitter: time.Microsecond,
 	}
 }

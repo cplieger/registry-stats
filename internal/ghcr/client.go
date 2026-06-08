@@ -14,20 +14,20 @@ import (
 )
 
 // Options configures GHCR-specific scraper policy. Its zero value
-// selects production defaults (DefaultPacingMin + DefaultPacingJitter)
+// selects production defaults (DefaultMinPacing + DefaultPacingJitter)
 // so main.go can pass ghcr.Options{} and preserve the pre-c3 2-5s
 // per-package pacing byte-for-byte.
 type Options struct {
-	PacingMin    time.Duration
+	MinPacing    time.Duration
 	PacingJitter time.Duration
 }
 
-// DefaultPacingMin and DefaultPacingJitter are the production pacing
+// DefaultMinPacing and DefaultPacingJitter are the production pacing
 // values applied when an Options field is zero. collect() adds a
 // uniformly distributed jitter in [0, DefaultPacingJitter) to
-// DefaultPacingMin to space out consecutive GHCR scrape requests.
+// DefaultMinPacing to space out consecutive GHCR scrape requests.
 const (
-	DefaultPacingMin    = 2 * time.Second
+	DefaultMinPacing    = 2 * time.Second
 	DefaultPacingJitter = 3 * time.Second
 )
 
@@ -43,7 +43,7 @@ type Client struct {
 // NewClient returns a Client that uses the provided *http.Client for
 // all outbound requests, applying retryOpts to each call via
 // httpx.Retry. opts configures GHCR-specific pacing; its zero value
-// selects DefaultPacingMin + DefaultPacingJitter. A nil logger falls
+// selects DefaultMinPacing + DefaultPacingJitter. A nil logger falls
 // back to slog.Default.
 func NewClient(client *http.Client, retryOpts []httpx.Option, opts Options, logger *slog.Logger) *Client {
 	if logger == nil {
@@ -113,9 +113,9 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 		// usually runs just before GHCR can queue many consecutive
 		// requests, so leading pacing smooths the transition between
 		// registries.
-		pacingMin := c.opts.PacingMin
+		pacingMin := c.opts.MinPacing
 		if pacingMin <= 0 {
-			pacingMin = DefaultPacingMin
+			pacingMin = DefaultMinPacing
 		}
 		pacingJitter := c.opts.PacingJitter
 		if pacingJitter <= 0 {
