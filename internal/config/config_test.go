@@ -5,9 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 	"pgregory.net/rapid"
-
-	"registry-stats/internal/urlsafe"
 )
 
 func TestParseRepoRefs(t *testing.T) {

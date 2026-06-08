@@ -3,7 +3,7 @@ package store
 import (
 	"sync"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // PullIndex maintains a pre-computed time-series of per-repo pull

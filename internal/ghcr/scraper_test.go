@@ -9,13 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 	"pgregory.net/rapid"
-
-	"registry-stats/internal/api"
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/model"
-	"registry-stats/internal/testsupport"
-	"registry-stats/internal/urlsafe"
 )
 
 // Compile-time assertion kept here so a change that narrows

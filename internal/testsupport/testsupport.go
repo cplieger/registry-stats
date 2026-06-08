@@ -9,8 +9,8 @@ import (
 	"slices"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // RedirectTransport rewrites all outbound requests to point at a local

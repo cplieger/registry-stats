@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	configpkg "registry-stats/internal/config"
-	"registry-stats/internal/model"
+	configpkg "github.com/cplieger/registry-stats/internal/config"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // TestLogConfig pins the "no repos configured" ERROR branch and

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/httpx"
 )
 
 // FuzzParseRetryAfterRegistry exercises ParseRetryAfter with arbitrary strings.
@@ -19,7 +19,7 @@ func FuzzParseRetryAfterRegistry(f *testing.F) {
 	f.Add("-1")
 	f.Add("soon")
 	f.Add("  10  ")
-	f.Add(time.Now().Add(5*time.Minute).UTC().Format(http.TimeFormat))
+	f.Add(time.Now().Add(5 * time.Minute).UTC().Format(http.TimeFormat))
 	f.Add(time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat))
 
 	f.Fuzz(func(t *testing.T, input string) {

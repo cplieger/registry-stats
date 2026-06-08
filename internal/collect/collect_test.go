@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/collect"
-	"registry-stats/internal/model"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/collect"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // fakeSource is a canned-response api.RegistrySource used to exercise
@@ -46,6 +46,7 @@ func (f *fakeSource) Collect(
 func newFakeDockerHub() *fakeSource {
 	return &fakeSource{name: model.SourceDockerHub.String(), source: model.SourceDockerHub}
 }
+
 func newFakeGHCR() *fakeSource {
 	return &fakeSource{name: model.SourceGHCR.String(), source: model.SourceGHCR}
 }
@@ -83,8 +84,10 @@ func TestRun_healthy_saves_snapshot_with_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []model.RegistryEntry{
-		{Name: "owner/app", LastUpdated: "2026-03-06T12:00:00Z", PullCount: 42,
-			Tags: []model.TagInfo{{Name: "latest"}}},
+		{
+			Name: "owner/app", LastUpdated: "2026-03-06T12:00:00Z", PullCount: 42,
+			Tags: []model.TagInfo{{Name: "latest"}},
+		},
 	}
 	dh.attempted = 1
 	dh.healthy = true
@@ -112,7 +115,6 @@ func TestRun_healthy_saves_snapshot_with_both_registries(t *testing.T) {
 			return nil
 		},
 	})
-
 	if err != nil {
 		t.Fatalf("Run() err = %v, want nil", err)
 	}

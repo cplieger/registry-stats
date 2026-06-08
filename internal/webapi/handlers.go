@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // handlers holds the per-request dependencies the HTTP endpoints need.

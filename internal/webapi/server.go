@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/metrics"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/metrics"
 )
 
 // Default HTTP server timeouts. Chosen for a LAN-only Grafana

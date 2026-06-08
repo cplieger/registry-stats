@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // TestMemStore_StoreContract verifies that the in-memory fake satisfies

@@ -27,16 +27,16 @@ import (
 	"syscall"
 	"time"
 
-	"registry-stats/internal/api"
-	collectpkg "registry-stats/internal/collect"
-	configpkg "registry-stats/internal/config"
-	"registry-stats/internal/dockerhub"
-	"registry-stats/internal/ghcr"
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/metrics"
-	"registry-stats/internal/model"
-	"registry-stats/internal/store"
-	"registry-stats/internal/webapi"
+	"github.com/cplieger/registry-stats/internal/api"
+	collectpkg "github.com/cplieger/registry-stats/internal/collect"
+	configpkg "github.com/cplieger/registry-stats/internal/config"
+	"github.com/cplieger/registry-stats/internal/dockerhub"
+	"github.com/cplieger/registry-stats/internal/ghcr"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/metrics"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/store"
+	"github.com/cplieger/registry-stats/internal/webapi"
 )
 
 func main() {

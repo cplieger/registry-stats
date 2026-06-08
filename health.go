@@ -33,7 +33,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/api"
 )
 
 // healthMarkerPath is the default marker location. Docker healthchecks

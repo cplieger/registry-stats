@@ -12,10 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
 	"golang.org/x/sync/singleflight"
-
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
 )
 
 // maxSnapshotSize caps the bytes loadSnapshot will read from a single

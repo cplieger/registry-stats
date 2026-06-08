@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // NewContractMemStore returns a minimal api.Store fake for testing the

@@ -23,7 +23,7 @@ import (
 	"net/http"
 	"strings"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // grafanaAll is Grafana's placeholder for "all values" when a

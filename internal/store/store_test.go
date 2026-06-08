@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
-	"registry-stats/internal/store"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/store"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // Compile-time assertion that *store.FS still satisfies api.Store. A

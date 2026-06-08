@@ -3,7 +3,7 @@ package webapi
 import (
 	"testing"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 func FuzzParseRepoFilter(f *testing.F) {
