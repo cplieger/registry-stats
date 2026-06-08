@@ -9,6 +9,6 @@ require (
 
 require github.com/cplieger/metrics v1.0.2
 
-require github.com/cplieger/health v1.0.2
+require github.com/cplieger/health v1.1.0
 
 require github.com/cplieger/httpx v1.0.3
