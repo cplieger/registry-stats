@@ -1,4 +1,4 @@
-module registry-stats
+module github.com/cplieger/registry-stats
 
 go 1.26.4
 

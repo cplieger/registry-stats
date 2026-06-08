@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"registry-stats/internal/model"
-	"registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
 
 // Default values for env-var-backed fields. Exported for test assertions.

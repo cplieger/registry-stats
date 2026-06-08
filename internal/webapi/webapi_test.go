@@ -4,8 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // TestMemStore_StoreContract verifies that the in-memory fake satisfies

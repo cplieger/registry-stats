@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // MaxCachedSnapshots caps the in-memory snapshot cache. 120 entries

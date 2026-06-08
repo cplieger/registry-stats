@@ -26,8 +26,8 @@ import (
 	"log/slog"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // Options configures a single Run. Sources are the registry clients

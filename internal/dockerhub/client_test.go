@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/dockerhub"
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/model"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/dockerhub"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // Compile-time assertion kept here (not in the package) so a change that

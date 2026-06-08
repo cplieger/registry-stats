@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // FuzzDockerHubRepoUnmarshal exercises the single-repo metadata JSON parsing

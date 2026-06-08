@@ -28,9 +28,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // Pagination caps. Chosen well above realistic usage so normal traffic

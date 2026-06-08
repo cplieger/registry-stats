@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"registry-stats/internal/model"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // TestMemStore_StoreContract verifies that the in-memory fake satisfies

@@ -36,9 +36,9 @@ import (
 	"strconv"
 	"strings"
 
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/model"
-	"registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
 
 // ErrHTMLFormatChanged is the sentinel returned for any GHCR HTML parse

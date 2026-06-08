@@ -3,8 +3,8 @@ package testsupport_test
 import (
 	"testing"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/testsupport"
 )
 
 // TestRunStoreContract_compiles_and_runs is a smoke test ensuring the

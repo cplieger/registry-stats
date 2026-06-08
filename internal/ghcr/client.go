@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"registry-stats/internal/api"
-	"registry-stats/internal/httpx"
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // Options configures GHCR-specific scraper policy. Its zero value

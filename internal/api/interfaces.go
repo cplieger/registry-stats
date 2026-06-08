@@ -12,7 +12,7 @@ import (
 	"context"
 	"net/http"
 
-	"registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/model"
 )
 
 // Store persists and retrieves daily snapshots. Concrete implementation:
