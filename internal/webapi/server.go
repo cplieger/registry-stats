@@ -27,7 +27,7 @@ const (
 
 // Deps is the injection surface for the webapi package. Concrete
 // implementations live elsewhere: Store is *store.FS from
-// internal/store, Health is *healthMarker from main. A nil Logger
+// internal/store, Health is *health.Marker. A nil Logger
 // falls back to slog.Default.
 type Deps struct {
 	Store         api.Store

@@ -11,7 +11,7 @@ package main
 // The HTTP API serves current + historical data for Grafana dashboards.
 //
 // main.go is a pure composition root: it wires config → httpx.Client →
-// store.FS → dockerhub.Client + ghcr.Client → healthMarker → webapi.Server,
+// store.FS → dockerhub.Client + ghcr.Client → health.Marker → webapi.Server,
 // threads those concrete values through runCollect / runScheduled /
 // pruneOnce, and handles the signal-driven lifecycle. All business logic
 // lives in internal/*; this file contains no shims, globals, or type
@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cplieger/health"
 	"github.com/cplieger/registry-stats/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/internal/config"
@@ -43,7 +44,7 @@ func main() {
 	// CLI health probe for Docker healthcheck (distroless has no curl/wget).
 	// Checks for a marker file instead of making an HTTP request — no port needed.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
-		runProbe(healthMarkerPath)
+		health.RunProbe(health.DefaultPath)
 	}
 
 	cfg := configpkg.LoadConfig()
@@ -56,7 +57,7 @@ func main() {
 	// Remove stale health file from a previous run that may have crashed
 	// before its defer ran. Without this, the health probe would report
 	// healthy before the first collection completes.
-	marker := newHealthMarker(healthMarkerPath)
+	marker := health.NewMarker(health.DefaultPath)
 	marker.Set(false)
 	defer marker.Cleanup()
 
