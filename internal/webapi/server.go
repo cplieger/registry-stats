@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	cm "github.com/cplieger/metrics/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/metrics"
 )
@@ -122,26 +123,6 @@ func Shutdown(srv *http.Server, health api.HealthSignal, cause error, logger *sl
 	}
 }
 
-// StatusRecorder captures the HTTP status code for the access log.
-// Defaults to 200 because handlers that never call WriteHeader
-// implicitly return 200. Exported so the main package's thin shim
-// (which exists to keep the pre-refactor TestStatusRecorder test
-// green) can construct instances directly.
-type StatusRecorder struct {
-	http.ResponseWriter
-
-	Status int
-}
-
-// WriteHeader records the status code and forwards to the wrapped
-// ResponseWriter. Callers that never invoke WriteHeader leave
-// Status at its zero initialization (main's shim defaults to 200,
-// which matches net/http's implicit response code).
-func (s *StatusRecorder) WriteHeader(code int) {
-	s.Status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
 // WithAccessLog emits one structured log line per HTTP request, at
 // DEBUG for 2xx/3xx (quiet by default; turn on LOG_LEVEL=debug to see
 // them), WARN for 4xx, and ERROR for 5xx. This makes dashboard
@@ -153,22 +134,22 @@ func WithAccessLog(next http.Handler, logger *slog.Logger) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rw := &StatusRecorder{ResponseWriter: w, Status: http.StatusOK}
+		rw := cm.NewStatusRecorder(w)
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
-		metrics.RecordHTTP(r.Method, r.URL.Path, rw.Status, dur)
+		metrics.RecordHTTP(r.Method, r.URL.Path, rw.Status(), dur)
 		lvl := slog.LevelDebug
 		switch {
-		case rw.Status >= 500:
+		case rw.Status() >= 500:
 			lvl = slog.LevelError
-		case rw.Status >= 400:
+		case rw.Status() >= 400:
 			lvl = slog.LevelWarn
 		}
 		logger.Log(r.Context(), lvl, "http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"query", r.URL.RawQuery,
-			"status", rw.Status,
+			"status", rw.Status(),
 			"duration_ms", time.Since(start).Milliseconds())
 	})
 }

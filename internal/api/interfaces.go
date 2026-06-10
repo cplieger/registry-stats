@@ -10,7 +10,6 @@ package api
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/cplieger/registry-stats/internal/model"
 )
@@ -59,14 +58,4 @@ type RegistrySource interface {
 type HealthSignal interface {
 	Set(healthy bool)
 	Healthy() bool
-	Cleanup()
-}
-
-// HTTPDoer is the subset of *http.Client that the registry clients use.
-// Kept as an interface so tests can inject a mock without a real
-// *http.Client. main.go constructs a concrete *http.Client (with the
-// httpx.DockerGitHubRedirectPolicy allowlist) which satisfies this
-// structurally.
-type HTTPDoer interface {
-	Do(req *http.Request) (*http.Response, error)
 }

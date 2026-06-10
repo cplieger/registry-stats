@@ -31,7 +31,5 @@ func (f *fakeHealth) Set(ok bool) { f.healthy.Store(ok) }
 
 func (f *fakeHealth) Healthy() bool { return f.healthy.Load() }
 
-func (f *fakeHealth) Cleanup() { f.healthy.Store(false) }
-
 // fixedSnapshot builds a deterministic snapshot with one DockerHub
 // repo and one GHCR package. Callers tweak the counts per test.
