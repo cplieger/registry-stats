@@ -2,6 +2,7 @@ github.com/cplieger/httpx v1.0.1 h1:CkkHm7iobFw0meTLSKpfh57BeTbNfWxzKnFc1Zbp/wo=
 github.com/cplieger/httpx v1.0.1/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
 github.com/cplieger/httpx v1.0.2/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
 github.com/cplieger/httpx v1.0.3/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
+github.com/cplieger/httpx v1.0.4/go.mod h1:luKty8jqtz5JiZQG4JEQiEPGbqXdo1m12BMSQ4XleA8=
 github.com/cplieger/metrics v1.0.1 h1:R6uV8UDnsMB+XMuQsKnzVyVb47a1mSGqgZMmgwTSbJ4=
 github.com/cplieger/metrics v1.0.1/go.mod h1:Q+d/UoGECpuuyJ2runs5dU+H8p5ZVI+EwcjQtVZReaM=
 github.com/cplieger/metrics v1.0.2 h1:BwC1dLIUFnURKg5Yrb+EaTzlmcoXHcSDQflMIm1Ra+w=
