@@ -77,10 +77,11 @@ func main() {
 	}
 	snapStore := store.NewFS(cfg.DataDir, storeOpts...)
 
-	// Sweep any .snapshot-*.tmp files left behind by a previous crashed run.
-	// store.FS.Save uses CreateTemp+rename for atomicity, so a SIGKILL
-	// between CreateTemp and Rename leaks a temp file; ListDates skips
-	// them but they accumulate forever otherwise.
+	// Sweep stale atomicfile temp files (.atomicfile-*.tmp) left behind by a
+	// previous crashed run. store.FS.Save persists via atomicfile.SaveJSON
+	// (temp + fsync + rename), so a SIGKILL between the temp write and the
+	// rename leaks a temp file; ListDates skips them but they accumulate
+	// otherwise.
 	if err := snapStore.CleanupStaleTmp(ctx); err != nil {
 		slog.Warn("cleanup stale tmp failed", "error", err)
 	}
