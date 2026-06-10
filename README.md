@@ -19,7 +19,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 
 ### Why this design
 
-- **Zero external Go dependencies** — stdlib-only means no transitive supply-chain risk and trivial auditing.
+- **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` libraries supply retry/backoff, the health probe, and Prometheus exposition. Small, auditable supply chain.
 - **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static` with no shell or package manager, minimising attack surface.
 - **Public repos only** — avoids credential management entirely; Docker Hub uses the unauthenticated API and GHCR counts are scraped from public package pages.
 - **Dual output (Prometheus + JSON)** — lets you choose the ingestion path that fits your stack without running two tools.
@@ -297,12 +297,16 @@ changes their markup.
 
 Read-only JSON API designed for internal Grafana consumption.
 No authentication required (standard for internal metrics APIs).
-Stdlib-only (zero external Go dependencies). Runs as `nonroot`
-on a distroless base image with no shell. The HTTP client
-refuses cross-host redirects
-(`CheckRedirect = ErrUseLastResponse`) so a compromised or
-misconfigured upstream cannot bounce the polling request to a
-third-party host.
+Minimal dependencies (no non-`cplieger` runtime deps beyond
+`golang.org/x/sync`; uses the `cplieger` `httpx` / `health` /
+`metrics` libraries). Runs as `nonroot` on a distroless base
+image with no shell. The HTTP client follows redirects only
+within a host allowlist (`httpx.DockerGitHubRedirectPolicy`:
+`docker.com` / `github.com` / `githubusercontent.com`, 5-hop
+cap) so a compromised or misconfigured upstream cannot bounce
+the polling request to an arbitrary third-party host (the
+registries legitimately redirect to their own CDNs/blob
+stores).
 
 **Details for advanced users:** URL path segments validated via
 `isSafeURLSegment` (rejects `/%\?#@:`). Snapshot filenames are
