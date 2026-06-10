@@ -254,34 +254,6 @@ files to disk.
 
 The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. After each successful collection cycle the main process creates this file; if all configured registries fail or the snapshot cannot be written, the file is removed. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. On startup the container collects immediately — if both registries are unreachable on first boot it starts unhealthy and recovers automatically on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
-## Code quality
-
-| Metric | Value |
-|--------|-------|
-| [Test Coverage](https://go.dev/blog/cover) | 82.1% |
-| Tests | 244 |
-| [Cyclomatic Complexity](https://en.wikipedia.org/wiki/Cyclomatic_complexity) (avg) | 4.1 |
-| [Cognitive Complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf) (avg) | 4.1 |
-| [Mutation Efficacy](https://en.wikipedia.org/wiki/Mutation_testing) | 84.7% (59 runs) |
-| Test Framework | Property-based ([rapid](https://github.com/flyingmutant/rapid)) + table-driven |
-
-Tests cover all HTTP API endpoints (health, summary, pulls,
-pulls/daily, snapshot) with registry and repo filtering, snapshot
-persistence (save, load, list, prune with boundary dates, path
-traversal rejection), Docker Hub and GHCR collection (wildcard
-expansion, pagination, partial failures, deduplication), daily
-delta calculation with counter-reset clamping, config validation,
-JSON serialization round-trips, HTTP retry backoff with
-Retry-After header parsing, and atomic snapshot writes with
-cleanup on failure. Property-based tests verify that parsing
-functions never panic on arbitrary input and that URL segments
-are safely validated.
-
-Not tested: `main()` and the HTTP server bind — thin runtime
-wrappers around the tested core logic. GHCR HTML scraping is
-tested against captured page fragments but may break if GitHub
-changes their markup.
-
 ## Security
 
 **No vulnerabilities found.** All scans clean across 8 tools.
