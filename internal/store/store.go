@@ -36,11 +36,11 @@ const maxSnapshotSize = 50 << 20
 // construct an instance.
 type FS struct {
 	loadSF       singleflight.Group
-	dir          string
 	cache        *SnapshotCache
 	pullIdx      *PullIndex
-	idxReady     chan struct{} // closed when background rebuildIndex completes
-	mu           sync.Mutex    // serializes Save (SaveJSON requires a caller mutex)
+	idxReady     chan struct{}
+	dir          string
+	mu           sync.Mutex
 	disableWrite bool
 }
 
