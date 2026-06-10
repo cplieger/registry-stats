@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cplieger/atomicfile"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/model"
 	"golang.org/x/sync/singleflight"
@@ -36,8 +38,9 @@ type FS struct {
 	loadSF       singleflight.Group
 	cache        *SnapshotCache
 	pullIdx      *PullIndex
-	idxReady     chan struct{} // closed when background rebuildIndex completes
+	idxReady     chan struct{}
 	dir          string
+	mu           sync.Mutex
 	disableWrite bool
 }
 
@@ -83,68 +86,21 @@ func WithDisableWrite() Option {
 // (os.Rename has no Context variant and the write is expected to be
 // sub-second).
 func (s *FS) Save(_ context.Context, snap *model.Snapshot) error {
+	date := snap.Timestamp.Format("2006-01-02")
 	if s.disableWrite {
 		// Still update the in-memory pull index so /metrics gauges work.
-		s.pullIdx.Update(snap.Timestamp.Format("2006-01-02"), snap)
+		s.pullIdx.Update(date, snap)
 		return nil
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+	destPath := filepath.Join(s.dir, date+".json")
+	// atomicfile.SaveJSON handles marshal + temp + fsync + rename + dir-fsync,
+	// and auto-creates s.dir at 0o700 (the 0o600 perm implies a private dir).
+	if err := atomicfile.SaveJSON(destPath, &s.mu, snap, "snapshot", 0o600); err != nil {
+		return fmt.Errorf("save snapshot: %w", err)
 	}
-
-	filename := snap.Timestamp.Format("2006-01-02") + ".json"
-	destPath := filepath.Join(s.dir, filename)
-
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal snapshot: %w", err)
-	}
-
-	tmp, err := os.CreateTemp(s.dir, ".snapshot-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("write temp snapshot: %w", err)
-	}
-	// fsync before close + rename so the file's data blocks are on
-	// disk before the directory entry flip. Without this, a power
-	// loss between rename and the next journal flush can leave a
-	// zero-length snapshot on disk after reboot.
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("sync temp snapshot: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("close temp snapshot: %w", err)
-	}
-	if err := os.Rename(tmpName, destPath); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("rename snapshot: %w", err)
-	}
-	// Best-effort directory fsync so the renamed entry itself
-	// survives power loss. Failures here aren't worth returning —
-	// the data file is already durable from tmp.Sync() above — but
-	// log at debug so ops can trace storage-layer oddities.
-	if dir, err := os.Open(s.dir); err == nil {
-		if syncErr := dir.Sync(); syncErr != nil {
-			slog.Debug("dir sync failed", "dir", s.dir, "error", syncErr)
-		}
-		if closeErr := dir.Close(); closeErr != nil {
-			slog.Debug("dir close failed", "dir", s.dir, "error", closeErr)
-		}
-	}
-
-	s.cache.Invalidate(snap.Timestamp.Format("2006-01-02"))
-	s.pullIdx.Update(snap.Timestamp.Format("2006-01-02"), snap)
-
-	slog.Info("snapshot saved", "file", filename, "size", len(data))
+	s.cache.Invalidate(date)
+	s.pullIdx.Update(date, snap)
+	slog.Info("snapshot saved", "file", date+".json")
 	return nil
 }
 
@@ -282,40 +238,11 @@ func (s *FS) Prune(ctx context.Context, retentionDays int) (int, error) {
 	return pruned, nil
 }
 
-// CleanupStaleTmp removes leftover .snapshot-*.tmp files in the data
-// directory that are older than one hour. Save's atomic-write pattern
-// (CreateTemp + rename) leaks a temp file if the process is killed
-// between the two steps; ListDates skips them but they would otherwise
-// accumulate forever and eventually exhaust disk.
+// CleanupStaleTmp removes leftover temp files left by an interrupted Save
+// (a crash between temp-write and rename). Delegates to atomicfile, which
+// matches the temp scheme SaveJSON uses, so the two stay coupled.
 func (s *FS) CleanupStaleTmp(_ context.Context) error {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		slog.Debug("failed to read data dir for tmp sweep", "error", err)
-		return nil
-	}
-	cutoff := time.Now().Add(-1 * time.Hour)
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasPrefix(name, ".snapshot-") || !strings.HasSuffix(name, ".tmp") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if !info.ModTime().Before(cutoff) {
-			continue
-		}
-		path := filepath.Join(s.dir, name)
-		if err := os.Remove(path); err != nil {
-			slog.Debug("failed to remove stale tmp file", "file", name, "error", err)
-		} else {
-			slog.Info("cleaned up stale tmp file", "file", name)
-		}
-	}
+	atomicfile.CleanupStaleTemps(s.dir, time.Hour)
 	return nil
 }
 

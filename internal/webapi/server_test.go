@@ -45,21 +45,6 @@ func TestWriteJSON_nilSlice(t *testing.T) {
 
 // --- server lifecycle ---
 
-func TestStatusRecorder_default200(t *testing.T) {
-	w := httptest.NewRecorder()
-	rec := &StatusRecorder{ResponseWriter: w, Status: http.StatusOK}
-	if rec.Status != http.StatusOK {
-		t.Errorf("default Status = %d, want 200", rec.Status)
-	}
-	rec.WriteHeader(http.StatusTeapot)
-	if rec.Status != http.StatusTeapot {
-		t.Errorf("Status after WriteHeader = %d, want 418", rec.Status)
-	}
-	if w.Code != http.StatusTeapot {
-		t.Errorf("wrapped writer Status = %d, want 418", w.Code)
-	}
-}
-
 func TestWithAccessLog_passesThrough(t *testing.T) {
 	called := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -10,29 +10,31 @@ package main
 // Data is stored as /data/YYYY-MM-DD.json (one file per day, overwritten each poll).
 // The HTTP API serves current + historical data for Grafana dashboards.
 //
-// main.go is a pure composition root: it wires config → httpx.Client →
-// store.FS → dockerhub.Client + ghcr.Client → healthMarker → webapi.Server,
-// threads those concrete values through runCollect / runScheduled /
-// pruneOnce, and handles the signal-driven lifecycle. All business logic
-// lives in internal/*; this file contains no shims, globals, or type
-// aliases.
+// main.go is a pure composition root: it wires config → *http.Client
+// (with httpx.DockerGitHubRedirectPolicy) → store.FS → dockerhub.Client +
+// ghcr.Client → health.Marker → webapi.Server, threads those concrete
+// values through runCollect / runScheduled / pruneOnce, and handles the
+// signal-driven lifecycle. All business logic lives in internal/*; this
+// file contains no shims, globals, or type aliases.
 
 import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/cplieger/health"
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/internal/config"
 	"github.com/cplieger/registry-stats/internal/dockerhub"
 	"github.com/cplieger/registry-stats/internal/ghcr"
-	"github.com/cplieger/registry-stats/internal/httpx"
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/store"
@@ -43,7 +45,7 @@ func main() {
 	// CLI health probe for Docker healthcheck (distroless has no curl/wget).
 	// Checks for a marker file instead of making an HTTP request — no port needed.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
-		runProbe(healthMarkerPath)
+		health.RunProbe(health.DefaultPath)
 	}
 
 	cfg := configpkg.LoadConfig()
@@ -56,27 +58,36 @@ func main() {
 	// Remove stale health file from a previous run that may have crashed
 	// before its defer ran. Without this, the health probe would report
 	// healthy before the first collection completes.
-	marker := newHealthMarker(healthMarkerPath)
+	marker := health.NewMarker(health.DefaultPath)
 	marker.Set(false)
 	defer marker.Cleanup()
 
-	httpClient := httpx.NewClient(30 * time.Second)
+	// Construct the shared client directly rather than via httpx.NewClient:
+	// the library's NewClient installs DefaultRedirectPolicy (same-host
+	// only), but registry-stats must follow Docker Hub / GHCR redirects
+	// across the docker.com / github.com / githubusercontent.com family,
+	// so we wire httpx.DockerGitHubRedirectPolicy as CheckRedirect.
+	httpClient := &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
+	}
 	var storeOpts []store.Option
 	if !cfg.EnableJSONAPI {
 		storeOpts = append(storeOpts, store.WithDisableWrite())
 	}
 	snapStore := store.NewFS(cfg.DataDir, storeOpts...)
 
-	// Sweep any .snapshot-*.tmp files left behind by a previous crashed run.
-	// store.FS.Save uses CreateTemp+rename for atomicity, so a SIGKILL
-	// between CreateTemp and Rename leaks a temp file; ListDates skips
-	// them but they accumulate forever otherwise.
+	// Sweep stale atomicfile temp files (.atomicfile-*.tmp) left behind by a
+	// previous crashed run. store.FS.Save persists via atomicfile.SaveJSON
+	// (temp + fsync + rename), so a SIGKILL between the temp write and the
+	// rename leaks a temp file; ListDates skips them but they accumulate
+	// otherwise.
 	if err := snapStore.CleanupStaleTmp(ctx); err != nil {
 		slog.Warn("cleanup stale tmp failed", "error", err)
 	}
 
-	dh := dockerhub.NewClient(httpClient, httpx.Options{}, 0, slog.Default())
-	gh := ghcr.NewClient(httpClient, httpx.Options{}, ghcr.Options{}, slog.Default())
+	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
+	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
 
 	// Pin {dh, gh} order: DockerHub-then-GHCR is the scrape sequence
 	// Loki dashboards key on in their per-source panels.

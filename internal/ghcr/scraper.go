@@ -7,8 +7,9 @@
 // Contract boundaries kept intact through extraction:
 //   - URL shapes (https://github.com/users/{owner}/packages,
 //     https://github.com/users/{owner}/packages/container/package/{name})
-//     are unchanged; RedirectPolicy in internal/httpx still enforces the
-//     SSRF allowlist for github.com hops.
+//     are unchanged; httpx.DockerGitHubRedirectPolicy (wired on the shared
+//     *http.Client in main.go) still enforces the SSRF allowlist for
+//     github.com hops.
 //   - The HTML parsing heuristics (Total downloads marker, 500-byte
 //     title= search window, /users/{owner}/packages/container/package/
 //     prefix matching) are preserved verbatim. Any change here is a
@@ -36,7 +37,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/registry-stats/internal/httpx"
+	"github.com/cplieger/httpx"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
@@ -59,23 +60,27 @@ const ghcrBodyCap = 2 << 20
 
 // fetchHTML fetches a GitHub HTML page with browser-like headers,
 // retrying on 429 and 5xx per opts. Transport errors and non-allowlist
-// status codes fail fast. opts.BaseDelay, MaxAttempts, and MaxBodyBytes
-// fall back to httpx defaults when zero; SetHeaders is overridden here
-// to install the User-Agent/Accept/Accept-Language triplet GitHub
-// expects from a browser session (anonymous GHCR pages gate on UA).
-func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts httpx.Options) (string, error) {
-	// Override SetHeaders unconditionally: the pre-refactor
-	// fetchGitHubHTML always installed these three headers, so we keep
-	// the same behavior rather than surfacing it as a caller concern.
-	opts.SetHeaders = func(req *http.Request) {
-		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-		req.Header.Set("Accept", "text/html")
-		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	}
-	if opts.MaxBodyBytes == 0 {
-		opts.MaxBodyBytes = ghcrBodyCap
-	}
-	body, err := httpx.Retry(ctx, client, pageURL, opts)
+// status codes fail fast. The caller's opts are applied first; fetchHTML
+// then appends WithHeaders (the User-Agent/Accept/Accept-Language
+// triplet GitHub expects from a browser session — anonymous GHCR pages
+// gate on UA) and WithMaxBodyBytes(ghcrBodyCap). Because options are
+// applied left-to-right, these appended values always win, preserving
+// the pre-library behavior where the browser headers were installed
+// unconditionally and the body was capped at ghcrBodyCap.
+func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []httpx.Option) (string, error) {
+	// Build a fresh slice so the caller's opts (reused across every
+	// scrape via c.retryOpts) is never mutated by the append.
+	htmlOpts := make([]httpx.Option, 0, len(opts)+2)
+	htmlOpts = append(htmlOpts, opts...)
+	htmlOpts = append(htmlOpts,
+		httpx.WithHeaders(func(req *http.Request) {
+			req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+			req.Header.Set("Accept", "text/html")
+			req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		}),
+		httpx.WithMaxBodyBytes(ghcrBodyCap),
+	)
+	body, err := httpx.Retry(ctx, client, pageURL, htmlOpts...)
 	if err != nil {
 		return "", err
 	}
@@ -85,7 +90,7 @@ func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts ht
 // scrapePackageList fetches an owner's packages listing page and
 // returns the discovered package names. Returns ErrHTMLFormatChanged
 // (wrapped) when the HTML contains no recognized package links.
-func scrapePackageList(ctx context.Context, client *http.Client, owner string, opts httpx.Options) ([]string, error) {
+func scrapePackageList(ctx context.Context, client *http.Client, owner string, opts []httpx.Option) ([]string, error) {
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages", owner)
 	html, err := fetchHTML(ctx, client, pageURL, opts)
 	if err != nil {
@@ -141,7 +146,7 @@ func ParsePackageList(html, owner string) ([]string, error) {
 // scrapeDownloads fetches a single package page and returns its total
 // download count. Non-2xx responses and transport errors bubble up as
 // httpx.Retry returned them; parse failures return ErrHTMLFormatChanged.
-func scrapeDownloads(ctx context.Context, client *http.Client, owner, pkg string, opts httpx.Options) (int64, error) {
+func scrapeDownloads(ctx context.Context, client *http.Client, owner, pkg string, opts []httpx.Option) (int64, error) {
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", owner, pkg)
 	html, err := fetchHTML(ctx, client, pageURL, opts)
 	if err != nil {
@@ -193,7 +198,7 @@ func buildPackageList(
 	ctx context.Context,
 	client *http.Client,
 	refs []model.RepoRef,
-	opts httpx.Options,
+	opts []httpx.Option,
 ) (packages []model.RepoRef, listingFailures, listingParseFailures int) {
 	seen := make(map[string]bool)
 	for _, ref := range refs {

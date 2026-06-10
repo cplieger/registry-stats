@@ -6,7 +6,7 @@
 //
 // Handlers depend only on the api.Store and api.HealthSignal interfaces.
 // The composition root in main.go constructs concrete instances
-// (*store.FS, *healthMarker) and passes them via Deps to New. This
+// (*store.FS, *health.Marker) and passes them via Deps to New. This
 // isolates the HTTP surface from persistence and healthcheck concerns
 // so each can evolve independently.
 //

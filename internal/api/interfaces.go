@@ -1,7 +1,7 @@
 // Package api holds the cross-package interfaces that registry-stats
 // subpackages depend on. This is the composition spine: concrete types
 // in internal/store, internal/dockerhub, internal/ghcr, and the root
-// healthMarker implement these interfaces, and the composition root
+// *health.Marker implements these interfaces, and the composition root
 // (main.go) wires them together.
 //
 // The interfaces are deliberately small — each represents a single
@@ -10,7 +10,6 @@ package api
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/cplieger/registry-stats/internal/model"
 )
@@ -54,18 +53,9 @@ type RegistrySource interface {
 }
 
 // HealthSignal abstracts the file-marker healthcheck used by distroless
-// containers. *healthMarker in main satisfies this; handlers use it to
+// containers. *health.Marker satisfies this; handlers use it to
 // render /api/health without reaching into a global.
 type HealthSignal interface {
 	Set(healthy bool)
 	Healthy() bool
-	Cleanup()
-}
-
-// HTTPDoer is the subset of *http.Client that the registry clients use.
-// Kept as an interface so tests can inject a mock without a real
-// *http.Client. httpx.NewClient returns a concrete *http.Client which
-// satisfies this structurally.
-type HTTPDoer interface {
-	Do(req *http.Request) (*http.Response, error)
 }
