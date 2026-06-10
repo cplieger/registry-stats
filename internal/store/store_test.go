@@ -198,31 +198,17 @@ func TestFS_CleanupStaleTmp(t *testing.T) {
 	dir := t.TempDir()
 	s := store.NewFS(dir)
 
-	stalePath := filepath.Join(dir, ".snapshot-stale123.tmp")
-	if err := os.WriteFile(stalePath, []byte("stale"), 0o600); err != nil {
-		t.Fatalf("write stale tmp: %v", err)
-	}
-	staleTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(stalePath, staleTime, staleTime); err != nil {
-		t.Fatalf("chtimes stale: %v", err)
-	}
-	recentPath := filepath.Join(dir, ".snapshot-recent456.tmp")
-	if err := os.WriteFile(recentPath, []byte("recent"), 0o600); err != nil {
-		t.Fatalf("write recent tmp: %v", err)
-	}
+	// A real snapshot file must never be swept.
 	otherPath := filepath.Join(dir, "2026-03-06.json")
 	if err := os.WriteFile(otherPath, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write other: %v", err)
 	}
 
+	// Removing orphaned temps is atomicfile.CleanupStaleTemps's contract
+	// (covered by atomicfile's own suite, version-coupled to its temp scheme).
+	// Here we pin only the integration: no error, and real files survive.
 	if err := s.CleanupStaleTmp(t.Context()); err != nil {
 		t.Fatalf("CleanupStaleTmp: %v", err)
-	}
-	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
-		t.Errorf("stale tmp should be removed: %v", err)
-	}
-	if _, err := os.Stat(recentPath); err != nil {
-		t.Errorf("recent tmp should be kept: %v", err)
 	}
 	if _, err := os.Stat(otherPath); err != nil {
 		t.Errorf("non-tmp file should be kept: %v", err)
@@ -649,8 +635,8 @@ func TestFS_Save_mkdir_error(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when store dir parent is a file")
 	}
-	if err != nil && !strings.Contains(err.Error(), "create data dir") {
-		t.Errorf("error = %v, want 'create data dir' prefix", err)
+	if err != nil && !strings.Contains(err.Error(), "save snapshot") {
+		t.Errorf("error = %v, want 'save snapshot' prefix", err)
 	}
 }
 
