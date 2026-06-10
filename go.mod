@@ -11,6 +11,6 @@ require github.com/cplieger/metrics/v2 v2.0.0
 
 require github.com/cplieger/health v1.1.0
 
-require github.com/cplieger/httpx v1.0.3
+require github.com/cplieger/httpx v1.0.4
 
-require github.com/cplieger/atomicfile v1.1.0
+require github.com/cplieger/atomicfile v1.2.0
