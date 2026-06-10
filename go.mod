@@ -7,7 +7,7 @@ require (
 	pgregory.net/rapid v1.3.0
 )
 
-require github.com/cplieger/metrics v1.0.2
+require github.com/cplieger/metrics/v2 v2.0.0
 
 require github.com/cplieger/health v1.1.0
 

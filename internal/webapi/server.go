@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/cplieger/registry-stats/internal/api"
@@ -157,8 +156,7 @@ func WithAccessLog(next http.Handler, logger *slog.Logger) http.Handler {
 		rw := &StatusRecorder{ResponseWriter: w, Status: http.StatusOK}
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
-		metrics.HTTPRequests.Inc(r.Method, r.URL.Path, strconv.Itoa(rw.Status))
-		metrics.HTTPDuration.Observe(dur.Seconds())
+		metrics.RecordHTTP(r.Method, r.URL.Path, rw.Status, dur)
 		lvl := slog.LevelDebug
 		switch {
 		case rw.Status >= 500:
