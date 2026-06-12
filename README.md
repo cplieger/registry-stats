@@ -257,7 +257,7 @@ The container includes a built-in Docker healthcheck using a marker file at `/tm
 
 ## Security
 
-**No vulnerabilities found.** All scans clean across 8 tools.
+**No vulnerabilities found.** All scans clean across the full scanner battery.
 
 | Tool | Result |
 |------|--------|
@@ -298,12 +298,12 @@ Retry-After response headers are honoured on 429/503 responses
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Version | Source |
-|------------|---------|--------|
-| golang | `1.26-alpine` | [Go](https://hub.docker.com/_/golang) |
-| gcr.io/distroless/static-debian13 | `nonroot` | [Distroless](https://github.com/GoogleContainerTools/distroless) |
-| golang.org/x/sync | `v0.20.0` | [Go stdlib](https://pkg.go.dev/golang.org/x/sync) |
-| pgregory.net/rapid | `v1.3.0` | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
+| Dependency | Source |
+|------------|--------|
+| golang | [Go](https://hub.docker.com/_/golang) |
+| Distroless static | [Distroless](https://github.com/GoogleContainerTools/distroless) |
+| golang.org/x/sync | [Go stdlib](https://pkg.go.dev/golang.org/x/sync) |
+| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
 
 ## Credits
 
