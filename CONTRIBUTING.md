@@ -42,8 +42,8 @@ and `main.go` is the only place that imports concrete packages together.
 
 ## Local development
 
-The module targets the Go version pinned in `go.mod` (currently `go 1.26.4`);
-the container builds on `golang:1.26-alpine`.
+The module targets the Go version pinned in `go.mod`;
+the container builds on the Alpine `golang` builder.
 
 ```sh
 go build ./...
