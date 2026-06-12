@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile"
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/model"
 	"golang.org/x/sync/singleflight"
@@ -81,11 +81,10 @@ func WithDisableWrite() Option {
 // corrupt daily-delta calculations). Invalidates the cache entry for
 // the written date so the next reader re-parses from disk.
 //
-// ctx is accepted for interface symmetry with future remote stores;
-// the local filesystem implementation does not honor cancellation
-// (os.Rename has no Context variant and the write is expected to be
-// sub-second).
-func (s *FS) Save(_ context.Context, snap *model.Snapshot) error {
+// ctx is threaded into atomicfile.WriteFile, which checks it once the
+// mutex is held; the local filesystem write itself is expected to be
+// sub-second (os.Rename has no Context variant).
+func (s *FS) Save(ctx context.Context, snap *model.Snapshot) error {
 	date := snap.Timestamp.Format("2006-01-02")
 	if s.disableWrite {
 		// Still update the in-memory pull index so /metrics gauges work.
@@ -93,9 +92,30 @@ func (s *FS) Save(_ context.Context, snap *model.Snapshot) error {
 		return nil
 	}
 	destPath := filepath.Join(s.dir, date+".json")
-	// atomicfile.SaveJSON handles marshal + temp + fsync + rename + dir-fsync,
-	// and auto-creates s.dir at 0o700 (the 0o600 perm implies a private dir).
-	if err := atomicfile.SaveJSON(destPath, &s.mu, snap, "snapshot", 0o600); err != nil {
+	// The removed atomicfile.SaveJSON handled marshal + temp + fsync + rename +
+	// dir-fsync and auto-created s.dir (via SaveBytes) at a perm derived from
+	// the file perm. Replicate that inline: marshal + atomicfile.WriteFile,
+	// holding s.mu across the marshal+write (the lock scope SaveJSON enforced),
+	// and create s.dir at 0o700 because the 0o600 file perm implies a private
+	// dir (0o755 for world-readable files).
+	const perm os.FileMode = 0o600
+	dirPerm := os.FileMode(0o755)
+	if perm&0o077 == 0 {
+		dirPerm = 0o700
+	}
+	s.mu.Lock()
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("save snapshot: marshal: %w", err)
+	}
+	// Result is ignored: a non-nil error means the data did not land; a
+	// nil error with !Durable only means the parent-dir fsync was skipped
+	// or failed (already logged at Warn by atomicfile), not a write loss.
+	_, err = atomicfile.WriteFile(ctx, destPath, data,
+		atomicfile.WithMode(perm), atomicfile.WithMkdirMode(dirPerm))
+	s.mu.Unlock()
+	if err != nil {
 		return fmt.Errorf("save snapshot: %w", err)
 	}
 	s.cache.Invalidate(date)
@@ -240,9 +260,12 @@ func (s *FS) Prune(ctx context.Context, retentionDays int) (int, error) {
 
 // CleanupStaleTmp removes leftover temp files left by an interrupted Save
 // (a crash between temp-write and rename). Delegates to atomicfile, which
-// matches the temp scheme SaveJSON uses, so the two stay coupled.
+// matches the temp scheme WriteFile uses (.atomicfile-<digits>.tmp), so the
+// two stay coupled.
 func (s *FS) CleanupStaleTmp(_ context.Context) error {
-	atomicfile.CleanupStaleTemps(s.dir, time.Hour)
+	if _, err := atomicfile.CleanupStaleTemps(s.dir, time.Hour); err != nil {
+		return fmt.Errorf("cleanup stale temps: %w", err)
+	}
 	return nil
 }
 
