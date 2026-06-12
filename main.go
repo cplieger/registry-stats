@@ -78,7 +78,7 @@ func main() {
 	snapStore := store.NewFS(cfg.DataDir, storeOpts...)
 
 	// Sweep stale atomicfile temp files (.atomicfile-*.tmp) left behind by a
-	// previous crashed run. store.FS.Save persists via atomicfile.SaveJSON
+	// previous crashed run. store.FS.Save persists via atomicfile.WriteFile
 	// (temp + fsync + rename), so a SIGKILL between the temp write and the
 	// rename leaks a temp file; ListDates skips them but they accumulate
 	// otherwise.
