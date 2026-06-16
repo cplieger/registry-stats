@@ -11,10 +11,9 @@ services:
       GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
       LOG_LEVEL: "info"
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
-      RETENTION_DAYS: "90"  # 0 = keep forever
 
     ports:
       - "9100:9100"
 
-    volumes:
-      - "/opt/appdata/registry-stats:/data"  # daily JSON snapshots
+    tmpfs:
+      - "/tmp:size=1m,mode=1777,noexec,nosuid,nodev"

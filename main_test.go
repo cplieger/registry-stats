@@ -29,7 +29,6 @@ func TestLogConfig(t *testing.T) {
 		DockerHubRepos: []model.RepoRef{{Owner: "a", Repo: "b"}},
 		GHCRRepos:      []model.RepoRef{{Owner: "c", Repo: "d"}},
 		PollInterval:   time.Hour,
-		RetentionDays:  30,
 	}
 	logConfig(cfg)
 }

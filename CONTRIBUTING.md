@@ -8,30 +8,27 @@ over the load-bearing patterns.
 ## Architecture
 
 `registry-stats` is a single Go binary that polls Docker Hub and GHCR on a
-schedule, writes one JSON snapshot per day to `/data`, and serves that data as
-Prometheus metrics (`/metrics`) and a JSON API (`/api/*`) on port 9100.
+schedule and exposes download-count metrics as Prometheus time series
+(`/metrics`) plus a health endpoint (`/api/health`) on port 9100. History is
+owned by the scraping backend (Mimir/Prometheus); the app itself is stateless.
 
 `main.go` is a **pure composition root** — it wires config → `httpx.Client` →
-`store.FS` → `dockerhub.Client` + `ghcr.Client` → health marker → `webapi`
-server, then runs the signal-driven lifecycle. It contains no business logic,
-globals, or type aliases; everything testable lives under `internal/`.
+`dockerhub.Client` + `ghcr.Client` → health marker → `webapi` server, then
+runs the signal-driven lifecycle. It contains no business logic, globals, or
+type aliases; everything testable lives under `internal/`.
 
 `internal/api/interfaces.go` is the composition spine. The small interfaces
-there (`Store`, `RegistrySource`, `HealthSignal`, `HTTPDoer`) are what every
-other package depends on, and what test fakes implement. Concrete types live
-in their own packages:
+there (`RegistrySource`, `HealthSignal`, `HTTPDoer`) are what every other
+package depends on, and what test fakes implement. Concrete types live in their
+own packages:
 
 - `internal/config` — env-var loading and validation (`LoadConfig`).
 - `internal/dockerhub`, `internal/ghcr` — the two `RegistrySource`
   implementations. Docker Hub uses the unauthenticated API; GHCR **scrapes
   public package HTML** (there is no official download-count API).
 - `internal/collect` — orchestrates a single collect cycle across sources.
-- `internal/store` — `store.FS` persists daily snapshots with atomic
-  temp-file + rename writes, plus an in-memory index for the read path.
-- `internal/webapi` — HTTP server, handlers, and query filtering.
-- `internal/httpx` — shared HTTP transport: retry with exponential backoff +
-  jitter, `Retry-After` parsing, and the docker.com / github.com redirect
-  allowlist. It speaks only urls/headers/bytes — no registry knowledge.
+- `internal/webapi` — HTTP server: `/metrics` (Prometheus exposition) and
+  `/api/health`.
 - `internal/metrics` — thin wrapper around `github.com/cplieger/metrics`
   holding the `registrystats_*` instances and `SetImageMetrics`.
 - `internal/model`, `internal/urlsafe`, `internal/testsupport` — domain
@@ -75,11 +72,11 @@ Linting is configured in `.golangci.yaml` (golangci-lint v2). Formatting is
 `gofumpt` (with `extra-rules`) plus `gci` import grouping; `golangci-lint run`
 reports unformatted files as issues, so run `fmt` before pushing.
 
-Fuzz targets exist in several packages (`internal/dockerhub`, `internal/ghcr`,
-`internal/httpx`, `internal/store`, `internal/webapi`). Run one with:
+Fuzz targets exist in several packages (`internal/dockerhub`, `internal/ghcr`).
+Run one with:
 
 ```sh
-go test -run='^$' -fuzz=FuzzName -fuzztime=30s ./internal/store
+go test -run='^$' -fuzz=FuzzName -fuzztime=30s ./internal/ghcr
 ```
 
 Mutation testing (`.gremlins.yaml`) runs on a central weekly schedule — you do
@@ -93,19 +90,14 @@ here.
 ## Conventions and gotchas
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
-  to the `cplieger` shared libs (`httpx`, `metrics`) and `golang.org/x/sync`;
-  `pgregory.net/rapid` is test-only. Prefer the standard library before
+  to the `cplieger` shared libs (`httpx`, `metrics`, `health`) and
+  `pgregory.net/rapid` (test-only). Prefer the standard library before
   reaching for a new dependency.
 - **`RegistrySource.Name()` must equal `Source().String()`.** Both surface the
-  same lowercase registry label — one in log k/v pairs and the JSON `registry`
-  field, the other for typed routing. They must never drift.
-- **Empty API results return `[]`, not `null`,** and timestamps are ISO 8601.
-  Handler tests assert this; keep it when adding endpoints.
+  same lowercase registry label — one in log k/v pairs, the other for typed
+  routing. They must never drift.
 - **Validate any URL path segment** built from registry data through
-  `internal/urlsafe`, and date-validate snapshot filenames before touching
-  disk — both guard against traversal and injection.
-- **Snapshot writes are atomic** (temp file + rename); stale `.tmp` files are
-  swept on startup. Don't replace this with an in-place write.
+  `internal/urlsafe` — guards against traversal and injection.
 - **Health is a file marker** (`/tmp/.healthy`), checked by the
   `registry-stats health` subcommand for the distroless healthcheck. Partial
   collect failures stay healthy as long as one repo succeeds.

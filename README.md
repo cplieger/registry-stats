@@ -14,19 +14,17 @@ Track how many times your container images are pulled — with a ready-made Graf
 
 ## What it does
 
-When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded — but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule, recording the download counts, and making the data available for dashboards and scripts.
+When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded — but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
 
 - **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped by Alloy/Prometheus into Mimir/Thanos for native Grafana dashboards
-- **JSON API** (`/api/*`) — raw data for scripts, automation, or any tool that speaks HTTP
 - Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to automatically discover and track all public repos for an owner. Wildcards are resolved on each poll cycle, so newly published images are picked up automatically.
-- Either surface can be disabled independently via environment variables (`ENABLE_METRICS`, `ENABLE_JSON_API`) to save resources.
 
 ### Why this design
 
-- **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` / `atomicfile` libraries supply retry/backoff, the health probe, Prometheus exposition, and crash-safe snapshot writes. Small, auditable supply chain.
+- **Stateless** — no on-disk persistence required. The app polls registries and exposes current counts as Prometheus metrics. Time-series history lives in your Prometheus/Mimir backend.
+- **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` libraries supply retry/backoff, the health probe, and Prometheus exposition. Small, auditable supply chain.
 - **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static` with no shell or package manager, minimising attack surface.
 - **Public repos only** — avoids credential management entirely; Docker Hub uses the unauthenticated API and GHCR counts are scraped from public package pages.
-- **Dual output (Prometheus + JSON)** — lets you choose the ingestion path that fits your stack without running two tools.
 
 ### Limitations
 
@@ -38,8 +36,8 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
   changes their page structure, scraping will break. The container
   logs a clear error with a link to open an issue when this happens.
 - **No historical backfill.** The registries only expose current totals.
-  Time-series data is built locally as snapshots accumulate. If you
-  start today, you only have data from today forward.
+  Time-series data is built by your Prometheus backend as scrapes
+  accumulate.
 
 ## Quick start
 
@@ -59,13 +57,9 @@ services:
       GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
       LOG_LEVEL: "info"
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
-      RETENTION_DAYS: "90"  # 0 = keep forever
 
     ports:
       - "9100:9100"
-
-    volumes:
-      - "/opt/appdata/registry-stats:/data"  # daily JSON snapshots
 ```
 
 ## Configuration reference
@@ -78,39 +72,18 @@ services:
 | `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
 | `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
 | `LOG_LEVEL` | - | `info` | No |
-| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve the API (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
-| `RETENTION_DAYS` | Number of days to keep snapshot files. Older snapshots are automatically deleted. Set to 0 to keep all snapshots forever | `90` | No |
+| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
 | `ENABLE_METRICS` | Enable Prometheus metrics endpoint | `true` | No |
-| `ENABLE_JSON_API` | Enable JSON API and daily snapshot files | `true` | No |
-
-### Volumes
-
-| Mount | Description |
-|-------|-------------|
-| `/data` | Snapshot storage directory. Contains one JSON file per day (e.g. `2025-01-15.json`) within the configured retention period. Size is minimal — typically under 2 MB for 90 days of data. |
 
 ### Ports
 
 | Port | Description |
 |------|-------------|
-| `9100` | HTTP API for Grafana and other consumers |
+| `9100` | HTTP server (Prometheus metrics + health endpoint) |
 
 ## API reference
 
-The HTTP API serves JSON on port 9100. All endpoints return `[]`
-(not `null`) for empty results and use ISO 8601 timestamps.
-
-### Filtering
-
-All data endpoints support these query parameters:
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `registry` | Filter by registry (`dockerhub` or `ghcr`) | `?registry=dockerhub` |
-| `repo` | Filter by package name | `?repo=myuser/myapp` |
-
-Omitting a filter returns all data. Multiple repos can be
-comma-separated or passed as repeated parameters.
+The HTTP server listens on port 9100.
 
 ### Endpoints
 
@@ -133,84 +106,6 @@ Prometheus text format metrics. Includes:
 - `process_goroutines`, `process_heap_bytes`, `process_uptime_seconds` — runtime metrics
 
 Disabled when `ENABLE_METRICS=false`.
-
-#### `GET /api/summary`
-
-Current snapshot overview — one row per package per registry.
-
-```json
-[
-  {"registry":"dockerhub","name":"myuser/myapp","pull_count":1234,"tag_count":5},
-  {"registry":"ghcr","name":"myuser/myapp","pull_count":567,"tag_count":0}
-]
-```
-
-#### `GET /api/pulls`
-
-Cumulative pull counts over time — one row per package per day.
-When both registries track the same package, their counts are
-merged (summed) per day.
-
-```json
-[
-  {"timestamp":"2025-01-15T00:00:00Z","repo":"myuser/myapp","pull_count":1801}
-]
-```
-
-#### `GET /api/pulls/daily`
-
-Daily download deltas — the difference in pull counts between
-consecutive days. Counter resets are clamped to zero. Missing
-days (transient scrape failures) are smoothed by dividing the
-delta across the gap, so a one-day outage doesn't show as a
-spike the day after.
-
-When a repo is present in both registries and one scrape
-transiently fails, the missing registry's value is carried
-forward from the last successful day so the merged daily delta
-reflects only the real per-registry change.
-
-The first day a repo appears in the retained snapshot window
-reports `daily_pulls: 0` (no previous day to compare) and
-carries a `first_seen: true` flag so dashboards can annotate it
-rather than misread the zero as a drop in activity.
-
-```json
-[
-  {"timestamp":"2025-01-15T00:00:00Z","repo":"myuser/myapp","daily_pulls":0,"first_seen":true},
-  {"timestamp":"2025-01-16T00:00:00Z","repo":"myuser/myapp","daily_pulls":42}
-]
-```
-
-#### `GET /api/snapshot`
-
-Raw snapshot for debugging. Returns the full snapshot file including
-all Docker Hub tag metadata and GHCR download counts. Accepts
-`?date=YYYY-MM-DD` to fetch a specific day (defaults to the most
-recent snapshot).
-
-### Using without Grafana
-
-The API returns standard JSON that any HTTP client, dashboard tool,
-or script can consume. Examples:
-
-```bash
-# Total downloads across all repos
-curl -s http://localhost:9100/api/summary | jq '[.[].pull_count] | add'
-
-# Daily deltas for a specific repo
-curl -s 'http://localhost:9100/api/pulls/daily?repo=myuser/myapp' | jq .
-
-# Docker Hub repos only
-curl -s 'http://localhost:9100/api/summary?registry=dockerhub' | jq .
-
-# Export raw snapshot for backup or external processing
-curl -s http://localhost:9100/api/snapshot > backup.json
-```
-
-For periodic reporting, point a cron job at `/api/summary` and pipe
-the output to your notification system, spreadsheet, or monitoring
-tool.
 
 ## Grafana integration
 
@@ -250,13 +145,9 @@ scrape_configs:
 The dashboard shows cumulative downloads, daily deltas, package
 overview, and tracked package count — all via standard PromQL.
 
-To save disk I/O, set `ENABLE_JSON_API=false` once the Prometheus
-path is confirmed working. This stops writing daily JSON snapshot
-files to disk.
-
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. After each successful collection cycle the main process creates this file; if all configured registries fail or the snapshot cannot be written, the file is removed. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. On startup the container collects immediately — if both registries are unreachable on first boot it starts unhealthy and recovers automatically on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. After each successful collection cycle the main process creates this file; if all configured registries fail, the file is removed. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. On startup the container collects immediately — if both registries are unreachable on first boot it starts unhealthy and recovers automatically on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 
@@ -272,11 +163,11 @@ The container includes a built-in Docker healthcheck using a marker file at `/tm
 | [semgrep](https://semgrep.dev/) | 1 info (false positive) |
 | [hadolint](https://github.com/hadolint/hadolint) | Clean |
 
-Read-only JSON API designed for internal Grafana consumption.
+Prometheus metrics endpoint designed for internal scraping.
 No authentication required (standard for internal metrics APIs).
 Minimal dependencies (no non-`cplieger` runtime deps beyond
 `golang.org/x/sync`; uses the `cplieger` `httpx` / `health` /
-`metrics` / `atomicfile` libraries). Runs as `nonroot` on a distroless base
+`metrics` libraries). Runs as `nonroot` on a distroless base
 image with no shell. The HTTP client follows redirects only
 within a host allowlist (`httpx.DockerGitHubRedirectPolicy`:
 `docker.com` / `github.com` / `githubusercontent.com`, 5-hop
@@ -286,16 +177,12 @@ registries legitimately redirect to their own CDNs/blob
 stores).
 
 **Details for advanced users:** URL path segments validated via
-`isSafeURLSegment` (rejects `/%\?#@:`). Snapshot filenames are
-date-format-validated before disk access (prevents path
-traversal). Response bodies capped via `io.LimitReader` (10 MB
-JSON, 4 MB HTML). HTTP server sets all five timeouts. Atomic
-writes (temp file + rename) prevent snapshot corruption; stale
-temp files from interrupted writes are swept on startup.
-Retry-After response headers are honoured on 429/503 responses
-(capped at the configured retry backoff ceiling). Semgrep flags
-`math/rand/v2` usage, which is correct for jitter timing
-(not crypto).
+`isSafeURLSegment` (rejects `/%\?#@:`). Response bodies capped
+via `io.LimitReader` (10 MB JSON, 4 MB HTML). HTTP server sets
+all five timeouts. Retry-After response headers are honoured on
+429/503 responses (capped at the configured retry backoff
+ceiling). Semgrep flags `math/rand/v2` usage, which is correct
+for jitter timing (not crypto).
 
 ## Dependencies
 

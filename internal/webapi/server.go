@@ -12,11 +12,9 @@ import (
 	"github.com/cplieger/registry-stats/internal/metrics"
 )
 
-// Default HTTP server timeouts. Chosen for a LAN-only Grafana
-// Infinity datasource: Grafana issues short bursts of requests, so
+// Default HTTP server timeouts. Chosen for a LAN-only setup:
 // per-request caps of a few seconds are comfortably above P99 and
-// below any reverse-proxy timeout. Mirrors the pre-refactor values in
-// main.go's startServer.
+// below any reverse-proxy timeout.
 const (
 	defaultReadHeaderTimeout = 5 * time.Second
 	defaultReadTimeout       = 10 * time.Second
@@ -26,15 +24,12 @@ const (
 )
 
 // Deps is the injection surface for the webapi package. Concrete
-// implementations live elsewhere: Store is *store.FS from
-// internal/store, Health is *health.Marker. A nil Logger
-// falls back to slog.Default.
+// implementations live elsewhere: Health is *health.Marker. A nil
+// Logger falls back to slog.Default.
 type Deps struct {
-	Store         api.Store
 	Health        api.HealthSignal
 	Logger        *slog.Logger
 	ListenAddr    string
-	EnableJSONAPI bool
 	EnableMetrics bool
 }
 
@@ -52,15 +47,9 @@ func New(d Deps) *http.Server {
 		addr = ":9100"
 	}
 
-	h := newHandlers(d.Store, d.Health, logger)
+	h := newHandlers(d.Health, logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", h.health)
-	if d.EnableJSONAPI {
-		mux.HandleFunc("GET /api/snapshot", h.snapshot)
-		mux.HandleFunc("GET /api/pulls", h.pulls)
-		mux.HandleFunc("GET /api/pulls/daily", h.pullsDaily)
-		mux.HandleFunc("GET /api/summary", h.summary)
-	}
 	if d.EnableMetrics {
 		mux.HandleFunc("GET /metrics", metrics.Handler())
 	}

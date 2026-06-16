@@ -1,21 +1,14 @@
 package main
 
-// registry-stats collects container image statistics from Docker Hub and GHCR,
-// stores daily snapshots as flat JSON files, and serves them via a tiny HTTP API
-// for Grafana (Infinity datasource) to query directly.
-//
-// Docker Hub: pull count, tag count, per-tag metadata via unauthenticated API.
-// GHCR: download count scraped from public package pages (no API key needed).
-//
-// Data is stored as /data/YYYY-MM-DD.json (one file per day, overwritten each poll).
-// The HTTP API serves current + historical data for Grafana dashboards.
+// registry-stats polls Docker Hub and GHCR on a schedule, records
+// download counts, and exposes them as Prometheus metrics on port 9100.
 //
 // main.go is a pure composition root: it wires config → *http.Client
-// (with httpx.DockerGitHubRedirectPolicy) → store.FS → dockerhub.Client +
+// (with httpx.DockerGitHubRedirectPolicy) → dockerhub.Client +
 // ghcr.Client → health.Marker → webapi.Server, threads those concrete
-// values through runCollect / runScheduled / pruneOnce, and handles the
-// signal-driven lifecycle. All business logic lives in internal/*; this
-// file contains no shims, globals, or type aliases.
+// values through runCollect, and handles the signal-driven lifecycle.
+// All business logic lives in internal/*; this file contains no shims,
+// globals, or type aliases.
 
 import (
 	"context"
@@ -37,7 +30,6 @@ import (
 	"github.com/cplieger/registry-stats/internal/ghcr"
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/store"
 	"github.com/cplieger/registry-stats/internal/webapi"
 )
 
@@ -71,20 +63,6 @@ func main() {
 		Timeout:       30 * time.Second,
 		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
 	}
-	var storeOpts []store.Option
-	if !cfg.EnableJSONAPI {
-		storeOpts = append(storeOpts, store.WithDisableWrite())
-	}
-	snapStore := store.NewFS(cfg.DataDir, storeOpts...)
-
-	// Sweep stale atomicfile temp files (.atomicfile-*.tmp) left behind by a
-	// previous crashed run. store.FS.Save persists via atomicfile.WriteFile
-	// (temp + fsync + rename), so a SIGKILL between the temp write and the
-	// rename leaks a temp file; ListDates skips them but they accumulate
-	// otherwise.
-	if err := snapStore.CleanupStaleTmp(ctx); err != nil {
-		slog.Warn("cleanup stale tmp failed", "error", err)
-	}
 
 	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
 	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
@@ -94,11 +72,9 @@ func main() {
 	sources := []api.RegistrySource{dh, gh}
 
 	srv := webapi.New(webapi.Deps{
-		Store:         snapStore,
 		Health:        marker,
 		Logger:        slog.Default(),
 		ListenAddr:    cfg.ListenAddr,
-		EnableJSONAPI: cfg.EnableJSONAPI,
 		EnableMetrics: cfg.EnableMetrics,
 	})
 	srvErr := webapi.Start(srv, slog.Default())
@@ -114,8 +90,7 @@ func main() {
 	var initDone sync.WaitGroup
 	initDone.Go(func() {
 		defer recoverAndMarkUnhealthy(marker, "initial collect")
-		marker.Set(runCollect(ctx, &cfg, snapStore, sources))
-		pruneOnce(ctx, snapStore, cfg.RetentionDays)
+		marker.Set(runCollect(ctx, &cfg, sources))
 	})
 
 	if cfg.PollInterval == 0 {
@@ -130,7 +105,7 @@ func main() {
 		}
 	} else {
 		slog.Info("scheduled mode", "interval", cfg.PollInterval, "jitter", "±10%")
-		runScheduled(ctx, &cfg, snapStore, marker, sources, srvErr, stop)
+		runScheduled(ctx, &cfg, marker, sources, srvErr, stop)
 	}
 
 	// Wait (bounded) for any in-flight initial collect before shutting down
@@ -145,24 +120,22 @@ func main() {
 
 // runCollect executes a single collection cycle against the shared
 // composition-root dependencies and returns the boolean healthcheck
-// signal: true iff collect.Run persisted a non-empty snapshot.
+// signal: true iff collect.Run produced a non-empty snapshot.
 //
-// Return semantics (unchanged from the pre-refactor main.go collect):
+// Return semantics:
 //
-//	true  — snapshot persisted (fully healthy or partial-success with
-//	        at least one registry's data).
-//	false — nothing saved: empty-snapshot guard fired, all collections
-//	        failed, or Save itself errored.
+//	true  — snapshot collected successfully (fully healthy or partial-
+//	        success with at least one registry's data).
+//	false — nothing collected: empty-snapshot guard fired or all
+//	        collections failed.
 func runCollect(
 	ctx context.Context,
 	cfg *configpkg.Config,
-	fs api.Store,
 	sources []api.RegistrySource,
 ) bool {
 	start := time.Now()
 	snap, _, err := collectpkg.Run(ctx, collectpkg.Options{
 		Sources: sources,
-		Store:   fs,
 		Logger:  slog.Default(),
 		Now:     time.Now,
 		RefsFor: func(name string) []model.RepoRef {
@@ -226,16 +199,11 @@ func ownerForRepo(refs []model.RepoRef, repo string) string {
 	return ""
 }
 
-// runScheduled runs collection + retention prune on each tick of a
-// PollInterval-sized timer with ±10% jitter, until ctx is cancelled.
-// fs, marker, dh, and gh are the composition-root values wired in
-// main(); runScheduled does not construct or cache any of them itself.
-// srvErr propagates fatal HTTP server errors; stop cancels the parent
-// context so the process exits cleanly.
+// runScheduled runs collection on each tick of a PollInterval-sized
+// timer with ±10% jitter, until ctx is cancelled.
 func runScheduled(
 	ctx context.Context,
 	cfg *configpkg.Config,
-	fs api.Store,
 	marker api.HealthSignal,
 	sources []api.RegistrySource,
 	srvErr <-chan error,
@@ -264,25 +232,9 @@ func runScheduled(
 		case <-timer.C:
 			func() {
 				defer recoverAndMarkUnhealthy(marker, "scheduled collect")
-				marker.Set(runCollect(ctx, cfg, fs, sources))
-				pruneOnce(ctx, fs, cfg.RetentionDays)
+				marker.Set(runCollect(ctx, cfg, sources))
 			}()
 		}
-	}
-}
-
-// pruneOnce wraps store.FS.Prune with the legacy log shape:
-// "pruned old snapshots" on success, "failed to list dates for
-// pruning" on error. Extracted so both the initial-collect goroutine
-// and runScheduled's per-tick block call through a single code path.
-func pruneOnce(ctx context.Context, fs api.Store, retentionDays int) {
-	n, err := fs.Prune(ctx, retentionDays)
-	if err != nil {
-		slog.Error("failed to list dates for pruning", "error", err)
-		return
-	}
-	if n > 0 {
-		slog.Info("pruned old snapshots", "count", n, "retention_days", retentionDays)
 	}
 }
 
@@ -334,8 +286,7 @@ func logConfig(cfg *configpkg.Config) {
 	slog.Info("configuration loaded",
 		"docker_hub_refs", len(cfg.DockerHubRepos),
 		"ghcr_refs", len(cfg.GHCRRepos),
-		"poll_interval", cfg.PollInterval,
-		"retention_days", cfg.RetentionDays)
+		"poll_interval", cfg.PollInterval)
 	if len(cfg.DockerHubRepos) == 0 && len(cfg.GHCRRepos) == 0 {
 		slog.Error("no repos configured; healthcheck will fail after first collect",
 			"hint", "set DOCKERHUB_REPOS and/or GHCR_REPOS")
