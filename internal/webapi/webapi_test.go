@@ -2,20 +2,9 @@ package webapi
 
 import (
 	"sync/atomic"
-	"testing"
 
 	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/testsupport"
 )
-
-// TestMemStore_StoreContract verifies that the in-memory fake satisfies
-// the same api.Store contract as store.FS, preventing silent drift.
-
-func TestMemStore_StoreContract(t *testing.T) {
-	testsupport.RunStoreContract(t, func(t *testing.T) api.Store {
-		return testsupport.NewMemStore()
-	})
-}
 
 // fakeHealth is an in-memory api.HealthSignal for handler tests.
 
@@ -30,6 +19,3 @@ var _ api.HealthSignal = (*fakeHealth)(nil)
 func (f *fakeHealth) Set(ok bool) { f.healthy.Store(ok) }
 
 func (f *fakeHealth) Healthy() bool { return f.healthy.Load() }
-
-// fixedSnapshot builds a deterministic snapshot with one DockerHub
-// repo and one GHCR package. Callers tweak the counts per test.

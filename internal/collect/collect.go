@@ -1,28 +1,18 @@
 // Package collect is the registry-stats collection orchestrator. It
 // loops over a set of api.RegistrySource implementations, assembles a
 // single *model.Snapshot from their per-source []model.RegistryEntry
-// outputs, persists it via api.Store, and returns a healthy flag plus
-// a "saved" flag so the caller can flip its healthcheck marker
-// accordingly.
+// outputs, and returns a healthy flag so the caller can flip its
+// healthcheck marker accordingly.
 //
 // The orchestrator is deliberately tiny: each source owns its own
 // *http.Client, retry options, logging, and pacing. Run's job is the
 // orchestration layer above that — route each source's entries back
-// into the right on-disk slice, honor the "don't save empty snapshots"
-// guard, and surface partial-degradation warnings without failing the
-// whole cycle.
-//
-// The on-disk contract (model.Snapshot.DockerHub: []RepoStats,
-// model.Snapshot.GHCR: []GhcrStats) is unchanged. Sources carry a
-// stable Name() that the orchestrator matches ("dockerhub", "ghcr") to
-// route entries back into each typed slice — this is the reverse of
-// the per-source mapping that turns typed results into the
-// registry-agnostic model.RegistryEntry shape.
+// into the right typed slice, and surface partial-degradation warnings
+// without failing the whole cycle.
 package collect
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -33,12 +23,10 @@ import (
 // Options configures a single Run. Sources are the registry clients
 // that actually fetch data; RefsFor maps each source's Name() to the
 // []model.RepoRef it should fetch, allowing the orchestrator to stay
-// agnostic of the per-registry config slice layout. Store persists
-// the assembled snapshot; a nil Logger falls back to slog.Default.
-// Now is the clock used for the snapshot timestamp (tests inject a
-// deterministic clock; production passes time.Now).
+// agnostic of the per-registry config slice layout. A nil Logger falls
+// back to slog.Default. Now is the clock used for the snapshot timestamp
+// (tests inject a deterministic clock; production passes time.Now).
 type Options struct {
-	Store   api.Store
 	Logger  *slog.Logger
 	Now     func() time.Time
 	RefsFor func(name string) []model.RepoRef
@@ -48,8 +36,7 @@ type Options struct {
 // Run orchestrates a single collection cycle. It invokes each source's
 // Collect (skipping sources whose ref slice is empty so empty-config
 // paths stay zero-cost), assembles the result into a *model.Snapshot,
-// persists the snapshot via Store when at least one source produced
-// data, and returns the assembled snapshot plus a healthy flag.
+// and returns the assembled snapshot plus a healthy flag.
 //
 // Return contract:
 //   - (snap, true, nil)  — healthy cycle: all configured sources met
@@ -114,16 +101,6 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 			snap.DockerHub = entriesToDockerHub(entries)
 		case model.SourceGHCR:
 			snap.GHCR = entriesToGHCR(entries)
-		default:
-			// Unknown source types fall through with a warn log.
-			// Today this branch is unreachable because only dockerhub
-			// and ghcr exist; it exists so that adding a new source
-			// doesn't silently drop its entries on the floor — they'll
-			// at least surface in the log below. Name() is logged
-			// (not Source()) because the human-readable string is
-			// what's useful in an alert.
-			logger.Warn("collect: unknown source; entries dropped",
-				"source", src.Name(), "entries", len(entries))
 		}
 	}
 
@@ -136,11 +113,6 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 			logger.Error("all collections failed, skipping snapshot save")
 		}
 		return snap, false, nil
-	}
-
-	if saveErr := opts.Store.Save(ctx, snap); saveErr != nil {
-		logger.Error("failed to save snapshot", "error", saveErr)
-		return nil, false, fmt.Errorf("save snapshot: %w", saveErr)
 	}
 
 	if degraded {
@@ -202,9 +174,7 @@ func entriesToDockerHub(entries []model.RegistryEntry) []model.RepoStats {
 // populates Name and DownloadCount; this helper copies them across.
 // Zero-download entries are NOT filtered here — ghcr.Client already
 // skips scrape failures so any entry that reaches this mapper is a
-// real observed count. Filtering zero-downloads only happens at the
-// handler layer (forEachSummaryEntry) to preserve the legacy daily-
-// delta semantics.
+// real observed count.
 func entriesToGHCR(entries []model.RegistryEntry) []model.GhcrStats {
 	if len(entries) == 0 {
 		return nil

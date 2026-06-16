@@ -8,13 +8,9 @@ import (
 	"pgregory.net/rapid"
 )
 
-// TestSnapshotJSONRoundTripShape pins the on-disk JSON field names for the
-// model types. Full round-trip tests (with values, Tags/Images, property-
-// based rapid coverage) live in main_test.go where the seedSnapshot helper
-// is available — those tests can migrate here once seedSnapshot moves to
-// internal/store in step 2. This minimal test just catches accidental
-// struct-tag drift (e.g. renaming "pull_count" to "pullCount") without
-// pulling in handler-layer helpers.
+// TestSnapshotJSONRoundTripShape pins the JSON field names for the
+// model types. This minimal test catches accidental struct-tag drift
+// (e.g. renaming "pull_count" to "pullCount").
 func TestSnapshotJSONRoundTripShape(t *testing.T) {
 	snap := Snapshot{
 		Timestamp: time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC),

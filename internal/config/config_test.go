@@ -47,9 +47,7 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "owner1/app1,owner2/app2")
 	t.Setenv("GHCR_REPOS", "gh1/pkg1,gh2/pkg2,gh3/pkg3")
 	t.Setenv("POLL_INTERVAL_HOURS", "12")
-	t.Setenv("RETENTION_DAYS", "30")
 	t.Setenv("LISTEN_ADDR", ":8080")
-	t.Setenv("DATA_DIR", "/custom/data")
 	t.Setenv("LOG_LEVEL", "debug")
 
 	cfg := LoadConfig()
@@ -66,14 +64,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.PollInterval != 12*time.Hour {
 		t.Errorf("PollInterval = %v, want 12h", cfg.PollInterval)
 	}
-	if cfg.RetentionDays != 30 {
-		t.Errorf("RetentionDays = %d, want 30", cfg.RetentionDays)
-	}
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, ":8080")
-	}
-	if cfg.DataDir != "/custom/data" {
-		t.Errorf("DataDir = %q, want %q", cfg.DataDir, "/custom/data")
 	}
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelDebug)
@@ -81,7 +73,7 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
-	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "RETENTION_DAYS", "LISTEN_ADDR", "DATA_DIR", "LOG_LEVEL"} {
+	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
 	}
 	cfg := LoadConfig()
@@ -89,14 +81,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h", cfg.PollInterval)
 	}
-	if cfg.RetentionDays != 90 {
-		t.Errorf("RetentionDays = %d, want 90", cfg.RetentionDays)
-	}
 	if cfg.ListenAddr != DefaultListenAddr {
 		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
-	}
-	if cfg.DataDir != DefaultDataDir {
-		t.Errorf("DataDir = %q, want %q", cfg.DataDir, DefaultDataDir)
 	}
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelInfo)
@@ -105,27 +91,19 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 func TestLoadConfigInvalidNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
-	t.Setenv("RETENTION_DAYS", "also-bad")
 	cfg := LoadConfig()
 
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h fallback", cfg.PollInterval)
 	}
-	if cfg.RetentionDays != 90 {
-		t.Errorf("RetentionDays = %d, want 90 fallback", cfg.RetentionDays)
-	}
 }
 
 func TestLoadConfigNegativeNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "-5")
-	t.Setenv("RETENTION_DAYS", "-10")
 	cfg := LoadConfig()
 
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h fallback for negative", cfg.PollInterval)
-	}
-	if cfg.RetentionDays != 90 {
-		t.Errorf("RetentionDays = %d, want 90 fallback for negative", cfg.RetentionDays)
 	}
 }
 
@@ -133,7 +111,6 @@ func TestLoadConfigWildcard(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "cplieger/*")
 	t.Setenv("GHCR_REPOS", "cplieger/*,cplieger/fclones")
 	t.Setenv("POLL_INTERVAL_HOURS", "1")
-	t.Setenv("RETENTION_DAYS", "90")
 
 	cfg := LoadConfig()
 
@@ -145,12 +122,10 @@ func TestLoadConfigWildcard(t *testing.T) {
 	}
 }
 
-// Kills CONDITIONALS_BOUNDARY at the clamp sites — verifies that 0 is a
-// valid value for RETENTION_DAYS and POLL_INTERVAL_HOURS (not treated as
-// negative).
+// Kills CONDITIONALS_BOUNDARY at the clamp site — verifies that 0 is a
+// valid value for POLL_INTERVAL_HOURS (not treated as negative).
 func TestLoadConfigZeroValues(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "0")
-	t.Setenv("RETENTION_DAYS", "0")
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 
@@ -159,27 +134,10 @@ func TestLoadConfigZeroValues(t *testing.T) {
 	if cfg.PollInterval != 0 {
 		t.Errorf("PollInterval = %v, want 0 (one-shot mode)", cfg.PollInterval)
 	}
-	if cfg.RetentionDays != 0 {
-		t.Errorf("RetentionDays = %d, want 0 (keep forever)", cfg.RetentionDays)
-	}
-}
-
-func TestLoadConfig_retention_clamped_to_max(t *testing.T) {
-	t.Setenv("RETENTION_DAYS", "99999")
-	t.Setenv("POLL_INTERVAL_HOURS", "1")
-	t.Setenv("DOCKERHUB_REPOS", "")
-	t.Setenv("GHCR_REPOS", "")
-
-	cfg := LoadConfig()
-	const maxRetentionDays = 365 * 10
-	if cfg.RetentionDays != maxRetentionDays {
-		t.Errorf("RetentionDays = %d, want %d (clamped)", cfg.RetentionDays, maxRetentionDays)
-	}
 }
 
 func TestLoadConfig_poll_interval_clamped_to_max(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "99999")
-	t.Setenv("RETENTION_DAYS", "90")
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 
