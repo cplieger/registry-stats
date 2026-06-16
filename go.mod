@@ -13,4 +13,4 @@ require github.com/cplieger/health v1.1.3
 
 require github.com/cplieger/httpx v1.0.7
 
-require github.com/cplieger/atomicfile/v2 v2.0.2
+require github.com/cplieger/atomicfile/v2 v2.0.3
