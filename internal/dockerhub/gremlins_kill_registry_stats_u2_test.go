@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -18,8 +19,8 @@ import (
 // gk_registry_stats_u2_capHandler records slog message texts so a test
 // can assert whether a specific Client log line was (or was not) emitted.
 type gk_registry_stats_u2_capHandler struct {
-	mu   sync.Mutex
 	msgs []string
+	mu   sync.Mutex
 }
 
 func (h *gk_registry_stats_u2_capHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -37,12 +38,7 @@ func (h *gk_registry_stats_u2_capHandler) WithGroup(string) slog.Handler      { 
 func (h *gk_registry_stats_u2_capHandler) gk_registry_stats_u2_saw(msg string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, m := range h.msgs {
-		if m == msg {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.msgs, msg)
 }
 
 // gk_registry_stats_u2_shortRetry keeps retry backoff at 1ms so the
