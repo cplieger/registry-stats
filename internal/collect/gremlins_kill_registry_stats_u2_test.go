@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 
@@ -15,8 +16,8 @@ import (
 // not) emitted. The Run orchestrator emits its severe-degradation signal
 // only as a log line, so capturing it is the only observable.
 type gk_registry_stats_u2_capHandler struct {
-	mu   sync.Mutex
 	msgs []string
+	mu   sync.Mutex
 }
 
 func (h *gk_registry_stats_u2_capHandler) Enabled(context.Context, slog.Level) bool { return true }
@@ -34,20 +35,15 @@ func (h *gk_registry_stats_u2_capHandler) WithGroup(string) slog.Handler      { 
 func (h *gk_registry_stats_u2_capHandler) gk_registry_stats_u2_saw(msg string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, m := range h.msgs {
-		if m == msg {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.msgs, msg)
 }
 
 // gk_registry_stats_u2_fakeSource is a canned api.RegistrySource. Its
 // Collect always reports unhealthy so Run enters the `if !srcHealthy`
 // block that guards the line-92 warn condition.
 type gk_registry_stats_u2_fakeSource struct {
-	source  model.RegistrySource
 	entries []model.RegistryEntry
+	source  model.RegistrySource
 }
 
 func (f *gk_registry_stats_u2_fakeSource) Name() string                 { return f.source.String() }
@@ -82,13 +78,13 @@ func TestRun_severe_degradation_warn_condition(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		source   model.RegistrySource
 		entries  []model.RegistryEntry
+		source   model.RegistrySource
 		wantWarn bool
 	}{
-		{"dockerhub_unhealthy_with_entries_warns", model.SourceDockerHub, dhEntries, true},
-		{"dockerhub_unhealthy_zero_entries_silent", model.SourceDockerHub, nil, false},
-		{"ghcr_unhealthy_with_entries_silent", model.SourceGHCR, ghEntries, false},
+		{name: "dockerhub_unhealthy_with_entries_warns", source: model.SourceDockerHub, entries: dhEntries, wantWarn: true},
+		{name: "dockerhub_unhealthy_zero_entries_silent", source: model.SourceDockerHub, entries: nil, wantWarn: false},
+		{name: "ghcr_unhealthy_with_entries_silent", source: model.SourceGHCR, entries: ghEntries, wantWarn: false},
 	}
 
 	for _, tt := range tests {

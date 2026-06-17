@@ -167,9 +167,7 @@ func ParseDownloads(html string) (int64, error) {
 		return 0, ErrHTMLFormatChanged
 	}
 	rest := html[markerIdx:]
-	if len(rest) > maxTitleDistance {
-		rest = rest[:maxTitleDistance]
-	}
+	rest = rest[:min(len(rest), maxTitleDistance)]
 	titleIdx := strings.Index(rest, `title="`)
 	if titleIdx == -1 {
 		return 0, ErrHTMLFormatChanged
