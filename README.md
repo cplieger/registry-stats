@@ -66,19 +66,19 @@ services:
 
 ### Environment variables
 
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `TZ` | Container timezone | `Europe/Paris` | No |
-| `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
-| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | `` | No |
-| `LOG_LEVEL` | - | `info` | No |
-| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
-| `ENABLE_METRICS` | Enable Prometheus metrics endpoint | `true` | No |
+| Variable              | Description                                                                                                                                                                                              | Default        | Required |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | -------- |
+| `TZ`                  | Container timezone                                                                                                                                                                                       | `Europe/Paris` | No       |
+| `DOCKERHUB_REPOS`     | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`)       | ``             | No       |
+| `GHCR_REPOS`          | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | ``             | No       |
+| `LOG_LEVEL`           | -                                                                                                                                                                                                        | `info`         | No       |
+| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images                   | `1`            | No       |
+| `ENABLE_METRICS`      | Enable Prometheus metrics endpoint                                                                                                                                                                       | `true`         | No       |
 
 ### Ports
 
-| Port | Description |
-|------|-------------|
+| Port   | Description                                        |
+| ------ | -------------------------------------------------- |
 | `9100` | HTTP server (Prometheus metrics + health endpoint) |
 
 ## API reference
@@ -153,15 +153,15 @@ The container includes a built-in Docker healthcheck using a marker file at `/tm
 
 **No vulnerabilities found.** All scans clean across the full scanner battery.
 
-| Tool | Result |
-|------|--------|
-| [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) | No vulnerabilities in call graph |
-| [golangci-lint](https://golangci-lint.run/) (gosec) | 0 issues |
-| [trivy](https://trivy.dev/) | 0 vulnerabilities (distroless base) |
-| [grype](https://github.com/anchore/grype) | 0 vulnerabilities |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected |
-| [semgrep](https://semgrep.dev/) | 1 info (false positive) |
-| [hadolint](https://github.com/hadolint/hadolint) | Clean |
+| Tool                                                                | Result                              |
+| ------------------------------------------------------------------- | ----------------------------------- |
+| [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) | No vulnerabilities in call graph    |
+| [golangci-lint](https://golangci-lint.run/) (gosec)                 | 0 issues                            |
+| [trivy](https://trivy.dev/)                                         | 0 vulnerabilities (distroless base) |
+| [grype](https://github.com/anchore/grype)                           | 0 vulnerabilities                   |
+| [gitleaks](https://github.com/gitleaks/gitleaks)                    | No secrets detected                 |
+| [semgrep](https://semgrep.dev/)                                     | 1 info (false positive)             |
+| [hadolint](https://github.com/hadolint/hadolint)                    | Clean                               |
 
 Prometheus metrics endpoint designed for internal scraping.
 No authentication required (standard for internal metrics APIs).
@@ -188,12 +188,12 @@ for jitter timing (not crypto).
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Source |
-|------------|--------|
-| golang | [Go](https://hub.docker.com/_/golang) |
-| Distroless static | [Distroless](https://github.com/GoogleContainerTools/distroless) |
-| golang.org/x/sync | [Go stdlib](https://pkg.go.dev/golang.org/x/sync) |
-| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
+| Dependency         | Source                                                           |
+| ------------------ | ---------------------------------------------------------------- |
+| golang             | [Go](https://hub.docker.com/_/golang)                            |
+| Distroless static  | [Distroless](https://github.com/GoogleContainerTools/distroless) |
+| golang.org/x/sync  | [Go stdlib](https://pkg.go.dev/golang.org/x/sync)                |
+| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid)              |
 
 ## Credits
 
