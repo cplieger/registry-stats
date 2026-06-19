@@ -154,9 +154,6 @@ func runCollect(
 		metrics.CollectsTotal.Inc(src.Name())
 	}
 	if err != nil {
-		for _, src := range sources {
-			metrics.CollectErrors.Inc(src.Name())
-		}
 		return false
 	}
 	if snap == nil {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/internal/api"
+	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 )
 
@@ -94,6 +95,7 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 					"succeeded", len(entries), "attempted", attempted)
 			}
 			degraded = true
+			metrics.CollectErrors.Inc(src.Name())
 		}
 
 		switch src.Source() {
