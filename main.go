@@ -1,7 +1,5 @@
-package main
-
-// registry-stats polls Docker Hub and GHCR on a schedule, records
-// download counts, and exposes them as Prometheus metrics on port 9100.
+// Package main is the entry point for registry-stats. It polls Docker Hub and GHCR on a
+// schedule, records download counts, and exposes them as Prometheus metrics on port 9100.
 //
 // main.go is a pure composition root: it wires config → *http.Client
 // (with httpx.DockerGitHubRedirectPolicy) → dockerhub.Client +
@@ -9,6 +7,7 @@ package main
 // values through runCollect, and handles the signal-driven lifecycle.
 // All business logic lives in internal/*; this file contains no shims,
 // globals, or type aliases.
+package main
 
 import (
 	"context"

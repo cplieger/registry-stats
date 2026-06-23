@@ -1,3 +1,4 @@
+// Package testsupport provides test helpers shared across registry-stats test packages.
 package testsupport
 
 import (
@@ -15,6 +16,7 @@ type RedirectTransport struct {
 	Target *httptest.Server
 }
 
+// RoundTrip rewrites the request URL to point at the configured test server, then delegates to http.DefaultTransport.
 func (rt *RedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	u := *req.URL

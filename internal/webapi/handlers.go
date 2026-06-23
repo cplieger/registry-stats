@@ -1,3 +1,4 @@
+// Package webapi implements the HTTP API server for registry-stats.
 package webapi
 
 import (
