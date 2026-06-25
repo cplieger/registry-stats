@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx"
+	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/testsupport"
@@ -599,4 +599,27 @@ func FuzzParsePackageList(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestFetchHTML_OverCap_IsFormatChanged verifies that a GHCR page larger than
+// ghcrBodyCap is surfaced as ErrHTMLFormatChanged (a markup/format signal) so
+// it feeds the majority-format-drift escalation, rather than bubbling up as a
+// generic transport error. httpx v2 returns a typed *ResponseTooLargeError on
+// overflow (v1 silently truncated).
+func TestFetchHTML_OverCap_IsFormatChanged(t *testing.T) {
+	oversize := strings.Repeat("x", ghcrBodyCap+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(oversize))
+	}))
+	defer srv.Close()
+
+	_, err := fetchHTML(t.Context(), srv.Client(), srv.URL, shortRetry())
+	if !errors.Is(err, ErrHTMLFormatChanged) {
+		t.Fatalf("fetchHTML over-cap error = %v, want ErrHTMLFormatChanged", err)
+	}
+	// The typed httpx error stays unwrappable for callers that want the limit.
+	var tooLarge *httpx.ResponseTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Errorf("error = %v, want it to wrap *httpx.ResponseTooLargeError", err)
+	}
 }

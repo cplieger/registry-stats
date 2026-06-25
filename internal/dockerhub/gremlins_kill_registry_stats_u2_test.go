@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx"
+	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/testsupport"
 )

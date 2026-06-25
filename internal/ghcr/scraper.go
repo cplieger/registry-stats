@@ -37,7 +37,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/httpx"
+	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
@@ -82,6 +82,16 @@ func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []
 	)
 	body, err := httpx.Retry(ctx, client, pageURL, htmlOpts...)
 	if err != nil {
+		// An over-cap response is a format signal, not a transport error: a
+		// GHCR page that suddenly exceeds ghcrBodyCap means the markup bloated
+		// or changed. Route it into the ErrHTMLFormatChanged path so the
+		// caller's majority-format-drift escalation catches it, while keeping
+		// the typed *ResponseTooLargeError unwrappable. (v1 silently truncated
+		// the body; httpx v2 returns the typed error.)
+		var tooLarge *httpx.ResponseTooLargeError
+		if errors.As(err, &tooLarge) {
+			return "", fmt.Errorf("%w: %w", ErrHTMLFormatChanged, err)
+		}
 		return "", err
 	}
 	return string(body), nil
