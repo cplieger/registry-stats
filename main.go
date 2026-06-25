@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/httpx"
+	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/internal/config"
