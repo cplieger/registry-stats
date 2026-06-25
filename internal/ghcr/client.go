@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/httpx"
+	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/model"
 )
