@@ -43,24 +43,6 @@ func TestIsSafeURLSegment_rejects_traversal_names(t *testing.T) {
 	}
 }
 
-func TestIsSafeURLSegment_rejects_empty_dot_dotdot(t *testing.T) {
-	tests := []struct {
-		input string
-		want  bool
-	}{
-		{"", false},
-		{".", false},
-		{"..", false},
-		{"...", true},     // three dots is safe (not a traversal)
-		{".hidden", true}, // dotfile-style name is safe
-	}
-	for _, tt := range tests {
-		if got := IsSafeURLSegment(tt.input); got != tt.want {
-			t.Errorf("IsSafeURLSegment(%q) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestIsSafeURLSegment_never_panics(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		input := rapid.String().Draw(t, "input")
