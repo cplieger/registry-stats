@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,4 +220,70 @@ func TestParseRepoRefs_output_always_safe(t *testing.T) {
 			}
 		}
 	})
+}
+
+// clampMaxPollHours mirrors the maxPollHours clamp threshold inside
+// LoadConfig (24 * 365). Referenced by the clamp-boundary tests below so
+// they assert against the exact threshold.
+const clampMaxPollHours = 24 * 365
+
+// captureClampLog redirects the global slog default to a buffer-backed
+// text handler for the test's duration and returns the buffer. LoadConfig
+// emits its clamp warning through the package-global slog, so capturing
+// the default logger is the only way to observe whether the warning
+// fired. The default is restored in cleanup.
+func captureClampLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	return buf
+}
+
+// TestLoadConfig_clamp_boundary_silent_at_exact_max verifies that a
+// POLL_INTERVAL_HOURS value exactly equal to the clamp threshold is
+// accepted as-is, with NO clamp warning. At the boundary the clamped and
+// unclamped durations are identical, so the only observable difference
+// between "clamp" and "don't clamp" is the warning: it must stay silent
+// when the input equals the maximum.
+func TestLoadConfig_clamp_boundary_silent_at_exact_max(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours))
+	buf := captureClampLog(t)
+
+	cfg := LoadConfig()
+
+	want := time.Duration(clampMaxPollHours) * time.Hour
+	if cfg.PollInterval != want {
+		t.Errorf("LoadConfig(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v",
+			clampMaxPollHours, cfg.PollInterval, want)
+	}
+	if strings.Contains(buf.String(), "POLL_INTERVAL_HOURS clamped") {
+		t.Errorf("LoadConfig at exact max %d emitted a clamp warning, want none at the boundary (log=%q)",
+			clampMaxPollHours, buf.String())
+	}
+}
+
+// TestLoadConfig_clamp_warns_one_above_max confirms the clamp branch (and
+// the log-capture mechanism) actually fire one hour above the threshold,
+// so the boundary test's "no warning" assertion is a genuine signal
+// rather than a silently-broken capture.
+func TestLoadConfig_clamp_warns_one_above_max(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
+	buf := captureClampLog(t)
+
+	cfg := LoadConfig()
+
+	want := time.Duration(clampMaxPollHours) * time.Hour
+	if cfg.PollInterval != want {
+		t.Errorf("LoadConfig(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v (clamped)",
+			clampMaxPollHours+1, cfg.PollInterval, want)
+	}
+	if !strings.Contains(buf.String(), "POLL_INTERVAL_HOURS clamped") {
+		t.Errorf("LoadConfig above max emitted no clamp warning, want one (log=%q)", buf.String())
+	}
 }

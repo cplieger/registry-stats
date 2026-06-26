@@ -1,7 +1,10 @@
 package collect_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +319,65 @@ func TestRun_defaults_logger_and_now(t *testing.T) {
 	// Timestamp should be recent (within a generous 1-minute window).
 	if time.Since(snap.Timestamp) > time.Minute {
 		t.Errorf("snap.Timestamp = %v, should be recent", snap.Timestamp)
+	}
+}
+
+// captureLogs returns a logger that writes records (Warn and above) into
+// the returned buffer, so a test can assert whether a specific log line
+// was emitted. Run surfaces its severe-degradation signal only as a log
+// line, so capturing it is the only observable.
+func captureLogs() (*slog.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})), buf
+}
+
+// TestRun_severe_degradation_warn_condition pins the truth table of the
+// orchestrator's severe-degradation warn: it fires only for an unhealthy
+// DockerHub source that still returned at least one entry. A DockerHub
+// source with zero entries, and any non-DockerHub source, must stay
+// silent even when unhealthy.
+func TestRun_severe_degradation_warn_condition(t *testing.T) {
+	const degradedMsg = "docker hub collection severely degraded"
+	dhEntries := []model.RegistryEntry{{Name: "owner/app", PullCount: 1}}
+	ghEntries := []model.RegistryEntry{{Name: "owner/pkg", DownloadCount: 1}}
+
+	tests := []struct {
+		name     string
+		entries  []model.RegistryEntry
+		source   model.RegistrySource
+		wantWarn bool
+	}{
+		{name: "dockerhub_unhealthy_with_entries_warns", source: model.SourceDockerHub, entries: dhEntries, wantWarn: true},
+		{name: "dockerhub_unhealthy_zero_entries_silent", source: model.SourceDockerHub, entries: nil, wantWarn: false},
+		{name: "ghcr_unhealthy_with_entries_silent", source: model.SourceGHCR, entries: ghEntries, wantWarn: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{
+				name:      tt.source.String(),
+				source:    tt.source,
+				entries:   tt.entries,
+				attempted: len(tt.entries),
+				healthy:   false,
+			}
+			logger, buf := captureLogs()
+
+			_, _, err := collect.Run(t.Context(), collect.Options{
+				Sources: []api.RegistrySource{src},
+				Logger:  logger,
+				RefsFor: func(string) []model.RepoRef {
+					return []model.RepoRef{{Owner: "owner", Repo: "x"}}
+				},
+			})
+			if err != nil {
+				t.Fatalf("Run() err = %v, want nil", err)
+			}
+
+			if got := strings.Contains(buf.String(), degradedMsg); got != tt.wantWarn {
+				t.Errorf("Run() severe-degradation warn emitted = %v, want %v (source=%s, entries=%d)",
+					got, tt.wantWarn, tt.source, len(tt.entries))
+			}
+		})
 	}
 }

@@ -113,41 +113,22 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 		// usually runs just before GHCR can queue many consecutive
 		// requests, so leading pacing smooths the transition between
 		// registries.
-		pacingMin := c.opts.MinPacing
-		if pacingMin <= 0 {
-			pacingMin = DefaultMinPacing
-		}
-		pacingJitter := c.opts.PacingJitter
-		if pacingJitter <= 0 {
-			pacingJitter = DefaultPacingJitter
-		}
-		var jitter time.Duration
-		if pacingJitter > 0 {
-			jitter = time.Duration(rand.Int64N(int64(pacingJitter))) //nolint:gosec // G404: jitter, not crypto
-		}
-		delay := pacingMin + jitter
-		timer := time.NewTimer(delay)
+		timer := time.NewTimer(c.pacingDelay())
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			c.logger.Warn("ghcr collection interrupted by context cancellation",
 				"collected", len(results), "remaining", len(packages)-total,
 				"error", ctx.Err())
-			pkgFailures := failures - listingFailures
-			return results, total, pkgFailures == 0 || (total > 0 && pkgFailures < total)
+			return results, total, pkgHealthy(failures, listingFailures, total)
 		case <-timer.C:
 		}
 
 		total++
-		downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
-		if err != nil {
-			c.logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
-			if errors.Is(err, httpx.ErrRateLimited) {
-				c.logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
-					"hint", "consider increasing pacing delay or reducing package count")
-			}
+		res := c.scrapePackage(ctx, ref)
+		if !res.ok {
 			failures++
-			if errors.Is(err, ErrHTMLFormatChanged) {
+			if res.parseFailed {
 				parseFailures++
 			}
 			// Skip on failure: previous day's snapshot already has the
@@ -156,12 +137,7 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 			// "this package went to 0".
 			continue
 		}
-
-		results = append(results, model.GhcrStats{
-			Package:       ref.Owner + "/" + ref.Repo,
-			DownloadCount: downloads,
-		})
-		c.logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
+		results = append(results, res.stat)
 	}
 
 	// Surface listing-page format changes even when no packages were
@@ -182,12 +158,66 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 			"total", total, "parse_failures", parseFailures)
 	}
 
-	// Listing failures are logged but excluded from the per-package
-	// health ratio: when no packages could be listed, there is no data
-	// to judge health by, so we default to healthy. The degraded log
-	// and empty snapshot-save logic handle the listing-failure case
-	// separately.
+	return results, total, pkgHealthy(failures, listingFailures, total)
+}
+
+// pacingDelay returns the inter-request delay for GHCR scrapes: the
+// configured minimum (DefaultMinPacing when unset) plus uniform jitter
+// in [0, jitter) (DefaultPacingJitter when unset). Because both defaults
+// are positive and replace any non-positive configured value, the jitter
+// bound is always positive, so rand.Int64N always receives a positive
+// argument.
+func (c *Client) pacingDelay() time.Duration {
+	pacingMin := c.opts.MinPacing
+	if pacingMin <= 0 {
+		pacingMin = DefaultMinPacing
+	}
+	pacingJitter := c.opts.PacingJitter
+	if pacingJitter <= 0 {
+		pacingJitter = DefaultPacingJitter
+	}
+	jitter := time.Duration(rand.Int64N(int64(pacingJitter))) //nolint:gosec // G404: jitter, not crypto
+	return pacingMin + jitter
+}
+
+// scrapeResult is the outcome of one package scrape: stat is valid only
+// when ok is true; parseFailed marks an ErrHTMLFormatChanged so the
+// caller can tally format drift separately from transport failures.
+type scrapeResult struct {
+	stat        model.GhcrStats
+	ok          bool
+	parseFailed bool
+}
+
+// scrapePackage scrapes a single package's download count and classifies
+// the outcome, logging the failure (and a rate-limit hint) on error. On
+// success it returns the populated stat with ok=true; on any failure ok
+// is false so the caller leaves the package out of results — a transient
+// error must not poison the daily-delta series with a zero count.
+func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeResult {
+	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
+	if err != nil {
+		c.logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
+		if errors.Is(err, httpx.ErrRateLimited) {
+			c.logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
+				"hint", "consider increasing pacing delay or reducing package count")
+		}
+		return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
+	}
+	c.logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
+	return scrapeResult{
+		stat: model.GhcrStats{Package: ref.Owner + "/" + ref.Repo, DownloadCount: downloads},
+		ok:   true,
+	}
+}
+
+// pkgHealthy reports the per-package health verdict. Listing failures are
+// excluded from the ratio (they are folded into failures, then subtracted
+// here): when no packages could be listed there is no per-package data to
+// judge by, so the verdict defaults to healthy and the empty-snapshot
+// logic handles the listing-failure case separately. Otherwise a cycle is
+// healthy when there were no package failures, or they were a minority.
+func pkgHealthy(failures, listingFailures, total int) bool {
 	pkgFailures := failures - listingFailures
-	healthy = pkgFailures == 0 || (total > 0 && pkgFailures < total)
-	return results, total, healthy
+	return pkgFailures == 0 || (total > 0 && pkgFailures < total)
 }

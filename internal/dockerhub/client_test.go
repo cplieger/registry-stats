@@ -1,10 +1,13 @@
 package dockerhub_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -486,5 +489,102 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 	if pageRequests != 2 {
 		t.Errorf("page requests = %d, want 2", pageRequests)
+	}
+}
+
+// captureLogger returns a logger that records everything (Debug and up)
+// into the returned buffer, so a test can assert which log lines a
+// Client emitted.
+func captureLogger() (*slog.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
+}
+
+// TestClient_NilLogger_DoesNotPanic verifies a Client built with a nil
+// logger falls back to a usable default: an error path that logs must
+// not nil-panic. CollectTags against a failing server hits the Error
+// log path, so a missing fallback would crash here.
+func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, nil)
+	tags := c.CollectTags(context.Background(), "o/a")
+	if len(tags) != 0 {
+		t.Errorf("CollectTags on a failing server = %d tags, want 0", len(tags))
+	}
+}
+
+// TestClient_Collect_WildcardListingError_LogsWarn pins the partial-
+// failure warn in the wildcard expansion path: a failing owner listing
+// must log the warning, and a successful one must stay silent. Driving
+// it through the public Collect (with a capturing logger) also confirms
+// the supplied logger is the one actually used.
+func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
+	const warnMsg = "docker hub listing partially failed"
+	wildcard := []model.RepoRef{{Owner: "o", Repo: "*"}}
+
+	t.Run("listing_error_logs_warn", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		logger, buf := captureLogger()
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c.Collect(context.Background(), wildcard)
+
+		if !strings.Contains(buf.String(), warnMsg) {
+			t.Errorf("Collect with a failing wildcard listing did not log %q; logs:\n%s", warnMsg, buf.String())
+		}
+	})
+
+	t.Run("listing_ok_silent", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		logger, buf := captureLogger()
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c.Collect(context.Background(), wildcard)
+
+		if strings.Contains(buf.String(), warnMsg) {
+			t.Errorf("Collect with a successful wildcard listing logged %q, want silence; logs:\n%s", warnMsg, buf.String())
+		}
+	})
+}
+
+// TestClient_CollectTags_WalksToPageCap forces the page cap to 3 while
+// the server always offers another page, so only the cap stops the loop:
+// CollectTags must walk exactly 3 pages (3 tags, 3 requests). Pins the
+// page-loop upper bound.
+func TestClient_CollectTags_WalksToPageCap(t *testing.T) {
+	const pageCap = 3
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/a/tags/", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		page := r.URL.Query().Get("page")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{"name": "tag-" + page}},
+			"next":    "always-more",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := dockerhub.NewClient(mockClient(srv), shortRetry(), pageCap, testsupport.QuietLogger())
+	tags := c.CollectTags(context.Background(), "o/a")
+
+	if len(tags) != pageCap {
+		t.Errorf("CollectTags collected %d tags, want %d (cap=%d)", len(tags), pageCap, pageCap)
+	}
+	if requests != pageCap {
+		t.Errorf("tags page requests = %d, want %d", requests, pageCap)
 	}
 }

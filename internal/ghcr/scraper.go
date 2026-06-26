@@ -109,6 +109,46 @@ func scrapePackageList(ctx context.Context, client *http.Client, owner string, o
 	return ParsePackageList(html, owner)
 }
 
+// packageListParser accumulates the deduplicated, URL-safe package names
+// scraped from an owner's packages page. It carries the line scan's
+// mutable accounting (seen + names) so the line loop in ParsePackageList
+// stays flat.
+type packageListParser struct {
+	prefix string
+	owner  string
+	seen   map[string]bool
+	names  []string
+}
+
+// scanLine extracts every package-link name on one line of HTML,
+// appending new safe names to p.names. Empty and unsafe names are
+// skipped (unsafe ones logged); duplicates are dropped.
+func (p *packageListParser) scanLine(line string) {
+	for {
+		idx := strings.Index(line, p.prefix)
+		if idx == -1 {
+			return
+		}
+		line = line[idx+len(p.prefix):]
+		end := strings.IndexAny(line, `"'<>`)
+		if end == -1 {
+			return
+		}
+		name := line[:end]
+		if name == "" {
+			continue
+		}
+		if !urlsafe.IsSafeURLSegment(name) {
+			slog.Debug("skipping package name with unsafe characters", "name", name, "owner", p.owner)
+			continue
+		}
+		if !p.seen[name] {
+			p.seen[name] = true
+			p.names = append(p.names, name)
+		}
+	}
+}
+
 // ParsePackageList extracts package names from an owner's packages page
 // HTML. Looks for /users/{owner}/packages/container/package/{name}
 // links and filters names through urlsafe.IsSafeURLSegment so a crafted
@@ -116,41 +156,20 @@ func scrapePackageList(ctx context.Context, client *http.Client, owner string, o
 // Duplicate names (same page can list a package multiple times) are
 // deduplicated in insertion order.
 func ParsePackageList(html, owner string) ([]string, error) {
-	prefix := fmt.Sprintf("/users/%s/packages/container/package/", owner)
-	var packages []string
-	seen := make(map[string]bool)
-
+	p := packageListParser{
+		prefix: fmt.Sprintf("/users/%s/packages/container/package/", owner),
+		owner:  owner,
+		seen:   make(map[string]bool),
+	}
 	for line := range strings.SplitSeq(html, "\n") {
-		for {
-			idx := strings.Index(line, prefix)
-			if idx == -1 {
-				break
-			}
-			line = line[idx+len(prefix):]
-			end := strings.IndexAny(line, `"'<>`)
-			if end == -1 {
-				break
-			}
-			name := line[:end]
-			if name == "" {
-				continue
-			}
-			if !urlsafe.IsSafeURLSegment(name) {
-				slog.Debug("skipping package name with unsafe characters", "name", name, "owner", owner)
-				continue
-			}
-			if !seen[name] {
-				seen[name] = true
-				packages = append(packages, name)
-			}
-		}
+		p.scanLine(line)
 	}
 
-	if len(packages) == 0 {
+	if len(p.names) == 0 {
 		return nil, fmt.Errorf("%w: no packages found on %s's packages page", ErrHTMLFormatChanged, owner)
 	}
 
-	return packages, nil
+	return p.names, nil
 }
 
 // scrapeDownloads fetches a single package page and returns its total
@@ -197,6 +216,42 @@ func ParseDownloads(html string) (int64, error) {
 	return count, nil
 }
 
+// expandWildcard scrapes one wildcard owner's package listing and
+// appends each new (deduplicated) package ref to packages. It returns
+// the grown slice plus listing-failure and format-drift-failure counts
+// (0 or 1 each) so the caller can keep its running tallies without
+// nesting the failure classification inside its loop.
+func expandWildcard(
+	ctx context.Context,
+	client *http.Client,
+	ref model.RepoRef,
+	opts []httpx.Option,
+	seen map[string]bool,
+	packages []model.RepoRef,
+) (out []model.RepoRef, listingFailures, listingParseFailures int) {
+	names, err := scrapePackageList(ctx, client, ref.Owner, opts)
+	if err != nil {
+		slog.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
+		if errors.Is(err, httpx.ErrRateLimited) {
+			slog.Warn("ghcr listing rate limited", "owner", ref.Owner,
+				"hint", "consider increasing pacing delay or reducing package count")
+		}
+		if errors.Is(err, ErrHTMLFormatChanged) {
+			return packages, 1, 1
+		}
+		return packages, 1, 0
+	}
+	for _, name := range names {
+		key := ref.Owner + "/" + name
+		if !seen[key] {
+			seen[key] = true
+			packages = append(packages, model.RepoRef{Owner: ref.Owner, Repo: name})
+		}
+	}
+	slog.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
+	return packages, 0, 0
+}
+
 // buildPackageList expands wildcard refs (owner/*) by scraping the
 // owner's packages page, then appends explicit refs unless already
 // covered by a wildcard. Returns the deduplicated list plus counts of
@@ -213,27 +268,10 @@ func buildPackageList(
 		if ref.Repo != "*" {
 			continue
 		}
-		names, err := scrapePackageList(ctx, client, ref.Owner, opts)
-		if err != nil {
-			slog.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
-			if errors.Is(err, httpx.ErrRateLimited) {
-				slog.Warn("ghcr listing rate limited", "owner", ref.Owner,
-					"hint", "consider increasing pacing delay or reducing package count")
-			}
-			listingFailures++
-			if errors.Is(err, ErrHTMLFormatChanged) {
-				listingParseFailures++
-			}
-			continue
-		}
-		for _, name := range names {
-			key := ref.Owner + "/" + name
-			if !seen[key] {
-				seen[key] = true
-				packages = append(packages, model.RepoRef{Owner: ref.Owner, Repo: name})
-			}
-		}
-		slog.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
+		var lf, pf int
+		packages, lf, pf = expandWildcard(ctx, client, ref, opts, seen, packages)
+		listingFailures += lf
+		listingParseFailures += pf
 	}
 	for _, ref := range refs {
 		if ref.Repo == "*" {

@@ -193,11 +193,8 @@ func collectExplicit(ctx context.Context, c *Client, refs []model.RepoRef, seen 
 			continue
 		}
 
-		var repoResp struct {
-			LastUpdated string `json:"last_updated"`
-			PullCount   int64  `json:"pull_count"`
-		}
-		if err := json.Unmarshal(repoData, &repoResp); err != nil {
+		pullCount, lastUpdated, err := ParseRepoMeta(repoData)
+		if err != nil {
 			c.logger.Error("docker hub parse failed", "repo", name, "error", err)
 			continue
 		}
@@ -205,11 +202,11 @@ func collectExplicit(ctx context.Context, c *Client, refs []model.RepoRef, seen 
 		tags := collectTags(ctx, c, name)
 		results = append(results, model.RepoStats{
 			Repo:        name,
-			PullCount:   repoResp.PullCount,
-			LastUpdated: repoResp.LastUpdated,
+			PullCount:   pullCount,
+			LastUpdated: lastUpdated,
 			Tags:        tags,
 		})
-		c.logger.Debug("docker hub repo collected", "repo", name, "pulls", repoResp.PullCount, "tags", len(tags))
+		c.logger.Debug("docker hub repo collected", "repo", name, "pulls", pullCount, "tags", len(tags))
 	}
 	return results, attempted
 }
@@ -232,27 +229,13 @@ func listRepos(ctx context.Context, c *Client, owner string) ([]model.RepoStats,
 			return repos, fmt.Errorf("list repos page %d: %w", page, err)
 		}
 
-		var resp struct {
-			Next    string `json:"next"`
-			Results []struct {
-				Name        string `json:"name"`
-				LastUpdated string `json:"last_updated"`
-				PullCount   int64  `json:"pull_count"`
-			} `json:"results"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
+		next, pageRepos, err := ParseRepoListPage(data, owner)
+		if err != nil {
 			return repos, fmt.Errorf("parse repo list: %w", err)
 		}
+		repos = append(repos, pageRepos...)
 
-		for _, r := range resp.Results {
-			repos = append(repos, model.RepoStats{
-				Repo:        owner + "/" + r.Name,
-				PullCount:   r.PullCount,
-				LastUpdated: r.LastUpdated,
-			})
-		}
-
-		if resp.Next == "" {
+		if next == "" {
 			hitCap = false
 			break
 		}
@@ -289,24 +272,15 @@ func collectTags(ctx context.Context, c *Client, repo string) []model.TagInfo {
 			break
 		}
 
-		var resp struct {
-			Next    string          `json:"next"`
-			Results []model.TagInfo `json:"results"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
+		next, pageTags, err := ParseTagPage(data)
+		if err != nil {
 			c.logger.Error("docker hub tags parse failed", "repo", repo, "error", err)
 			hitCap = false
 			break
 		}
+		tags = append(tags, pageTags...)
 
-		for _, tag := range resp.Results {
-			if tag.Name == "" {
-				continue
-			}
-			tags = append(tags, tag)
-		}
-
-		if resp.Next == "" {
+		if next == "" {
 			hitCap = false
 			break
 		}
@@ -332,6 +306,70 @@ func Degraded(results []model.RepoStats, attempted int) bool {
 		return true
 	}
 	return len(results)*2 < attempted
+}
+
+// ParseRepoMeta parses a single Docker Hub repo metadata response,
+// returning the pull count and last-updated timestamp. It is the pure
+// parse core behind Collect's explicit-ref path, exported so parse-only
+// tests and fuzzing can drive it without standing up an HTTP server.
+func ParseRepoMeta(data []byte) (pullCount int64, lastUpdated string, err error) {
+	var resp struct {
+		LastUpdated string `json:"last_updated"`
+		PullCount   int64  `json:"pull_count"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return 0, "", err
+	}
+	return resp.PullCount, resp.LastUpdated, nil
+}
+
+// ParseRepoListPage parses one page of the Docker Hub owner-listing
+// response. It returns the "next" page token plus the page's repos with
+// Repo set to "owner/name" (Tags left nil for the caller to fill). Pure
+// parse core behind listRepos, exported for parse-only tests and fuzzing.
+func ParseRepoListPage(data []byte, owner string) (next string, repos []model.RepoStats, err error) {
+	var resp struct {
+		Next    string `json:"next"`
+		Results []struct {
+			Name        string `json:"name"`
+			LastUpdated string `json:"last_updated"`
+			PullCount   int64  `json:"pull_count"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", nil, err
+	}
+	repos = make([]model.RepoStats, 0, len(resp.Results))
+	for _, r := range resp.Results {
+		repos = append(repos, model.RepoStats{
+			Repo:        owner + "/" + r.Name,
+			PullCount:   r.PullCount,
+			LastUpdated: r.LastUpdated,
+		})
+	}
+	return resp.Next, repos, nil
+}
+
+// ParseTagPage parses one page of the Docker Hub tags response. It
+// returns the "next" page token plus the page's tags with empty-named
+// entries filtered out, matching the contract that every persisted tag
+// carries a name. Pure parse core behind collectTags, exported for
+// parse-only tests and fuzzing.
+func ParseTagPage(data []byte) (next string, tags []model.TagInfo, err error) {
+	var resp struct {
+		Next    string          `json:"next"`
+		Results []model.TagInfo `json:"results"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", nil, err
+	}
+	for _, tag := range resp.Results {
+		if tag.Name == "" {
+			continue
+		}
+		tags = append(tags, tag)
+	}
+	return resp.Next, tags, nil
 }
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub

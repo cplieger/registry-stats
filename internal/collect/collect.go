@@ -81,28 +81,8 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 			continue
 		}
 		invokedAnySource = true
-
-		entries, attempted, srcHealthy := src.Collect(ctx, refs)
-		if !srcHealthy {
-			// Mirror the pre-refactor DockerHub warn log: surface the
-			// severe-degradation signal whenever a source returns some
-			// entries but less than half of what it attempted. The
-			// source's Collect already decides healthy via Degraded; the
-			// orchestrator just amplifies that with a warn when partial
-			// data is present, matching main.go's pre-refactor phrasing.
-			if src.Source() == model.SourceDockerHub && len(entries) > 0 {
-				logger.Warn("docker hub collection severely degraded",
-					"succeeded", len(entries), "attempted", attempted)
-			}
+		if !collectSource(ctx, logger, src, refs, snap) {
 			degraded = true
-			metrics.CollectErrors.Inc(src.Name())
-		}
-
-		switch src.Source() {
-		case model.SourceDockerHub:
-			snap.DockerHub = entriesToDockerHub(entries)
-		case model.SourceGHCR:
-			snap.GHCR = entriesToGHCR(entries)
 		}
 	}
 
@@ -128,6 +108,38 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 		"duration", now().Sub(start).Round(time.Millisecond))
 
 	return snap, !degraded, nil
+}
+
+// collectSource invokes a single source's Collect, routes its entries
+// into the matching typed slice on snap, and reports whether the source
+// met its health threshold. A DockerHub source that returns partial
+// data while flagging unhealthy gets the severe-degradation warn
+// (matching main.go's pre-refactor phrasing); any unhealthy source bumps
+// the per-source error metric. Routing happens regardless of health so a
+// degraded-but-nonempty source still contributes its entries.
+func collectSource(
+	ctx context.Context,
+	logger *slog.Logger,
+	src api.RegistrySource,
+	refs []model.RepoRef,
+	snap *model.Snapshot,
+) (srcHealthy bool) {
+	entries, attempted, srcHealthy := src.Collect(ctx, refs)
+	if !srcHealthy {
+		if src.Source() == model.SourceDockerHub && len(entries) > 0 {
+			logger.Warn("docker hub collection severely degraded",
+				"succeeded", len(entries), "attempted", attempted)
+		}
+		metrics.CollectErrors.Inc(src.Name())
+	}
+
+	switch src.Source() {
+	case model.SourceDockerHub:
+		snap.DockerHub = entriesToDockerHub(entries)
+	case model.SourceGHCR:
+		snap.GHCR = entriesToGHCR(entries)
+	}
+	return srcHealthy
 }
 
 // refsFor resolves refs for a given source name, returning nil when
