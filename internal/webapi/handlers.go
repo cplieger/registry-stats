@@ -44,7 +44,6 @@ func (h *handlers) health(w http.ResponseWriter, _ *http.Request) {
 
 // writeJSON marshals v as JSON and writes it to w. Logs on error.
 func writeJSON(w http.ResponseWriter, v any, logger *slog.Logger) {
-	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil && logger != nil {
 		logger.Error("failed to write JSON response", "error", err)
 	}

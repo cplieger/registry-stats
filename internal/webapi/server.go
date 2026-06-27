@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	cm "github.com/cplieger/metrics/v2"
@@ -126,7 +127,24 @@ func WithAccessLog(next http.Handler, logger *slog.Logger) http.Handler {
 		rw := cm.NewStatusRecorder(w)
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
-		metrics.RecordHTTP(r.Method, r.URL.Path, rw.Status(), dur)
+		// Bound both labels to the matched route. r.Pattern is empty for a
+		// 404/405, so an arbitrary client-supplied method/path token
+		// collapses to "unmatched". When a route matched, use the pattern's
+		// path TEMPLATE rather than r.URL.Path: a path-cleaning redirect
+		// (e.g. GET /api/./health -> /api/health, HTTP 301) keeps a non-empty
+		// r.Pattern but leaves r.URL.Path holding the raw, uncleaned path,
+		// which a scanner can vary without bound (/api//health, /api/./health,
+		// /api/x/../health, ...) to mint unbounded series.
+		metricPath := "unmatched"
+		metricMethod := "unmatched"
+		if r.Pattern != "" {
+			metricMethod = r.Method
+			metricPath = r.Pattern
+			if _, p, ok := strings.Cut(r.Pattern, " "); ok {
+				metricPath = p
+			}
+		}
+		metrics.RecordHTTP(metricMethod, metricPath, rw.Status(), dur)
 		lvl := slog.LevelDebug
 		switch {
 		case rw.Status() >= 500:
@@ -139,6 +157,6 @@ func WithAccessLog(next http.Handler, logger *slog.Logger) http.Handler {
 			"path", r.URL.Path,
 			"query", r.URL.RawQuery,
 			"status", rw.Status(),
-			"duration_ms", time.Since(start).Milliseconds())
+			"duration_ms", dur.Milliseconds())
 	})
 }

@@ -255,7 +255,7 @@ func TestBuildPackageList_Explicit(t *testing.T) {
 		{Owner: "o", Repo: "a"},
 		{Owner: "o", Repo: "b"},
 	}
-	packages, listFail, parseFail := buildPackageList(t.Context(), http.DefaultClient, refs, shortRetry())
+	packages, listFail, parseFail := buildPackageList(t.Context(), http.DefaultClient, testsupport.QuietLogger(), refs, shortRetry())
 	if listFail != 0 || parseFail != 0 {
 		t.Errorf("expected no listing failures, got listFail=%d parseFail=%d", listFail, parseFail)
 	}
@@ -283,7 +283,7 @@ func TestBuildPackageList_WildcardDedup(t *testing.T) {
 		{Owner: "owner", Repo: "app1"}, // duplicate of wildcard result
 		{Owner: "owner", Repo: "app3"}, // genuinely new
 	}
-	packages, listFail, parseFail := buildPackageList(t.Context(), client, refs, shortRetry())
+	packages, listFail, parseFail := buildPackageList(t.Context(), client, testsupport.QuietLogger(), refs, shortRetry())
 	if listFail != 0 || parseFail != 0 {
 		t.Fatalf("listing failures: listFail=%d parseFail=%d", listFail, parseFail)
 	}
@@ -316,7 +316,7 @@ func TestBuildPackageList_WildcardListingError(t *testing.T) {
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "explicit"},
 	}
-	packages, listFail, _ := buildPackageList(t.Context(), client, refs, shortRetry())
+	packages, listFail, _ := buildPackageList(t.Context(), client, testsupport.QuietLogger(), refs, shortRetry())
 	if listFail != 1 {
 		t.Errorf("listFail = %d, want 1", listFail)
 	}
@@ -510,7 +510,8 @@ func TestCollect_WildcardMock(t *testing.T) {
 // TestCollect_AllFailUnhealthy verifies that when every package scrape
 // fails with a non-parse error (e.g. 500), the returned healthy flag
 // is false and no zero-count entries are appended (a zero entry would
-// poison the daily-delta series). Migrated from
+// inject a false zero into the exposed gauge; the per-day delta is
+// computed downstream by Prometheus/Mimir). Migrated from
 // TestCollectGHCRAllFailUnhealthy.
 func TestCollect_AllFailUnhealthy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

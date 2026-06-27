@@ -70,7 +70,8 @@ func (c *Client) Source() model.RegistrySource { return model.SourceGHCR }
 // Collect gathers download counts for every ref in refs. Wildcard refs
 // are expanded via buildPackageList before scraping; explicit refs are
 // scraped as-is. Packages whose scrape fails are NOT appended so a
-// transient error cannot corrupt the daily-delta calculation.
+// transient error cannot inject a false zero into the exposed gauge
+// (the per-day delta is computed downstream by Prometheus/Mimir, not here).
 //
 // entries carry only the GHCR-relevant fields (Name, DownloadCount);
 // PullCount / LastUpdated / Tags stay zero-valued. attempted counts
@@ -103,7 +104,7 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 	failures := 0
 	parseFailures := 0
 	total := 0
-	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, refs, c.retryOpts)
+	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, c.logger, refs, c.retryOpts)
 	failures += listingFailures
 	parseFailures += listingParseFailures
 
@@ -131,10 +132,11 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 			if res.parseFailed {
 				parseFailures++
 			}
-			// Skip on failure: previous day's snapshot already has the
-			// real count, so the daily-delta handler carries it forward
-			// implicitly rather than treating a transient 429 as
-			// "this package went to 0".
+			// Skip on failure rather than emitting a zero: a missing entry leaves this
+			// package's gauge unset for the cycle (a brief series gap that the
+			// dashboard's spanNulls bridges and Mimir's prior samples retain), whereas a
+			// 0 would inject a false drop into the cumulative pull count and a large
+			// negative daily delta.
 			continue
 		}
 		results = append(results, res.stat)
@@ -153,9 +155,13 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 	// hit format errors, not only when all of them do. Log-based
 	// alerting can then trigger proactively before the registry goes
 	// fully dark.
-	if total > 0 && parseFailures*2 > total {
+	// Per-package parse failures only: listing parse failures have their own
+	// dedicated ERROR above and are not counted in total. Mirrors pkgHealthy,
+	// which already subtracts listingFailures from its ratio.
+	pkgParseFailures := parseFailures - listingParseFailures
+	if total > 0 && pkgParseFailures*2 > total {
 		c.logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
-			"total", total, "parse_failures", parseFailures)
+			"total", total, "parse_failures", pkgParseFailures)
 	}
 
 	return results, total, pkgHealthy(failures, listingFailures, total)
@@ -193,7 +199,8 @@ type scrapeResult struct {
 // the outcome, logging the failure (and a rate-limit hint) on error. On
 // success it returns the populated stat with ok=true; on any failure ok
 // is false so the caller leaves the package out of results — a transient
-// error must not poison the daily-delta series with a zero count.
+// error must not inject a false zero into the exposed gauge (the per-day
+// delta is computed downstream by Prometheus/Mimir, not here).
 func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeResult {
 	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
 	if err != nil {
@@ -219,5 +226,13 @@ func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeRes
 // healthy when there were no package failures, or they were a minority.
 func pkgHealthy(failures, listingFailures, total int) bool {
 	pkgFailures := failures - listingFailures
-	return pkgFailures == 0 || (total > 0 && pkgFailures < total)
+	// Healthy when package failures are not a majority (at most half),
+	// matching the sibling dockerhub.Degraded boundary (healthy when
+	// len(results)*2 >= attempted, i.e. failures are at most half) and the
+	// in-file per-package parse-majority check (pkgParseFailures*2 > total),
+	// both feeding the same collect_errors_total ratio. The prior
+	// pkgFailures<total only flagged a TOTAL GHCR outage, so
+	// collect_errors_total{source="ghcr"} silently under-reported a
+	// majority-but-not-total scrape failure.
+	return pkgFailures == 0 || (total > 0 && pkgFailures*2 <= total)
 }

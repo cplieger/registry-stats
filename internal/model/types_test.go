@@ -80,8 +80,8 @@ func contains(haystack, needle string) bool {
 // checks that the concrete PullCount / DownloadCount / Tags / Images
 // values survive Marshal → Unmarshal unchanged. The shape test above
 // already covers the struct-tag surface; this one nails down the
-// value-preservation contract that the on-disk /data/*.json files
-// depend on.
+// value-preservation contract these legacy JSON tags carry (v2 is
+// stateless; the tags are exercised only by these round-trip tests).
 func TestSnapshotJSONRoundTrip(t *testing.T) {
 	snap := Snapshot{
 		Timestamp: time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC),
@@ -160,4 +160,24 @@ func TestSnapshotJSONRoundTrip_PBT(t *testing.T) {
 				snap.GHCR[0].DownloadCount, decoded.GHCR[0].DownloadCount)
 		}
 	})
+}
+
+func TestRegistrySource_String(t *testing.T) {
+	tests := []struct {
+		name string
+		src  RegistrySource
+		want string
+	}{
+		{"dockerhub", SourceDockerHub, "dockerhub"},
+		{"ghcr", SourceGHCR, "ghcr"},
+		{"unknown is empty", SourceUnknown, ""},
+		{"out-of-range is empty", RegistrySource(99), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.src.String(); got != tt.want {
+				t.Errorf("RegistrySource(%d).String() = %q, want %q", tt.src, got, tt.want)
+			}
+		})
+	}
 }

@@ -125,8 +125,8 @@ func TestLoadConfigWildcard(t *testing.T) {
 	}
 }
 
-// Kills CONDITIONALS_BOUNDARY at the clamp site — verifies that 0 is a
-// valid value for POLL_INTERVAL_HOURS (not treated as negative).
+// TestLoadConfigZeroValues verifies that POLL_INTERVAL_HOURS=0 is a valid
+// value (one-shot mode), not coerced to the positive fallback.
 func TestLoadConfigZeroValues(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "0")
 	t.Setenv("DOCKERHUB_REPOS", "")
@@ -285,5 +285,55 @@ func TestLoadConfig_clamp_warns_one_above_max(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "POLL_INTERVAL_HOURS clamped") {
 		t.Errorf("LoadConfig above max emitted no clamp warning, want one (log=%q)", buf.String())
+	}
+}
+
+func TestLoadConfig_EnableMetrics(t *testing.T) {
+	tests := []struct {
+		env  string
+		want bool
+	}{
+		{"true", true},
+		{"1", true},
+		{"yes", true},
+		{"", true},
+		{"false", false},
+		{"FALSE", false},
+		{" false ", false},
+		{"0", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			t.Setenv("ENABLE_METRICS", tt.env)
+			cfg := LoadConfig()
+			if cfg.EnableMetrics != tt.want {
+				t.Errorf("LoadConfig(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_LogLevel(t *testing.T) {
+	tests := []struct {
+		env  string
+		want slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"warn", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"info", slog.LevelInfo},
+		{"WARN", slog.LevelWarn},
+		{" error ", slog.LevelError},
+		{"", slog.LevelInfo},
+		{"bogus", slog.LevelInfo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", tt.env)
+			cfg := LoadConfig()
+			if cfg.LogLevel != tt.want {
+				t.Errorf("LoadConfig(LOG_LEVEL=%q).LogLevel = %v, want %v", tt.env, cfg.LogLevel, tt.want)
+			}
+		})
 	}
 }

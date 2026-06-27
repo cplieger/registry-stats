@@ -40,26 +40,14 @@ type Options struct {
 // and returns the assembled snapshot plus a healthy flag.
 //
 // Return contract:
-//   - (snap, true, nil)  — healthy cycle: all configured sources met
-//     their per-source healthy threshold AND the snapshot persisted.
-//   - (snap, false, nil) — degraded cycle: at least one source was
-//     unhealthy OR the empty-guard fired; the snapshot may still have
-//     been persisted when at least one source produced entries.
-//   - (nil, false, err)  — save error; no snapshot is on disk.
+//   - (snap, true)  -- healthy cycle: every invoked source met its per-source threshold.
+//   - (snap, false) -- degraded/empty cycle: an invoked source was unhealthy, or no
+//     invoked source produced an entry.
 //
-// Degraded detection: healthy is the AND of per-source healthy flags
-// over sources that were actually invoked. Sources that were skipped
-// (empty refs) do not contribute to the ratio. This mirrors the
-// pre-refactor main.go collect() semantics: a cycle with zero
-// configured registries was healthy-by-vacuity.
-//
-// The empty-snapshot guard preserves pre-refactor behavior: when every
-// invoked source returns zero entries, the snapshot is NOT saved
-// (saving a zero-pull snapshot would corrupt the daily-delta
-// calculation by treating it as a genuine drop). The returned healthy
-// flag in that case is false so the caller can flag the cycle as
-// degraded in its healthcheck.
-func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool, err error) {
+// registry-stats is stateless: Run never persists the snapshot. The healthy flag drives
+// only the partial-failure WARN below; the caller derives its health marker separately
+// (see main.runCollect).
+func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -86,19 +74,18 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 		}
 	}
 
-	// Don't save empty snapshots — they corrupt daily delta calculations
-	// by treating the missing data as genuine zero-pull days.
+	// An all-empty cycle has nothing to expose; return healthy=false so the caller marks unhealthy.
 	if len(snap.DockerHub) == 0 && len(snap.GHCR) == 0 {
 		if !invokedAnySource {
-			logger.Warn("no repos configured, skipping snapshot save")
+			logger.Warn("no repos configured")
 		} else {
-			logger.Error("all collections failed, skipping snapshot save")
+			logger.Error("all collections failed")
 		}
-		return snap, false, nil
+		return snap, false
 	}
 
 	if degraded {
-		logger.Warn("partial collection failure, snapshot saved with available data",
+		logger.Warn("partial collection failure, serving available data",
 			"docker_hub", len(snap.DockerHub), "ghcr", len(snap.GHCR))
 	}
 
@@ -107,7 +94,7 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool,
 		"ghcr", len(snap.GHCR),
 		"duration", now().Sub(start).Round(time.Millisecond))
 
-	return snap, !degraded, nil
+	return snap, !degraded
 }
 
 // collectSource invokes a single source's Collect, routes its entries
@@ -125,6 +112,10 @@ func collectSource(
 	snap *model.Snapshot,
 ) (srcHealthy bool) {
 	entries, attempted, srcHealthy := src.Collect(ctx, refs)
+	// Count every invoked source as a collect run; collect_errors_total below is
+	// the failed subset, so collect_errors_total / collects_total is a valid
+	// per-source failure ratio.
+	metrics.CollectsTotal.Inc(src.Name())
 	if !srcHealthy {
 		if src.Source() == model.SourceDockerHub && len(entries) > 0 {
 			logger.Warn("docker hub collection severely degraded",
@@ -155,14 +146,14 @@ func refsFor(opts Options, name string) []model.RepoRef {
 }
 
 // entriesToDockerHub maps the registry-agnostic []model.RegistryEntry
-// back into the typed []model.RepoStats slice that the snapshot's
-// docker_hub on-disk array requires. The per-source dockerhub.Client
+// back into the typed []model.RepoStats slice the snapshot's
+// docker_hub field carries. The per-source dockerhub.Client
 // populates Name/LastUpdated/PullCount/Tags from its Collect call;
 // this helper copies them into the destination shape field-for-field.
 //
 // Entries with empty Name are skipped defensively — the dockerhub
 // client always populates Name, but stripping empty entries keeps the
-// on-disk shape clean if a future source regression produces a zero
+// snapshot shape clean if a future source regression produces a zero
 // value.
 func entriesToDockerHub(entries []model.RegistryEntry) []model.RepoStats {
 	if len(entries) == 0 {

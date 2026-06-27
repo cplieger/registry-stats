@@ -5,8 +5,9 @@
 # Starts the assembled image and waits for the container's own HEALTHCHECK
 # (the distroless `registry-stats health` file-marker probe) to report
 # "healthy" — proving the binary runs in the distroless image, binds its HTTP
-# server, and the health probe works. The HTTP server comes up regardless of
-# registry connectivity, so no env is required.
+# server, and the health probe works. At least one repo must be configured
+# (DOCKERHUB_REPOS on the run line) because the file-marker HEALTHCHECK tracks
+# collect success, not just HTTP-server liveness: an empty config is unhealthy.
 set -eu
 
 IMG="${1:?usage: image-smoke.sh <image-ref>}"
@@ -21,7 +22,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run -d --name "$NAME" "$IMG" >/dev/null
+# A stable, unauthenticated Docker Hub repo so the initial collect succeeds and the
+# health marker flips healthy; an empty config reports unhealthy by design.
+docker run -d --name "$NAME" -e DOCKERHUB_REPOS=library/alpine "$IMG" >/dev/null
 
 i=0
 status=starting

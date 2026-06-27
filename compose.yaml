@@ -3,7 +3,6 @@ services:
     image: ghcr.io/cplieger/registry-stats:latest
     container_name: registry-stats
     restart: unless-stopped
-    user: "1000:1000"  # match your host user
 
     environment:
       TZ: "Europe/Paris"
@@ -15,5 +14,8 @@ services:
     ports:
       - "9100:9100"
 
+    # Writable /tmp for the health marker; `registry-stats health` reads
+    # /tmp/.healthy. 1m is plenty for the empty marker file, and the
+    # binary lives at / so noexec/nosuid/nodev don't impede it.
     tmpfs:
       - "/tmp:size=1m,mode=1777,noexec,nosuid,nodev"
