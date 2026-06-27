@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -133,7 +134,7 @@ func runCollect(
 	sources []api.RegistrySource,
 ) bool {
 	start := time.Now()
-	snap, _, err := collectpkg.Run(ctx, collectpkg.Options{
+	snap, _ := collectpkg.Run(ctx, collectpkg.Options{
 		Sources: sources,
 		Logger:  slog.Default(),
 		Now:     time.Now,
@@ -147,52 +148,54 @@ func runCollect(
 			return nil
 		},
 	})
-	// Record per-source collect metrics.
+	// Record cycle duration. Per-source collect counters are incremented in
+	// collect.collectSource so they count only invoked sources (those with
+	// configured refs), keeping collects_total and collect_errors_total over
+	// the same denominator.
 	metrics.CollectDuration.Observe(time.Since(start).Seconds())
-	for _, src := range sources {
-		metrics.CollectsTotal.Inc(src.Name())
-	}
-	if err != nil {
-		return false
-	}
-	if snap == nil {
-		return false
-	}
 	if cfg.EnableMetrics {
-		updateImageMetrics(snap, cfg)
+		updateImageMetrics(snap)
 	}
+	// Health marker = "at least one repo collected this cycle", per the documented contract that
+	// partial failures stay healthy as long as one repo succeeds (README/CONTRIBUTING). This is
+	// intentionally NOT collect.Run's healthy verdict (!degraded), which is stricter and would flip
+	// the marker unhealthy on any partial failure. Run's verdict drives only its partial-failure WARN.
 	return len(snap.DockerHub) > 0 || len(snap.GHCR) > 0
 }
 
 // updateImageMetrics converts a snapshot into ImageMetric slice and
-// pushes it to the metrics package for /metrics rendering.
-func updateImageMetrics(snap *model.Snapshot, cfg *configpkg.Config) {
+// pushes it to the metrics package for /metrics rendering. Snapshot
+// identifiers are "owner/name"; split each into the separate owner
+// and repo labels the metric contract (and grafana-dashboard.json) expect.
+func updateImageMetrics(snap *model.Snapshot) {
 	imgs := make([]metrics.ImageMetric, 0, len(snap.DockerHub)+len(snap.GHCR))
 	for _, dh := range snap.DockerHub {
-		owner := ownerForRepo(cfg.DockerHubRepos, dh.Repo)
+		owner, repo := splitOwnerRepo(dh.Repo)
 		imgs = append(imgs, metrics.ImageMetric{
-			Registry: "dockerhub", Owner: owner, Repo: dh.Repo,
+			Registry: model.SourceDockerHub.String(), Owner: owner, Repo: repo,
 			Pulls: dh.PullCount, Tags: len(dh.Tags),
 		})
 	}
 	for _, gh := range snap.GHCR {
-		owner := ownerForRepo(cfg.GHCRRepos, gh.Package)
+		owner, repo := splitOwnerRepo(gh.Package)
 		imgs = append(imgs, metrics.ImageMetric{
-			Registry: "ghcr", Owner: owner, Repo: gh.Package,
+			Registry: model.SourceGHCR.String(), Owner: owner, Repo: repo,
 			Pulls: gh.DownloadCount,
 		})
 	}
 	metrics.SetImageMetrics(imgs)
 }
 
-// ownerForRepo finds the owner from the configured refs for a given repo name.
-func ownerForRepo(refs []model.RepoRef, repo string) string {
-	for _, r := range refs {
-		if r.Repo == repo || r.Repo == "*" {
-			return r.Owner
-		}
+// splitOwnerRepo splits an "owner/name" snapshot identifier into its
+// owner and repo-name parts on the first slash -- the inverse of how the
+// registry clients build it (ref.Owner + "/" + ref.Repo). An identifier
+// without a slash yields an empty owner and the whole string as repo.
+func splitOwnerRepo(id string) (owner, repo string) {
+	owner, repo, ok := strings.Cut(id, "/")
+	if !ok {
+		return "", id
 	}
-	return ""
+	return owner, repo
 }
 
 // runScheduled runs collection on each tick of a PollInterval-sized

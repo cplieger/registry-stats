@@ -8,7 +8,7 @@
 //     unchanged; httpx.DockerGitHubRedirectPolicy (wired on the shared
 //     *http.Client in main.go) still enforces the SSRF allowlist.
 //   - Response JSON parsing (pull_count, last_updated, per-tag images[])
-//     matches the on-disk model.Snapshot.DockerHub shape byte-for-byte.
+//     matches the model.Snapshot.DockerHub shape byte-for-byte.
 //   - Page caps (owner listing: 10 pages; per-repo tags: 50 pages; 100
 //     items per page) and the "hit cap → warn log" signal are preserved
 //     so dashboards that alert on truncation still see the same key set.
@@ -31,6 +31,7 @@ import (
 	"github.com/cplieger/httpx/v2"
 	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
 
 // Pagination caps. Chosen well above realistic usage so normal traffic
@@ -341,6 +342,17 @@ func ParseRepoListPage(data []byte, owner string) (next string, repos []model.Re
 	}
 	repos = make([]model.RepoStats, 0, len(resp.Results))
 	for _, r := range resp.Results {
+		// Repo name comes from the Docker Hub listing JSON (registry data,
+		// not env config) and flows into the tags URL via collectTags. Route
+		// it through urlsafe so a crafted/garbled listing response cannot
+		// inject path-traversal or query chars into an outbound URL segment,
+		// matching the GHCR scraper's ParsePackageList guard. Legitimate
+		// Docker Hub names are always URL-safe, so this only drops names the
+		// registry could not legitimately produce.
+		if !urlsafe.IsSafeURLSegment(r.Name) {
+			slog.Debug("skipping docker hub repo with unsafe name", "owner", owner, "name", r.Name)
+			continue
+		}
 		repos = append(repos, model.RepoStats{
 			Repo:        owner + "/" + r.Name,
 			PullCount:   r.PullCount,
@@ -352,7 +364,7 @@ func ParseRepoListPage(data []byte, owner string) (next string, repos []model.Re
 
 // ParseTagPage parses one page of the Docker Hub tags response. It
 // returns the "next" page token plus the page's tags with empty-named
-// entries filtered out, matching the contract that every persisted tag
+// entries filtered out, matching the contract that every collected tag
 // carries a name. Pure parse core behind collectTags, exported for
 // parse-only tests and fuzzing.
 func ParseTagPage(data []byte) (next string, tags []model.TagInfo, err error) {

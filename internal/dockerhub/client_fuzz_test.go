@@ -28,7 +28,7 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
 // parser. Invariant: every repo it returns is namespaced under the
 // requested owner ("owner/..."), so a crafted listing response cannot
-// smuggle a foreign owner into the on-disk shape downstream code trusts.
+// smuggle a foreign owner into the snapshot shape downstream code trusts.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
@@ -52,7 +52,7 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 
 // FuzzDockerHubTagListUnmarshal drives the production tag-page parser.
 // Invariant: every returned tag has a non-empty name. collectTags relies
-// on this filter so a nameless tag never reaches the on-disk tag array.
+// on this filter so a nameless tag never reaches the snapshot's tag slice.
 // The committed seed {"results":[{}]} pins the empty-name-drop edge.
 func FuzzDockerHubTagListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"latest","digest":"sha256:abc","full_size":1024}]}`))

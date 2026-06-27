@@ -17,6 +17,8 @@ func FuzzParseDownloads(f *testing.F) {
 	f.Add(`<span>Total downloads</span><div class="foo">bar</div><h3 title="176000">176K</h3>`)
 	f.Add("<div>nothing</div>")
 	f.Add(`<span>Total downloads</span><h3 title="abc">N/A</h3>`)
+	f.Add(`<span>Total downloads</span><h3 title="-5">-5</h3>`)
+	f.Add(`<span>Total downloads</span><h3 title="12345>`)
 	f.Add("")
 	f.Fuzz(func(t *testing.T, html string) {
 		count, err := ParseDownloads(html)

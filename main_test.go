@@ -5,19 +5,23 @@ package main
 // internal/* package test.
 //
 // Every other test this file used to host (handler/filter/writeJSON/
-// accessLog/shutdown, storage Save/Load/Prune/Cache, httpx retry/
-// drain/redirect, DockerHub + GHCR mock scraping, config parse +
-// rapid/PBT coverage, collect orchestration) was migrated in
-// cycles 1-2 to its new owning package alongside the corresponding
-// main.go shim deletion. See cycle-2 chain reports under
-// apps/registry-stats/.refactor/cycles/ for the full migration log.
+// accessLog/shutdown, httpx retry/drain/redirect, DockerHub + GHCR
+// mock scraping, config parse + rapid/PBT coverage, collect
+// orchestration) was migrated in cycles 1-2 to its new owning package
+// alongside the corresponding main.go shim deletion. The legacy
+// on-disk storage tests (Save/Load/Prune/Cache) were not migrated to a
+// package -- they were deleted with the store when v2 became stateless.
 
 import (
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	configpkg "github.com/cplieger/registry-stats/internal/config"
+	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 )
 
@@ -69,5 +73,68 @@ func TestSetupLogging_levels(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSplitOwnerRepo pins the owner/name split that feeds the
+// registrystats_image_*{owner,repo} labels (grafana-dashboard.json reads
+// them). splitOwnerRepo cuts on the FIRST slash and treats a slashless
+// identifier as a bare repo with empty owner.
+func TestSplitOwnerRepo(t *testing.T) {
+	tests := []struct {
+		name      string
+		id        string
+		wantOwner string
+		wantRepo  string
+	}{
+		{"owner and repo", "cplieger/subflux", "cplieger", "subflux"},
+		{"no slash yields empty owner", "alpine", "", "alpine"},
+		{"empty string", "", "", ""},
+		{"multiple slashes split on first", "a/b/c", "a", "b/c"},
+		{"trailing slash empty repo", "owner/", "owner", ""},
+		{"leading slash empty owner", "/repo", "", "repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo := splitOwnerRepo(tt.id)
+			if owner != tt.wantOwner || repo != tt.wantRepo {
+				t.Errorf("splitOwnerRepo(%q) = (%q, %q), want (%q, %q)",
+					tt.id, owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+		})
+	}
+}
+
+// TestUpdateImageMetrics_splitsOwnerRepoLabels pins the observable metric
+// contract: updateImageMetrics splits each "owner/name" snapshot identifier
+// into separate owner/repo labels and counts DockerHub tags. Asserted through
+// the real /metrics output (metrics.Handler), the same boundary Alloy scrapes.
+// SetImageMetrics mutates process-global gauges (Reset+Set), so this test must
+// not call t.Parallel().
+func TestUpdateImageMetrics_splitsOwnerRepoLabels(t *testing.T) {
+	snap := &model.Snapshot{
+		DockerHub: []model.RepoStats{
+			{Repo: "cplieger/subflux", PullCount: 1234, Tags: []model.TagInfo{{Name: "latest"}, {Name: "v1"}}},
+		},
+		GHCR: []model.GhcrStats{
+			{Package: "cplieger/vibekit", DownloadCount: 56},
+		},
+	}
+	updateImageMetrics(snap)
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	metrics.Handler()(w, r)
+	body := w.Body.String()
+
+	want := []string{
+		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
+		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 2`,
+		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("metrics output missing %q\n got:\n%s", line, body)
+		}
 	}
 }

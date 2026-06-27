@@ -224,6 +224,7 @@ func ParseDownloads(html string) (int64, error) {
 func expandWildcard(
 	ctx context.Context,
 	client *http.Client,
+	logger *slog.Logger,
 	ref model.RepoRef,
 	opts []httpx.Option,
 	seen map[string]bool,
@@ -231,9 +232,9 @@ func expandWildcard(
 ) (out []model.RepoRef, listingFailures, listingParseFailures int) {
 	names, err := scrapePackageList(ctx, client, ref.Owner, opts)
 	if err != nil {
-		slog.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
+		logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
 		if errors.Is(err, httpx.ErrRateLimited) {
-			slog.Warn("ghcr listing rate limited", "owner", ref.Owner,
+			logger.Warn("ghcr listing rate limited", "owner", ref.Owner,
 				"hint", "consider increasing pacing delay or reducing package count")
 		}
 		if errors.Is(err, ErrHTMLFormatChanged) {
@@ -248,7 +249,7 @@ func expandWildcard(
 			packages = append(packages, model.RepoRef{Owner: ref.Owner, Repo: name})
 		}
 	}
-	slog.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
+	logger.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
 	return packages, 0, 0
 }
 
@@ -260,6 +261,7 @@ func expandWildcard(
 func buildPackageList(
 	ctx context.Context,
 	client *http.Client,
+	logger *slog.Logger,
 	refs []model.RepoRef,
 	opts []httpx.Option,
 ) (packages []model.RepoRef, listingFailures, listingParseFailures int) {
@@ -269,7 +271,7 @@ func buildPackageList(
 			continue
 		}
 		var lf, pf int
-		packages, lf, pf = expandWildcard(ctx, client, ref, opts, seen, packages)
+		packages, lf, pf = expandWildcard(ctx, client, logger, ref, opts, seen, packages)
 		listingFailures += lf
 		listingParseFailures += pf
 	}

@@ -35,8 +35,10 @@ type Config struct {
 // defaults. Clamps poll interval to a bounded maximum to prevent
 // time.Duration overflow.
 func LoadConfig() Config {
-	pollIntervalHours, err := strconv.Atoi(GetEnv("POLL_INTERVAL_HOURS", "1"))
+	rawPollHours := strings.TrimSpace(GetEnv("POLL_INTERVAL_HOURS", "1"))
+	pollIntervalHours, err := strconv.Atoi(rawPollHours)
 	if err != nil || pollIntervalHours < 0 {
+		slog.Warn("invalid POLL_INTERVAL_HOURS, using default of 1 hour", "value", rawPollHours)
 		pollIntervalHours = 1
 	}
 	// Clamp to a sensible upper bound: multiplying a huge int by time.Hour

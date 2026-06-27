@@ -1,0 +1,9 @@
+# Minimize the Docker build context. The Dockerfile only needs go.mod,
+# go.sum, the root *.go files, and internal/. Deny everything, then allow
+# the build inputs back in so the gitignored .code-review/ review scratch,
+# .git/, tests/, docs, and grafana-dashboard.json never reach the daemon.
+*
+!go.mod
+!go.sum
+!*.go
+!internal/

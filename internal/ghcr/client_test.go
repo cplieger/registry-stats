@@ -282,3 +282,81 @@ func TestCollect_minorityPackageFailures_healthy(t *testing.T) {
 		t.Error("Collect healthy = false, want true (1 of 2 failures is a minority)")
 	}
 }
+
+// TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift pins the
+// pkgParseFailures arithmetic (parseFailures - listingParseFailures): a wildcard
+// whose listing page parse-fails (listingParseFailures=1) alongside a successful
+// explicit scrape (total=1) must fire ONLY the listing-format ERROR, never the
+// per-package majority ERROR. The lone parse failure belongs to the listing,
+// which has its own dedicated signal, so pkgParseFailures is 0 and the
+// per-package majority check (pkgParseFailures*2 > total) stays silent.
+func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *testing.T) {
+	var buf bytes.Buffer
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html>no package links here</html>`))
+	})
+	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(downloadsHTML("99")))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(mockClient(srv), shortRetry(), fastPacing(), capturingLogger(&buf))
+	refs := []model.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
+	entries, attempted, healthy := c.Collect(t.Context(), refs)
+
+	if attempted != 1 {
+		t.Fatalf("precondition: attempted = %d, want 1 (only the explicit pkg1 was scraped)", attempted)
+	}
+	if !healthy {
+		t.Errorf("healthy = false, want true (listing failures excluded; the one package scrape succeeded)")
+	}
+	if len(entries) != 1 || entries[0].DownloadCount != 99 {
+		t.Fatalf("entries = %+v, want exactly one entry with DownloadCount=99", entries)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "listing HTML format may have changed") {
+		t.Errorf("expected listing-format ERROR for the parse-failing wildcard listing; logs:\n%s", logs)
+	}
+	if strings.Contains(logs, "majority of scrapes hit format errors") {
+		t.Errorf("per-package majority ERROR must not fire when the only parse failure is the listing (pkgParseFailures=0); logs:\n%s", logs)
+	}
+}
+
+// TestPkgHealthy unit-tests the pure per-package health verdict in
+// isolation from the HTTP-mock Collect pipeline. A cycle is healthy when
+// package failures are at most half of the scrapes (pkgFailures*2 <= total);
+// listing failures are excluded from the ratio (failures-listingFailures),
+// and an all-zero cycle (no scrapes, no failures) defaults to healthy. The
+// rows below pin every boundary outcome: empty, listing-only, exactly half,
+// a strict majority that is not a total outage, a full outage, a clear
+// minority, and the listing-exclusion arithmetic.
+func TestPkgHealthy(t *testing.T) {
+	tests := []struct {
+		name            string
+		failures        int
+		listingFailures int
+		total           int
+		want            bool
+	}{
+		{"no failures no scrapes is healthy", 0, 0, 0, true},
+		{"no failures with scrapes is healthy", 0, 0, 5, true},
+		{"listing failures only excluded stays healthy", 3, 3, 0, true},
+		{"sole package failure is a total outage", 1, 0, 1, false},
+		{"exactly half failures stays healthy", 1, 0, 2, true},
+		{"majority but not total is unhealthy", 2, 0, 3, false},
+		{"all packages failed is unhealthy", 3, 0, 3, false},
+		{"clear minority stays healthy", 1, 0, 4, true},
+		{"listing failure plus half package failures stays healthy", 3, 1, 4, true},
+		{"listing failure plus majority package failures is unhealthy", 4, 1, 4, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pkgHealthy(tt.failures, tt.listingFailures, tt.total); got != tt.want {
+				t.Errorf("pkgHealthy(failures=%d, listingFailures=%d, total=%d) = %v, want %v",
+					tt.failures, tt.listingFailures, tt.total, got, tt.want)
+			}
+		})
+	}
+}

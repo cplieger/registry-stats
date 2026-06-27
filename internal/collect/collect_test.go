@@ -54,7 +54,7 @@ func newFakeGHCR() *fakeSource {
 // fixedTime returns a clock that always returns the same instant.
 func fixedTime(t time.Time) func() time.Time { return func() time.Time { return t } }
 
-func TestRun_healthy_saves_snapshot_with_both_registries(t *testing.T) {
+func TestRun_healthy_returns_snapshot_with_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []model.RegistryEntry{
@@ -73,7 +73,7 @@ func TestRun_healthy_saves_snapshot_with_both_registries(t *testing.T) {
 
 	fixed := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
 
-	snap, healthy, err := collect.Run(ctx, collect.Options{
+	snap, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		Now:     fixedTime(fixed),
@@ -87,9 +87,6 @@ func TestRun_healthy_saves_snapshot_with_both_registries(t *testing.T) {
 			return nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v, want nil", err)
-	}
 	if !healthy {
 		t.Error("Run() healthy = false, want true")
 	}
@@ -127,7 +124,7 @@ func TestRun_skips_empty_refs(t *testing.T) {
 
 	gh := newFakeGHCR() // would fail if invoked (healthy stays false)
 
-	_, healthy, err := collect.Run(ctx, collect.Options{
+	_, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		Now:     time.Now,
@@ -138,9 +135,6 @@ func TestRun_skips_empty_refs(t *testing.T) {
 			return nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if !healthy {
 		t.Error("Run() healthy = false, want true (ghcr was skipped, not failed)")
 	}
@@ -149,15 +143,12 @@ func TestRun_skips_empty_refs(t *testing.T) {
 	}
 }
 
-func TestRun_no_sources_configured_does_not_save(t *testing.T) {
+func TestRun_no_sources_configured_returns_unhealthy(t *testing.T) {
 	ctx := t.Context()
-	snap, healthy, err := collect.Run(ctx, collect.Options{
+	snap, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{},
 		Logger:  testsupport.QuietLogger(),
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if healthy {
 		t.Error("Run() healthy = true, want false for empty-snapshot path")
 	}
@@ -166,23 +157,20 @@ func TestRun_no_sources_configured_does_not_save(t *testing.T) {
 	}
 }
 
-func TestRun_all_sources_empty_entries_does_not_save(t *testing.T) {
+func TestRun_all_sources_empty_entries_returns_unhealthy(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.attempted = 3 // healthy stays false
 	gh := newFakeGHCR()
 	gh.attempted = 2
 
-	snap, healthy, err := collect.Run(ctx, collect.Options{
+	snap, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(name string) []model.RepoRef {
 			return []model.RepoRef{{Owner: "x", Repo: "y"}}
 		},
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if healthy {
 		t.Error("Run() healthy = true, want false when all collections failed")
 	}
@@ -191,7 +179,7 @@ func TestRun_all_sources_empty_entries_does_not_save(t *testing.T) {
 	}
 }
 
-func TestRun_partial_success_saves_with_degraded_flag(t *testing.T) {
+func TestRun_partial_success_returns_snapshot_with_degraded_flag(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []model.RegistryEntry{{Name: "owner/app", PullCount: 1}}
@@ -203,16 +191,13 @@ func TestRun_partial_success_saves_with_degraded_flag(t *testing.T) {
 	gh := newFakeGHCR()
 	gh.attempted = 2
 
-	_, healthy, err := collect.Run(ctx, collect.Options{
+	_, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(name string) []model.RepoRef {
 			return []model.RepoRef{{Owner: "o", Repo: "r"}}
 		},
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if healthy {
 		t.Error("Run() healthy = true, want false (GHCR flagged unhealthy)")
 	}
@@ -231,14 +216,11 @@ func TestRun_unknown_source_drops_entries_and_logs(t *testing.T) {
 	dh.attempted = 1
 	dh.healthy = true
 
-	_, healthy, err := collect.Run(ctx, collect.Options{
+	_, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{unknown, dh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if !healthy {
 		t.Error("Run() healthy = false, want true (dockerhub was fine)")
 	}
@@ -262,14 +244,11 @@ func TestRun_entries_with_empty_name_are_dropped(t *testing.T) {
 	gh.attempted = 2
 	gh.healthy = true
 
-	snap, _, err := collect.Run(ctx, collect.Options{
+	snap, _ := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "x"}} },
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if len(snap.DockerHub) != 1 || snap.DockerHub[0].Repo != "o/good" {
 		t.Errorf("DockerHub empty-name should drop; got %+v", snap.DockerHub)
 	}
@@ -281,14 +260,11 @@ func TestRun_entries_with_empty_name_are_dropped(t *testing.T) {
 func TestRun_nil_refsfor_skips_all_sources(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub() // healthy stays false
-	_, healthy, err := collect.Run(ctx, collect.Options{
+	_, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh},
 		Logger:  testsupport.QuietLogger(),
 		// RefsFor: nil
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if healthy {
 		t.Error("Run() healthy = true, want false for no-op cycle")
 	}
@@ -306,13 +282,10 @@ func TestRun_defaults_logger_and_now(t *testing.T) {
 	dh.attempted = 1
 	dh.healthy = true
 
-	snap, _, err := collect.Run(ctx, collect.Options{
+	snap, _ := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh},
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
-	if err != nil {
-		t.Fatalf("Run() err = %v", err)
-	}
 	if snap == nil {
 		t.Fatal("snap = nil")
 	}
@@ -363,16 +336,13 @@ func TestRun_severe_degradation_warn_condition(t *testing.T) {
 			}
 			logger, buf := captureLogs()
 
-			_, _, err := collect.Run(t.Context(), collect.Options{
+			collect.Run(t.Context(), collect.Options{
 				Sources: []api.RegistrySource{src},
 				Logger:  logger,
 				RefsFor: func(string) []model.RepoRef {
 					return []model.RepoRef{{Owner: "owner", Repo: "x"}}
 				},
 			})
-			if err != nil {
-				t.Fatalf("Run() err = %v, want nil", err)
-			}
 
 			if got := strings.Contains(buf.String(), degradedMsg); got != tt.wantWarn {
 				t.Errorf("Run() severe-degradation warn emitted = %v, want %v (source=%s, entries=%d)",

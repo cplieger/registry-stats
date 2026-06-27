@@ -23,7 +23,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 
 - **Stateless** — no on-disk persistence required. The app polls registries and exposes current counts as Prometheus metrics. Time-series history lives in your Prometheus/Mimir backend.
 - **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` libraries supply retry/backoff, the health probe, and Prometheus exposition. Small, auditable supply chain.
-- **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static` with no shell or package manager, minimising attack surface.
+- **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
 - **Public repos only** — avoids credential management entirely; Docker Hub uses the unauthenticated API and GHCR counts are scraped from public package pages.
 
 ### Limitations
@@ -49,7 +49,6 @@ services:
     image: ghcr.io/cplieger/registry-stats:latest
     container_name: registry-stats
     restart: unless-stopped
-    user: "1000:1000"  # match your host user
 
     environment:
       TZ: "Europe/Paris"
@@ -71,9 +70,10 @@ services:
 | `TZ`                  | Container timezone                                                                                                                                                                                       | `Europe/Paris` | No       |
 | `DOCKERHUB_REPOS`     | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`)       | ``             | No       |
 | `GHCR_REPOS`          | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | ``             | No       |
-| `LOG_LEVEL`           | -                                                                                                                                                                                                        | `info`         | No       |
+| `LOG_LEVEL`           | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info`                                                                                                          | `info`         | No       |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images                   | `1`            | No       |
 | `ENABLE_METRICS`      | Enable Prometheus metrics endpoint                                                                                                                                                                       | `true`         | No       |
+| `LISTEN_ADDR`         | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port                                                                                             | `:9100`        | No       |
 
 ### Ports
 
@@ -90,7 +90,10 @@ The HTTP server listens on port 9100.
 #### `GET /api/health`
 
 Returns `{"status":"ok"}` when healthy, or `{"status":"unready","reason":"..."}` with HTTP 503
-during startup (before the first successful collect). Used as the Docker healthcheck endpoint.
+when the most recent collect cycle returned no data (every configured registry failed, or no repos
+are configured). The marker is set healthy as soon as the HTTP API is listening, so a slow first
+collect cannot trip the Docker healthcheck grace window; it flips to 503 only once a collect cycle
+completes with an empty result. Used as the Docker healthcheck endpoint.
 
 #### `GET /metrics`
 
@@ -100,7 +103,7 @@ Prometheus text format metrics. Includes:
 - `registrystats_image_tags{registry,owner,repo}` — tag count per image
 - `registrystats_http_requests_total{method,path,status}` — HTTP request counters
 - `registrystats_http_request_duration_seconds` — request latency histogram
-- `registrystats_collects_total{source}` — successful collects per source
+- `registrystats_collects_total{source}` — total collect runs per source (successful + failed; `collect_errors_total` is the failed subset, so `collect_errors_total / collects_total` is the per-source failure ratio)
 - `registrystats_collect_errors_total{source}` — failed collects per source
 - `registrystats_collect_duration_seconds` — collect cycle duration histogram
 - `process_goroutines`, `process_heap_bytes`, `process_uptime_seconds` — runtime metrics
@@ -147,7 +150,7 @@ overview, and tracked package count — all via standard PromQL.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. After each successful collection cycle the main process creates this file; if all configured registries fail, the file is removed. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. On startup the container collects immediately — if both registries are unreachable on first boot it starts unhealthy and recovers automatically on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps the marker present, and a cycle in which every configured registry fails removes it. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. The first collect runs in the background so a slow initial poll (GHCR paces each package by a few seconds) cannot exceed the Docker healthcheck grace window and trigger a restart loop: the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. If both registries are unreachable on first boot the marker flips to unhealthy after that cycle and recovers on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 
@@ -178,11 +181,13 @@ stores).
 
 **Details for advanced users:** URL path segments validated via
 `isSafeURLSegment` (rejects `/%\?#@:`). Response bodies capped
-via `io.LimitReader` (10 MB JSON, 4 MB HTML). HTTP server sets
+via `io.LimitReader` (10 MB JSON, 2 MB HTML). HTTP server sets
 all five timeouts. Retry-After response headers are honoured on
 429/503 responses (capped at the configured retry backoff
-ceiling). Semgrep flags `math/rand/v2` usage, which is correct
-for jitter timing (not crypto).
+ceiling). A GHCR page that exceeds the HTML body cap is treated
+as a format-change signal, not silently truncated. Semgrep flags
+`math/rand/v2` usage, which is correct for jitter timing (not
+crypto).
 
 ## Dependencies
 

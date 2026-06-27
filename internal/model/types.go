@@ -1,7 +1,10 @@
 // Package model holds the pure data types that describe a registry-stats
-// snapshot. Types here carry no behavior beyond JSON struct tags; the tags
-// define the Prometheus metric labels and the internal collect contract,
-// so they MUST stay identical across refactors.
+// snapshot. Types here carry no behavior beyond JSON struct tags. The
+// TagInfo/ImageInfo tags map the Docker Hub /tags/ API response (parsed via
+// dockerhub.ParseTagPage) and must stay identical to that upstream shape. The
+// Snapshot/RepoStats/GhcrStats tags are legacy on-disk-store keys retained
+// only by the model round-trip tests; v2 is stateless and never marshals
+// these types in production.
 package model
 
 import "time"
@@ -53,7 +56,7 @@ type RepoRef struct {
 
 // RegistryEntry is the registry-agnostic Collect() result used by
 // api.RegistrySource implementations. Later steps map it into the
-// per-registry on-disk arrays (docker_hub / ghcr). Zero-value fields are
+// per-registry snapshot slices (Snapshot.DockerHub / Snapshot.GHCR). Zero-value fields are
 // ignored for the registry that doesn't populate them (Tags/PullCount are
 // Docker Hub-only, DownloadCount is GHCR-only).
 type RegistryEntry struct {
