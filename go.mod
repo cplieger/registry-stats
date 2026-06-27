@@ -8,4 +8,4 @@ require github.com/cplieger/metrics/v2 v2.2.2
 
 require github.com/cplieger/health v1.1.4
 
-require github.com/cplieger/httpx/v2 v2.0.0
+require github.com/cplieger/httpx/v2 v2.0.1
