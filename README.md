@@ -189,6 +189,26 @@ as a format-change signal, not silently truncated. Semgrep flags
 `math/rand/v2` usage, which is correct for jitter timing (not
 crypto).
 
+### Hardened deployment
+
+To lock the container down further, layer these directives onto
+the Quick start service:
+
+```yaml
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - "/tmp:size=1m,mode=1777,noexec,nosuid,nodev"
+```
+
+`read_only: true` makes the root filesystem read-only, so the
+file-marker health probe needs a writable `/tmp`; the tmpfs
+supplies it. `size=1m` is ample for the bare `/tmp/.healthy`
+marker, the only thing registry-stats writes to disk.
+
 ## Dependencies
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
