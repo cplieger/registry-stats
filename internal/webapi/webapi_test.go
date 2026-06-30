@@ -169,3 +169,84 @@ func TestWithAccessLog_boundsMetricCardinalityOnUnmatchedRoutes(t *testing.T) {
 		t.Errorf("matched route lost its real path label (over-collapse); metrics:\n%s", body)
 	}
 }
+
+// TestNewHandlers_nilLoggerFallsBackToNonNil pins newHandlers' documented
+// contract: a nil logger is replaced by a usable (non-nil) default. Without
+// the fallback the shared error-logging helper would hold a nil logger, so
+// the constructor must never leave the field nil.
+func TestNewHandlers_nilLoggerFallsBackToNonNil(t *testing.T) {
+	h := newHandlers(&fakeHealth{}, nil)
+	if h.logger == nil {
+		t.Error("newHandlers(_, nil).logger = nil, want a non-nil fallback logger")
+	}
+}
+
+// TestWriteJSON_logsOnEncodeFailure verifies writeJSON's documented "logs on
+// error" behavior: when the value cannot be JSON-encoded and a logger is
+// present, the failure is logged. A channel is an unencodable type, so the
+// encoder returns an error. This pins both halves of the error guard
+// (err != nil AND logger != nil).
+func TestWriteJSON_logsOnEncodeFailure(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	writeJSON(httptest.NewRecorder(), make(chan int), logger)
+
+	if !strings.Contains(buf.String(), "failed to write JSON response") {
+		t.Errorf("writeJSON did not log on encode failure; logs: %q", buf.String())
+	}
+}
+
+// TestWriteJSON_silentOnSuccessfulEncode verifies the converse: a value that
+// encodes cleanly produces no error log, so the success path stays quiet
+// rather than logging a spurious failure.
+func TestWriteJSON_silentOnSuccessfulEncode(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	writeJSON(httptest.NewRecorder(), map[string]string{"status": "ok"}, logger)
+
+	if strings.Contains(buf.String(), "failed to write JSON response") {
+		t.Errorf("writeJSON logged an error on a successful encode; logs: %q", buf.String())
+	}
+}
+
+// TestNew_usesSuppliedLoggerForAccessLog confirms New wires the caller's
+// logger (not a fresh default) into the access-log middleware: a request
+// routed through the returned server's handler emits its access-log line
+// into the supplied logger's sink.
+func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := &fakeHealth{}
+	h.Set(true)
+	srv := New(Deps{Health: h, Logger: logger})
+
+	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
+
+	if !strings.Contains(buf.String(), "http request") {
+		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
+	}
+}
+
+// TestNew_listenAddrDefaultAndOverride pins New's address selection: an empty
+// ListenAddr falls back to the package default :9100, and a non-empty
+// ListenAddr is used verbatim on the returned server.
+func TestNew_listenAddrDefaultAndOverride(t *testing.T) {
+	tests := []struct {
+		name       string
+		listenAddr string
+		wantAddr   string
+	}{
+		{"empty falls back to default", "", ":9100"},
+		{"explicit address is used verbatim", ":18080", ":18080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(Deps{Health: &fakeHealth{}, Logger: testsupport.QuietLogger(), ListenAddr: tt.listenAddr})
+			if srv.Addr != tt.wantAddr {
+				t.Errorf("New(ListenAddr=%q).Addr = %q, want %q", tt.listenAddr, srv.Addr, tt.wantAddr)
+			}
+		})
+	}
+}
