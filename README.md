@@ -1,6 +1,6 @@
 # registry-stats
 
-[![Image Size](https://ghcr-badge.egpl.dev/cplieger/registry-stats/size)](https://github.com/cplieger/registry-stats/pkgs/container/registry-stats)
+[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/size.json)](https://github.com/cplieger/registry-stats/pkgs/container/registry-stats)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/registry-stats)](https://goreportcard.com/report/github.com/cplieger/registry-stats)
