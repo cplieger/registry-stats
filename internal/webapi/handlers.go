@@ -26,7 +26,7 @@ func newHandlers(health api.HealthSignal, logger *slog.Logger) *handlers {
 }
 
 // health handles GET /api/health. Returns the canonical JSON envelope
-// shared across the homelab's custom Go apps: 200 with {"status":"ok"}
+// shared across the cplieger Go apps: 200 with {"status":"ok"}
 // when the health signal reports ready, 503 with
 // {"status":"unready","reason":"..."} otherwise.
 func (h *handlers) health(w http.ResponseWriter, _ *http.Request) {
