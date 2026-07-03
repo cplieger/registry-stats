@@ -3,7 +3,6 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/size.json)](https://github.com/cplieger/registry-stats/pkgs/container/registry-stats)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/registry-stats)](https://goreportcard.com/report/github.com/cplieger/registry-stats)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/coverage.json)](https://github.com/cplieger/registry-stats/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/mutation.json)](https://github.com/cplieger/registry-stats/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13219/badge)](https://www.bestpractices.dev/projects/13219)
@@ -16,7 +15,7 @@ Track how many times your container images are pulled — with a ready-made Graf
 
 When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded — but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
 
-- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped by Alloy/Prometheus into Mimir/Thanos for native Grafana dashboards
+- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
 - Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to automatically discover and track all public repos for an owner. Wildcards are resolved on each poll cycle, so newly published images are picked up automatically.
 
 ### Why this design
@@ -24,7 +23,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 - **Stateless** — no on-disk persistence required. The app polls registries and exposes current counts as Prometheus metrics. Time-series history lives in your Prometheus/Mimir backend.
 - **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` libraries supply retry/backoff, the health probe, and Prometheus exposition. Small, auditable supply chain.
 - **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
-- **Public repos only** — avoids credential management entirely; Docker Hub uses the unauthenticated API and GHCR counts are scraped from public package pages.
+- **Public repos only** — avoids credential management entirely.
 
 ### Limitations
 
@@ -168,10 +167,8 @@ The container includes a built-in Docker healthcheck using a marker file at `/tm
 
 Prometheus metrics endpoint designed for internal scraping.
 No authentication required (standard for internal metrics APIs).
-Minimal dependencies (no non-`cplieger` runtime deps beyond
-`golang.org/x/sync`; uses the `cplieger` `httpx` / `health` /
-`metrics` libraries). Runs as `nonroot` on a distroless base
-image with no shell. The HTTP client follows redirects only
+Runs as `nonroot` on a distroless base image with no shell. The
+HTTP client follows redirects only
 within a host allowlist (`httpx.DockerGitHubRedirectPolicy`:
 `docker.com` / `github.com` / `githubusercontent.com`, 5-hop
 cap) so a compromised or misconfigured upstream cannot bounce
@@ -231,7 +228,7 @@ larger changes so the approach can be discussed before implementation.
 
 ## Disclaimer
 
-These images are built with care and follow security best practices, but they are intended for **homelab use**. No guarantees of fitness for production environments. Use at your own risk.
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
 This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
