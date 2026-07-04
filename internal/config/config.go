@@ -6,6 +6,7 @@
 package config
 
 import (
+	"cmp"
 	"log/slog"
 	"os"
 	"strconv"
@@ -71,19 +72,15 @@ func parseBoolEnv(s string) bool {
 	}
 }
 
-// parseLogLevel converts the LOG_LEVEL env var string to slog.Level.
-// Defaults to Info for unrecognized values.
+// parseLogLevel converts the LOG_LEVEL env var string to slog.Level. It
+// delegates to slog.Level.UnmarshalText (case-insensitive; also accepts offset
+// syntax such as "warn-4"), defaulting to Info for empty or unrecognized values.
 func parseLogLevel(s string) slog.Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
 		return slog.LevelInfo
 	}
+	return lvl
 }
 
 // ParseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
@@ -118,8 +115,5 @@ func ParseRepoRefs(s string) []model.RepoRef {
 // an explicitly-set empty string is treated as unset — sufficient for this
 // app's configuration where all values are non-empty or absent.
 func GetEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	return cmp.Or(os.Getenv(key), fallback)
 }
