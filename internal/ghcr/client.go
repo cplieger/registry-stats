@@ -76,8 +76,9 @@ func (c *Client) Source() model.RegistrySource { return model.SourceGHCR }
 // entries carry only the GHCR-relevant fields (Name, DownloadCount);
 // PullCount / LastUpdated / Tags stay zero-valued. attempted counts
 // per-package scrape attempts (listing failures do not contribute to
-// the per-package health ratio). healthy mirrors the legacy formula:
-// no per-package failures OR fewer failures than successes.
+// the per-package health ratio). healthy is true when there were no
+// per-package scrape failures, or package failures were at most half
+// of the attempts (a minority or a tie); see pkgHealthy.
 func (c *Client) Collect(
 	ctx context.Context,
 	refs []model.RepoRef,
@@ -102,11 +103,10 @@ var _ api.RegistrySource = (*Client)(nil)
 // values.
 func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.GhcrStats, attempted int, healthy bool) {
 	failures := 0
-	parseFailures := 0
+	pkgParseFailures := 0
 	total := 0
 	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, c.logger, refs, c.retryOpts)
 	failures += listingFailures
-	parseFailures += listingParseFailures
 
 	for _, ref := range packages {
 		// Space out every request (including the first) with randomized
@@ -130,7 +130,7 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 		if !res.ok {
 			failures++
 			if res.parseFailed {
-				parseFailures++
+				pkgParseFailures++
 			}
 			// Skip on failure rather than emitting a zero: a missing entry leaves this
 			// package's gauge unset for the cycle (a brief series gap that the
@@ -148,7 +148,8 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 	// changes need their own signal.
 	if listingParseFailures > 0 {
 		c.logger.Error("ghcr package listing HTML format may have changed",
-			"listing_parse_failures", listingParseFailures)
+			"listing_parse_failures", listingParseFailures,
+			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
 	// Surface a format-change ERROR as soon as a majority of scrapes
@@ -158,10 +159,10 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 	// Per-package parse failures only: listing parse failures have their own
 	// dedicated ERROR above and are not counted in total. Mirrors pkgHealthy,
 	// which already subtracts listingFailures from its ratio.
-	pkgParseFailures := parseFailures - listingParseFailures
 	if total > 0 && pkgParseFailures*2 > total {
 		c.logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
-			"total", total, "parse_failures", pkgParseFailures)
+			"total", total, "parse_failures", pkgParseFailures,
+			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
 	return results, total, pkgHealthy(failures, listingFailures, total)
@@ -204,6 +205,12 @@ type scrapeResult struct {
 func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeResult {
 	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// In-flight scrape cancelled by shutdown/deadline; expected, log at Debug not
+			// WARN (mirrors the expandWildcard listing site). Failure classification unchanged.
+			c.logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo, "error", err)
+			return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
+		}
 		c.logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
 		if errors.Is(err, httpx.ErrRateLimited) {
 			c.logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,

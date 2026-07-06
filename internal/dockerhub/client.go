@@ -82,9 +82,12 @@ func (c *Client) Source() model.RegistrySource { return model.SourceDockerHub }
 
 // Collect gathers pull counts and tag metadata for every ref in refs.
 // Returns the per-repo entries plus the attempted count (including
-// failures) and a healthy flag derived from the severe-degradation rule:
-// healthy is true when attempted == 0 or more than half of attempts
-// produced a result. Matches the Degraded + pre-refactor return shape.
+// failures) and a healthy flag. healthy is false when the collection is
+// severely degraded (see Degraded) OR when a wildcard owner-listing
+// wholly failed — a non-nil listing error that yielded zero usable
+// repos. The listing-failure signal is distinct because a wholesale
+// listing outage leaves attempted == 0, which Degraded alone reads as
+// healthy and would therefore mask a total Docker Hub outage.
 //
 // entries carry only the Docker Hub-relevant fields (Name, LastUpdated,
 // PullCount, Tags); DownloadCount is left zero so later collect-level
@@ -93,7 +96,7 @@ func (c *Client) Collect(
 	ctx context.Context,
 	refs []model.RepoRef,
 ) (entries []model.RegistryEntry, attempted int, healthy bool) {
-	results, attempted := collect(ctx, c, refs)
+	results, attempted, listingFailed := collect(ctx, c, refs)
 	entries = make([]model.RegistryEntry, 0, len(results))
 	for _, r := range results {
 		entries = append(entries, model.RegistryEntry{
@@ -103,71 +106,86 @@ func (c *Client) Collect(
 			Tags:        r.Tags,
 		})
 	}
-	return entries, attempted, !Degraded(results, attempted)
+	return entries, attempted, !Degraded(results, attempted) && !listingFailed
 }
 
 // Compile-time assertion: *Client satisfies api.RegistrySource.
 var _ api.RegistrySource = (*Client)(nil)
 
-// ListRepos paginates the Docker Hub owner listing endpoint and returns
-// each repo's Name (as owner/name), PullCount, and LastUpdated. Tags is
-// left nil for the caller to fill separately. Exposed as a method
-// receiver so tests that previously used the free-function form flip
-// to c.ListRepos cleanly; collectWildcards still calls the unexported
-// helper to share the paging machinery.
-func (c *Client) ListRepos(ctx context.Context, owner string) ([]model.RepoStats, error) {
-	return listRepos(ctx, c, owner)
-}
-
-// CollectTags fetches all tags for a Docker Hub repo in owner/name
-// form. Parse failures and transport errors terminate pagination; what
-// got fetched before the failure is returned. Exposed as a method
-// receiver for the same reason as ListRepos.
-func (c *Client) CollectTags(ctx context.Context, repo string) []model.TagInfo {
-	return collectTags(ctx, c, repo)
-}
-
-// collect is the shared implementation behind Client.Collect.
-func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RepoStats, attempted int) {
-	wildcardResults, wildcardAttempted, seen := collectWildcards(ctx, c, refs)
+// collect is the shared implementation behind Client.Collect. listingFailed
+// propagates the wildcard wholesale-listing-failure signal (see
+// collectWildcards) up to Collect so it can factor into the healthy verdict.
+func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RepoStats, attempted int, listingFailed bool) {
+	wildcardResults, wildcardAttempted, seen, listingFailed := collectWildcards(ctx, c, refs)
 	explicitResults, explicitAttempted := collectExplicit(ctx, c, refs, seen)
-	return append(wildcardResults, explicitResults...), wildcardAttempted + explicitAttempted
+	return append(wildcardResults, explicitResults...), wildcardAttempted + explicitAttempted, listingFailed
 }
 
 // collectWildcards expands every "*" ref into concrete repo entries by
 // listing the owner's public repos, then fetches each repo's tags. The
 // returned seen map tracks which repos were collected so collectExplicit
 // can skip duplicates.
-func collectWildcards(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RepoStats, attempted int, seen map[string]bool) {
+//
+// listingFailed is true when at least one wildcard owner-listing wholly
+// failed: listRepos returned a non-nil error AND yielded zero usable
+// repos. That case is distinct from a partial failure (some pages
+// succeeded, so listRepos returned an error alongside real repos) and
+// from a legitimately empty owner (nil error, zero repos) — only the
+// wholesale outage flags listingFailed, so a total Docker Hub listing
+// outage surfaces as unhealthy instead of an empty-but-healthy result.
+func collectWildcards(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RepoStats, attempted int, seen map[string]bool, listingFailed bool) {
 	seen = make(map[string]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {
 			continue
 		}
 		if ctx.Err() != nil {
-			return results, attempted, seen
+			return results, attempted, seen, listingFailed
 		}
-		repos, err := listRepos(ctx, c, ref.Owner)
-		if err != nil {
-			c.logger.Warn("docker hub listing partially failed", "owner", ref.Owner, "fetched", len(repos), "error", err)
-			// Fall through to use partial results from successful pages.
+		refResults, refAttempted, refFailed := collectWildcardRef(ctx, c, ref.Owner, seen)
+		results = append(results, refResults...)
+		attempted += refAttempted
+		if refFailed {
+			listingFailed = true
 		}
-		for i, r := range repos {
-			if ctx.Err() != nil {
-				return results, attempted, seen
-			}
-			if seen[r.Repo] {
-				continue
-			}
-			seen[r.Repo] = true
-			attempted++
-			repos[i].Tags = collectTags(ctx, c, r.Repo)
-			results = append(results, repos[i])
-			c.logger.Debug("docker hub repo collected", "repo", r.Repo, "pulls", r.PullCount, "tags", len(repos[i].Tags))
-		}
-		c.logger.Info("docker hub wildcard expanded", "owner", ref.Owner, "repos", len(repos))
 	}
-	return results, attempted, seen
+	return results, attempted, seen, listingFailed
+}
+
+// collectWildcardRef lists one owner's public repos and collects each
+// repo's tags, deduping against seen (shared across wildcard refs and the
+// later explicit pass, so this mutates it in place). listingFailed reports
+// a wholesale listing outage for this owner: a non-nil listRepos error that
+// yielded zero usable repos, in which case attempted won't increment for it
+// and Degraded would read the empty result as healthy — so Collect must see
+// the signal to report unhealthy. A partial failure (error alongside real
+// repos) and a legitimately empty owner (nil error, zero repos) both return
+// listingFailed=false, leaving the health verdict to the degradation path.
+func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[string]bool) (results []model.RepoStats, attempted int, listingFailed bool) {
+	repos, err := listRepos(ctx, c, owner)
+	if err != nil {
+		if len(repos) == 0 {
+			listingFailed = true
+			c.logger.Warn("docker hub listing wholly failed", "owner", owner, "error", err)
+		} else {
+			c.logger.Warn("docker hub listing partially failed", "owner", owner, "fetched", len(repos), "error", err)
+		}
+	}
+	for i, r := range repos {
+		if ctx.Err() != nil {
+			return results, attempted, listingFailed
+		}
+		if seen[r.Repo] {
+			continue
+		}
+		seen[r.Repo] = true
+		attempted++
+		repos[i].Tags = collectTags(ctx, c, r.Repo)
+		results = append(results, repos[i])
+		c.logger.Debug("docker hub repo collected", "repo", r.Repo, "pulls", r.PullCount, "tags", len(repos[i].Tags))
+	}
+	c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos))
+	return results, attempted, listingFailed
 }
 
 // collectExplicit fetches each non-wildcard ref unless it was already
@@ -268,14 +286,14 @@ func collectTags(ctx context.Context, c *Client, repo string) []model.TagInfo {
 			repo, PageSize, page)
 		data, err := get(ctx, c, tagsURL)
 		if err != nil {
-			c.logger.Error("docker hub tags fetch failed", "repo", repo, "page", page, "error", err)
+			c.logger.Warn("docker hub tags fetch failed", "repo", repo, "page", page, "error", err)
 			hitCap = false
 			break
 		}
 
 		next, pageTags, err := ParseTagPage(data)
 		if err != nil {
-			c.logger.Error("docker hub tags parse failed", "repo", repo, "error", err)
+			c.logger.Warn("docker hub tags parse failed", "repo", repo, "error", err)
 			hitCap = false
 			break
 		}

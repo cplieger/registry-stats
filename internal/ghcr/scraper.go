@@ -232,6 +232,13 @@ func expandWildcard(
 ) (out []model.RepoRef, listingFailures, listingParseFailures int) {
 	names, err := scrapePackageList(ctx, client, ref.Owner, opts)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Shutdown/deadline cancelled the listing scrape; expected, not a failure.
+			// Do not log ERROR -- avoids a false alert on the level=error GHCR stream on
+			// every SIGTERM that lands mid-listing. Counts unchanged (still 1 listing failure).
+			logger.Debug("ghcr package listing cancelled", "owner", ref.Owner, "error", err)
+			return packages, 1, 0
+		}
 		logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
 		if errors.Is(err, httpx.ErrRateLimited) {
 			logger.Warn("ghcr listing rate limited", "owner", ref.Owner,

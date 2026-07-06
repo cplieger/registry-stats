@@ -579,3 +579,54 @@ func TestFetchHTML_OverCap_IsFormatChanged(t *testing.T) {
 		t.Errorf("error = %v, want it to wrap *httpx.ResponseTooLargeError", err)
 	}
 }
+
+// TestParsePackageList_SkipsMalformedAndEmptyNames covers scanLine's two
+// defensive branches on malformed GHCR listing HTML: a package-link prefix
+// with no closing delimiter yields no packages (ErrHTMLFormatChanged), and a
+// prefix immediately followed by a delimiter (an empty name) is skipped
+// without aborting the scan, so a later valid link on the same line is still
+// parsed.
+func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		html    string
+		owner   string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:    "prefix with no closing delimiter yields no packages",
+			html:    `<a href="/users/owner/packages/container/package/app1`,
+			owner:   "owner",
+			wantErr: true,
+		},
+		{
+			name:  "empty name is skipped and a later valid link still parses",
+			html:  `<a href="/users/owner/packages/container/package/"></a><a href="/users/owner/packages/container/package/real">real</a>`,
+			owner: "owner",
+			want:  []string{"real"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParsePackageList(tt.html, tt.owner)
+			if tt.wantErr {
+				if !errors.Is(err, ErrHTMLFormatChanged) {
+					t.Fatalf("ParsePackageList err = %v, want ErrHTMLFormatChanged", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePackageList: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d packages %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for i, w := range tt.want {
+				if got[i] != w {
+					t.Errorf("[%d] = %q, want %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}

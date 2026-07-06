@@ -13,6 +13,8 @@ package main
 // package -- they were deleted with the store when v2 became stateless.
 
 import (
+	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,14 +22,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/registry-stats/internal/api"
 	configpkg "github.com/cplieger/registry-stats/internal/config"
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 )
 
-// TestLogConfig pins the "no repos configured" ERROR branch and
-// the happy-path config-summary INFO output. logConfig just logs —
-// the assertion is that it doesn't panic with a populated *Config.
+// TestLogConfig smoke-tests logConfig on a populated *Config: it emits the
+// per-repo and config-summary INFO lines and must not panic. The
+// "no repos configured" ERROR branch is covered by TestLogConfig_noReposLogsError.
 func TestLogConfig(t *testing.T) {
 	cfg := &configpkg.Config{
 		DockerHubRepos: []model.RepoRef{{Owner: "a", Repo: "b"}},
@@ -136,5 +139,114 @@ func TestUpdateImageMetrics_splitsOwnerRepoLabels(t *testing.T) {
 		if !strings.Contains(body, line) {
 			t.Errorf("metrics output missing %q\n got:\n%s", line, body)
 		}
+	}
+}
+
+// mainFakeSource is a canned api.RegistrySource for driving runCollect in
+// isolation from any HTTP path.
+type mainFakeSource struct {
+	src     model.RegistrySource
+	entries []model.RegistryEntry
+	healthy bool
+}
+
+func (f *mainFakeSource) Name() string                 { return f.src.String() }
+func (f *mainFakeSource) Source() model.RegistrySource { return f.src }
+
+func (f *mainFakeSource) Collect(_ context.Context, _ []model.RepoRef) ([]model.RegistryEntry, int, bool) {
+	return f.entries, len(f.entries), f.healthy
+}
+
+// TestRunCollect_partialSuccessStaysHealthy pins the health-marker contract
+// runCollect owns and that diverges from collect.Run's verdict: when one
+// registry produces data and the other fails, Run reports the cycle degraded
+// (healthy=false) but runCollect must still return true so the marker stays
+// healthy ("partial failures stay healthy as long as one repo succeeds").
+// Mutates process-global metrics, so no t.Parallel.
+func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
+	dh := &mainFakeSource{
+		src:     model.SourceDockerHub,
+		entries: []model.RegistryEntry{{Name: "o/app", PullCount: 1}},
+		healthy: true,
+	}
+	gh := &mainFakeSource{src: model.SourceGHCR, healthy: false} // no entries, unhealthy
+	cfg := &configpkg.Config{
+		DockerHubRepos: []model.RepoRef{{Owner: "o", Repo: "app"}},
+		GHCRRepos:      []model.RepoRef{{Owner: "o", Repo: "pkg"}},
+	}
+	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh, gh}); !got {
+		t.Error("runCollect() = false, want true (DockerHub produced data; partial success stays healthy)")
+	}
+}
+
+// TestRunCollect_allEmptyIsUnhealthy pins the other side of the contract: when
+// no registry produces an entry, runCollect returns false so the marker flips
+// unhealthy. Mutates process-global metrics, so no t.Parallel.
+func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
+	dh := &mainFakeSource{src: model.SourceDockerHub, healthy: false}
+	cfg := &configpkg.Config{DockerHubRepos: []model.RepoRef{{Owner: "o", Repo: "app"}}}
+	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh}); got {
+		t.Error("runCollect() = true, want false (no repo collected)")
+	}
+}
+
+// mainFakeMarker is a minimal api.HealthSignal for asserting the health flag
+// recoverAndMarkUnhealthy sets.
+type mainFakeMarker struct{ healthy bool }
+
+func (m *mainFakeMarker) Set(h bool)    { m.healthy = h }
+func (m *mainFakeMarker) Healthy() bool { return m.healthy }
+
+// TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs pins the
+// collect-goroutine panic safety net: a recovered panic must flip the marker
+// unhealthy AND emit the "<phase> panicked" ERROR line Loki alerts key on (per
+// the function docstring). Swaps slog.Default to capture, so no t.Parallel.
+func TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs(t *testing.T) {
+	buf := &bytes.Buffer{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	m := &mainFakeMarker{healthy: true}
+	func() {
+		defer recoverAndMarkUnhealthy(m, "scheduled collect")
+		panic("boom")
+	}()
+
+	if m.Healthy() {
+		t.Error("recoverAndMarkUnhealthy did not flip marker to unhealthy after a recovered panic")
+	}
+	if !strings.Contains(buf.String(), "scheduled collect panicked") {
+		t.Errorf("missing Loki-alert log line %q; logs:\n%s", "scheduled collect panicked", buf.String())
+	}
+}
+
+// TestRecoverAndMarkUnhealthy_noPanicLeavesMarker pins the no-op path: with no
+// panic in the deferred scope the marker is left untouched.
+func TestRecoverAndMarkUnhealthy_noPanicLeavesMarker(t *testing.T) {
+	m := &mainFakeMarker{healthy: true}
+	func() {
+		defer recoverAndMarkUnhealthy(m, "initial collect")
+	}()
+	if !m.Healthy() {
+		t.Error("recoverAndMarkUnhealthy flipped marker with no panic")
+	}
+}
+
+// TestLogConfig_noReposLogsError drives the no-repos ERROR branch that
+// TestLogConfig's comment claims to cover but does not (it passes a populated
+// *Config). With zero repos configured, logConfig must emit the operator-facing
+// "no repos configured" ERROR that warns the healthcheck will fail after the
+// first collect. Swaps slog.Default to capture, so no t.Parallel.
+func TestLogConfig_noReposLogsError(t *testing.T) {
+	buf := &bytes.Buffer{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	logConfig(&configpkg.Config{})
+
+	if !strings.Contains(buf.String(), "no repos configured") {
+		t.Errorf("logConfig with no repos did not emit the expected ERROR; logs:\n%s", buf.String())
 	}
 }

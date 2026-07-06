@@ -51,9 +51,9 @@ services:
 
     environment:
       TZ: "Europe/Paris"
+      # Set at least one repo; leaving both empty makes the container report unhealthy after the first collect.
       DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
       GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
-      LOG_LEVEL: "info"
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
 
     ports:
