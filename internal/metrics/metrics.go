@@ -83,14 +83,21 @@ type ImageMetric struct {
 	Tags     int
 }
 
-// SetImageMetrics replaces the current image gauge data atomically. Reset+Set
-// rather than incremental update so images that disappear from the snapshot
-// stop emitting.
+// SetImageMetrics replaces the current image gauge data for one collect cycle:
+// each gauge is cleared (Reset) then repopulated (Set) so images that disappear
+// from the snapshot stop emitting. It is NOT atomic -- imagePulls and imageTags are
+// updated independently with no enclosing lock, so a concurrent /metrics scrape (or
+// the overlapping initial-vs-scheduled collect in main.go) may briefly observe a
+// partial update. Each underlying library gauge op is individually mutex-guarded, so
+// there is no data race, and the next collect cycle restores a consistent view.
 func SetImageMetrics(images []ImageMetric) {
 	imagePulls.Reset()
 	imageTags.Reset()
 	for _, m := range images {
 		imagePulls.Set(float64(m.Pulls), m.Registry, m.Owner, m.Repo)
+		// Emit a tags series only for a positive count: GHCR entries carry no
+		// tag count (Collect populates DownloadCount only), so their Tags is 0
+		// and image_tags=0 would be misleading; a 0 pull count is a real value.
 		if m.Tags > 0 {
 			imageTags.Set(float64(m.Tags), m.Registry, m.Owner, m.Repo)
 		}

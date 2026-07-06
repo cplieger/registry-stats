@@ -98,6 +98,12 @@ func main() {
 	})
 
 	if cfg.PollInterval == 0 {
+		// One-shot mode: the background initial collect above is the ONLY
+		// collect. If it returns an empty snapshot the marker stays false and
+		// /api/health serves 503 until the container is restarted -- there is
+		// no re-poll to recover on. The README Healthcheck section's "recovers
+		// on the next successful poll" is scheduled-mode only; caveat it there
+		// too (README.md:152).
 		slog.Info("one-shot mode, serving collected data", "addr", cfg.ListenAddr)
 		select {
 		case <-ctx.Done():
@@ -266,7 +272,7 @@ func waitWithTimeout(wg *sync.WaitGroup, d time.Duration) {
 	select {
 	case <-done:
 	case <-time.After(d):
-		slog.Warn("initial collect goroutine did not finish within 10s of shutdown")
+		slog.Warn("initial collect goroutine did not finish before shutdown timeout", "timeout", d)
 	}
 }
 

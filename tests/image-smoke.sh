@@ -16,9 +16,9 @@ TIMEOUT=90
 
 # shellcheck disable=SC2329  # invoked indirectly via trap
 cleanup() {
-	echo "--- container logs (tail) ---"
-	docker logs "$NAME" 2>&1 | tail -40 || true
-	docker rm -f "$NAME" >/dev/null 2>&1 || true
+  echo "--- container logs (tail) ---"
+  docker logs "$NAME" 2>&1 | tail -40 || true
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -29,15 +29,27 @@ docker run -d --name "$NAME" -e DOCKERHUB_REPOS=library/alpine "$IMG" >/dev/null
 i=0
 status=starting
 while [ "$i" -lt "$TIMEOUT" ]; do
-	status=$(docker inspect --format '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}no-healthcheck{{ end }}' "$NAME" 2>/dev/null || echo gone)
-	case "$status" in
-	healthy) echo "registry-stats image smoke: ok (healthy after ${i}s)"; exit 0 ;;
-	unhealthy) echo "FAIL: registry-stats reported unhealthy"; exit 1 ;;
-	no-healthcheck) echo "FAIL: image has no HEALTHCHECK to assert against"; exit 1 ;;
-	gone) echo "FAIL: registry-stats container exited early"; exit 1 ;;
-	esac
-	i=$((i + 1))
-	sleep 1
+  status=$(docker inspect --format '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}no-healthcheck{{ end }}' "$NAME" 2>/dev/null || echo gone)
+  case "$status" in
+    healthy)
+      echo "registry-stats image smoke: ok (healthy after ${i}s)"
+      exit 0
+      ;;
+    unhealthy)
+      echo "FAIL: registry-stats reported unhealthy"
+      exit 1
+      ;;
+    no-healthcheck)
+      echo "FAIL: image has no HEALTHCHECK to assert against"
+      exit 1
+      ;;
+    gone)
+      echo "FAIL: registry-stats container exited early"
+      exit 1
+      ;;
+  esac
+  i=$((i + 1))
+  sleep 1
 done
 echo "FAIL: registry-stats did not become healthy within ${TIMEOUT}s (last status: $status)"
 exit 1

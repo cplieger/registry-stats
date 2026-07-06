@@ -2,6 +2,7 @@ package ghcr
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -358,5 +359,34 @@ func TestPkgHealthy(t *testing.T) {
 					tt.failures, tt.listingFailures, tt.total, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCollect_ContextCancelledDuringPacing pins collect's graceful-shutdown
+// path: when ctx is already cancelled, the per-package pacing select takes
+// the ctx.Done branch on the first iteration and returns immediately with
+// the results gathered so far, the attempted count, and the pkgHealthy
+// verdict for the partial counts, rather than blocking on the pacing timer
+// or panicking. MinPacing is an hour so the timer cannot fire before the
+// cancelled ctx wins the select, making the branch deterministic without a
+// real sleep; no HTTP request is issued because cancellation precedes the
+// first scrape (buildPackageList makes no network call for an explicit ref).
+func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
+	c := NewClient(http.DefaultClient, shortRetry(),
+		Options{MinPacing: time.Hour, PacingJitter: time.Nanosecond}, testsupport.QuietLogger())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	entries, attempted, healthy := c.Collect(ctx, []model.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+
+	if attempted != 0 {
+		t.Errorf("Collect attempted = %d, want 0 (ctx cancelled before the first scrape)", attempted)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Collect entries = %+v, want none (cancelled before any scrape completed)", entries)
+	}
+	if !healthy {
+		t.Error("Collect healthy = false, want true (no package failures recorded before cancellation)")
 	}
 }

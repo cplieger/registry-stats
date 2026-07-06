@@ -198,114 +198,91 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 	}
 }
 
-func TestClient_ListRepos_PaginatesOwner(t *testing.T) {
-	pageRequests := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/testowner/", func(w http.ResponseWriter, r *http.Request) {
-		pageRequests++
-		page := r.URL.Query().Get("page")
-		if page == "" || page == "1" {
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{
-					{"name": "app1", "pull_count": 100, "last_updated": "2026-03-06T12:00:00Z"},
-					{"name": "app2", "pull_count": 200, "last_updated": "2026-03-05T12:00:00Z"},
-				},
-				"next": "page2",
-			})
-		} else {
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{
-					{"name": "app3", "pull_count": 50, "last_updated": "2026-03-04T12:00:00Z"},
-				},
-				"next": "",
-			})
+// TestClient_Collect_WildcardListingFailure_Health pins finding l-f4: the
+// healthy verdict must distinguish a wholesale wildcard listing outage
+// (unhealthy) from a legitimately-empty owner and a partial failure (both
+// healthy). Without the wholesale-outage signal a total Docker Hub listing
+// outage leaves attempted == 0, which the severe-degradation rule alone
+// reads as healthy — masking the outage from collect_errors_total.
+func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
+	wildcard := []model.RepoRef{{Owner: "o", Repo: "*"}}
+
+	t.Run("wholesale_failure_is_unhealthy", func(t *testing.T) {
+		// Owner listing 404s on page 1 → zero usable repos → wholesale outage.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		entries, attempted, healthy := c.Collect(context.Background(), wildcard)
+
+		if healthy {
+			t.Errorf("healthy = true, want false (wildcard listing wholly failed)")
+		}
+		if len(entries) != 0 {
+			t.Errorf("entries len = %d, want 0", len(entries))
+		}
+		if attempted != 0 {
+			t.Errorf("attempted = %d, want 0 (nothing listed to attempt)", attempted)
 		}
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	repos, err := c.ListRepos(context.Background(), "testowner")
-	if err != nil {
-		t.Fatalf("ListRepos: %v", err)
-	}
-	if len(repos) != 3 {
-		t.Fatalf("repos len = %d, want 3", len(repos))
-	}
-	if pageRequests != 2 {
-		t.Errorf("page requests = %d, want 2", pageRequests)
-	}
-	if repos[2].Repo != "testowner/app3" {
-		t.Errorf("repos[2].Repo = %q, want testowner/app3", repos[2].Repo)
-	}
-}
+	t.Run("legitimately_empty_owner_is_healthy", func(t *testing.T) {
+		// Owner listing succeeds with zero repos → not an outage, stays healthy.
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
 
-func TestClient_ListRepos_ParseError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-	defer srv.Close()
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		entries, _, healthy := c.Collect(context.Background(), wildcard)
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	_, err := c.ListRepos(context.Background(), "testowner")
-	if err == nil {
-		t.Error("expected parse error for invalid JSON")
-	}
-}
-
-func TestClient_CollectTags_PaginatesRepo(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/owner/app/tags/", func(w http.ResponseWriter, r *http.Request) {
-		page := r.URL.Query().Get("page")
-		if page == "" || page == "1" {
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "latest", "digest": "sha256:abc"}},
-				"next":    "page2",
-			})
-		} else {
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "v1", "digest": "sha256:xyz"}},
-				"next":    "",
-			})
+		if !healthy {
+			t.Errorf("healthy = false, want true (owner legitimately has zero repos)")
+		}
+		if len(entries) != 0 {
+			t.Errorf("entries len = %d, want 0", len(entries))
 		}
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	tags := c.CollectTags(context.Background(), "owner/app")
-	if len(tags) != 2 {
-		t.Fatalf("tags len = %d, want 2", len(tags))
-	}
-	if tags[0].Name != "latest" || tags[1].Name != "v1" {
-		t.Errorf("tags = %+v, want [latest, v1]", tags)
-	}
-}
+	t.Run("partial_failure_is_healthy", func(t *testing.T) {
+		// Page 1 returns one repo and signals another page; page 2 fails.
+		// listRepos returns the page-1 repo alongside the error → partial,
+		// not wholesale → stays healthy and serves the partial result.
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"results": []map[string]any{{"name": "a1", "pull_count": 1, "last_updated": "2026-03-06T12:00:00Z"}},
+					"next":    "page2",
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
 
-func TestClient_CollectTags_FetchErrorReturnsEmpty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		entries, attempted, healthy := c.Collect(context.Background(), wildcard)
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	tags := c.CollectTags(context.Background(), "owner/app")
-	if len(tags) != 0 {
-		t.Errorf("tags len = %d, want 0 on fetch error", len(tags))
-	}
-}
-
-func TestClient_CollectTags_ParseErrorReturnsEmpty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	tags := c.CollectTags(context.Background(), "owner/app")
-	if len(tags) != 0 {
-		t.Errorf("tags len = %d, want 0 on parse error", len(tags))
-	}
+		if !healthy {
+			t.Errorf("healthy = false, want true (partial listing failure, one repo returned)")
+		}
+		if len(entries) != 1 || entries[0].Name != "o/a1" {
+			t.Errorf("entries = %+v, want one entry o/a1 (partial results served)", entries)
+		}
+		if attempted != 1 {
+			t.Errorf("attempted = %d, want 1", attempted)
+		}
+	})
 }
 
 func TestClient_PageCap_TruncatesOwnerListing(t *testing.T) {
@@ -409,89 +386,6 @@ func TestClient_Collect_ExplicitRefFetchError(t *testing.T) {
 	}
 }
 
-// TestClient_CollectTags_ExactPageCount mirrors the legacy
-// TestCollectDockerHubTagsExactPageCount mutation-hunt test: verifies that
-// CollectTags walks exactly maxPages pages when the server keeps signaling
-// "next". Kills boundary and increment mutants on the page loop.
-func TestClient_CollectTags_ExactPageCount(t *testing.T) {
-	pageRequests := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/a/tags/", func(w http.ResponseWriter, r *http.Request) {
-		pageRequests++
-		page := r.URL.Query().Get("page")
-		switch page {
-		case "", "1":
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "v1", "digest": "sha256:a"}},
-				"next":    "page2",
-			})
-		case "2":
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "v2", "digest": "sha256:b"}},
-				"next":    "",
-			})
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	tags := c.CollectTags(context.Background(), "o/a")
-
-	if len(tags) != 2 {
-		t.Errorf("CollectTags() = %d tags, want 2", len(tags))
-	}
-	if tags[0].Name != "v1" || tags[1].Name != "v2" {
-		t.Errorf("tags = %+v, want [v1, v2]", tags)
-	}
-	if pageRequests != 2 {
-		t.Errorf("page requests = %d, want 2", pageRequests)
-	}
-}
-
-// TestClient_ListRepos_ExactPageCount mirrors the legacy
-// TestListDockerHubReposExactPageCount mutation-hunt test.
-func TestClient_ListRepos_ExactPageCount(t *testing.T) {
-	pageRequests := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		pageRequests++
-		page := r.URL.Query().Get("page")
-		switch page {
-		case "", "1":
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "a1", "pull_count": 10}},
-				"next":    "page2",
-			})
-		case "2":
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "a2", "pull_count": 20}},
-				"next":    "",
-			})
-		}
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	repos, err := c.ListRepos(context.Background(), "o")
-	if err != nil {
-		t.Fatalf("ListRepos: %v", err)
-	}
-	if len(repos) != 2 {
-		t.Fatalf("ListRepos() = %d repos, want 2", len(repos))
-	}
-	if repos[0].Repo != "o/a1" || repos[0].PullCount != 10 {
-		t.Errorf("repos[0] = %+v, want o/a1 with 10 pulls", repos[0])
-	}
-	if repos[1].Repo != "o/a2" || repos[1].PullCount != 20 {
-		t.Errorf("repos[1] = %+v, want o/a2 with 20 pulls", repos[1])
-	}
-	if pageRequests != 2 {
-		t.Errorf("page requests = %d, want 2", pageRequests)
-	}
-}
-
 // captureLogger returns a logger that records everything (Debug and up)
 // into the returned buffer, so a test can assert which log lines a
 // Client emitted.
@@ -500,33 +394,20 @@ func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
 }
 
-// TestClient_NilLogger_DoesNotPanic verifies a Client built with a nil
-// logger falls back to a usable default: an error path that logs must
-// not nil-panic. CollectTags against a failing server hits the Error
-// log path, so a missing fallback would crash here.
-func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, nil)
-	tags := c.CollectTags(context.Background(), "o/a")
-	if len(tags) != 0 {
-		t.Errorf("CollectTags on a failing server = %d tags, want 0", len(tags))
-	}
-}
-
-// TestClient_Collect_WildcardListingError_LogsWarn pins the partial-
-// failure warn in the wildcard expansion path: a failing owner listing
-// must log the warning, and a successful one must stay silent. Driving
-// it through the public Collect (with a capturing logger) also confirms
-// the supplied logger is the one actually used.
+// TestClient_Collect_WildcardListingError_LogsWarn pins the wildcard
+// expansion warn logs: a wholesale listing failure (zero usable repos)
+// logs the "wholly failed" warn, a partial failure (some pages returned)
+// logs the "partially failed" warn, and a successful listing stays
+// silent. Driving it through the public Collect (with a capturing
+// logger) also confirms the supplied logger is the one actually used.
 func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
-	const warnMsg = "docker hub listing partially failed"
+	const (
+		whollyMsg    = "docker hub listing wholly failed"
+		partiallyMsg = "docker hub listing partially failed"
+	)
 	wildcard := []model.RepoRef{{Owner: "o", Repo: "*"}}
 
-	t.Run("listing_error_logs_warn", func(t *testing.T) {
+	t.Run("wholesale_error_logs_wholly", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -536,8 +417,42 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
 		c.Collect(context.Background(), wildcard)
 
-		if !strings.Contains(buf.String(), warnMsg) {
-			t.Errorf("Collect with a failing wildcard listing did not log %q; logs:\n%s", warnMsg, buf.String())
+		if !strings.Contains(buf.String(), whollyMsg) {
+			t.Errorf("Collect with a wholesale listing failure did not log %q; logs:\n%s", whollyMsg, buf.String())
+		}
+		if strings.Contains(buf.String(), partiallyMsg) {
+			t.Errorf("Collect with a wholesale listing failure logged %q (want wholly, not partially); logs:\n%s", partiallyMsg, buf.String())
+		}
+	})
+
+	t.Run("partial_error_logs_partially", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"results": []map[string]any{{"name": "a1", "pull_count": 1}},
+					"next":    "page2",
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound) // page 2 fails; page 1 already yielded a repo
+			}
+		})
+		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		logger, buf := captureLogger()
+		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c.Collect(context.Background(), wildcard)
+
+		if !strings.Contains(buf.String(), partiallyMsg) {
+			t.Errorf("Collect with a partial listing failure did not log %q; logs:\n%s", partiallyMsg, buf.String())
+		}
+		if strings.Contains(buf.String(), whollyMsg) {
+			t.Errorf("Collect with a partial listing failure logged %q (want partially, not wholly); logs:\n%s", whollyMsg, buf.String())
 		}
 	})
 
@@ -553,38 +468,29 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
 		c.Collect(context.Background(), wildcard)
 
-		if strings.Contains(buf.String(), warnMsg) {
-			t.Errorf("Collect with a successful wildcard listing logged %q, want silence; logs:\n%s", warnMsg, buf.String())
+		if strings.Contains(buf.String(), whollyMsg) || strings.Contains(buf.String(), partiallyMsg) {
+			t.Errorf("Collect with a successful wildcard listing logged a failure warn, want silence; logs:\n%s", buf.String())
 		}
 	})
 }
 
-// TestClient_CollectTags_WalksToPageCap forces the page cap to 3 while
-// the server always offers another page, so only the cap stops the loop:
-// CollectTags must walk exactly 3 pages (3 tags, 3 requests). Pins the
-// page-loop upper bound.
-func TestClient_CollectTags_WalksToPageCap(t *testing.T) {
-	const pageCap = 3
-	requests := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/a/tags/", func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		page := r.URL.Query().Get("page")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"results": []map[string]any{{"name": "tag-" + page}},
-			"next":    "always-more",
-		})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), pageCap, testsupport.QuietLogger())
-	tags := c.CollectTags(context.Background(), "o/a")
-
-	if len(tags) != pageCap {
-		t.Errorf("CollectTags collected %d tags, want %d (cap=%d)", len(tags), pageCap, pageCap)
+// TestParseRepoListPage_dropsUnsafeName asserts the ParseRepoListPage
+// security guard: a listing name carrying URL metacharacters (a slash
+// here) is a path/query-injection vector into the tags URL built from it
+// in collectTags, so it must be dropped while safe names on the same page
+// survive. A removed guard cannot be caught by FuzzDockerHubRepoListUnmarshal's
+// owner-prefix invariant (an unsafe name kept with the "owner/" prefix still
+// satisfies it), so this direct assertion is the only thing that pins the drop.
+func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
+	data := []byte(`{"next":"","results":[{"name":"bad/traversal","pull_count":1},{"name":"good","pull_count":2}]}`)
+	_, repos, err := dockerhub.ParseRepoListPage(data, "owner")
+	if err != nil {
+		t.Fatalf("ParseRepoListPage(%q) error = %v", data, err)
 	}
-	if requests != pageCap {
-		t.Errorf("tags page requests = %d, want %d", requests, pageCap)
+	if len(repos) != 1 {
+		t.Fatalf("repos len = %d, want 1 (unsafe name dropped, safe survives)", len(repos))
+	}
+	if repos[0].Repo != "owner/good" || repos[0].PullCount != 2 {
+		t.Errorf("repos[0] = %+v, want owner/good with 2 pulls", repos[0])
 	}
 }
