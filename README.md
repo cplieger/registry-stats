@@ -50,7 +50,6 @@ services:
     restart: unless-stopped
 
     environment:
-      TZ: "Europe/Paris"
       # Set at least one repo; leaving both empty makes the container report unhealthy after the first collect.
       DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
       GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
@@ -66,7 +65,6 @@ services:
 
 | Variable              | Description                                                                                                                                                                                              | Default        | Required |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | -------- |
-| `TZ`                  | Container timezone                                                                                                                                                                                       | `Europe/Paris` | No       |
 | `DOCKERHUB_REPOS`     | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`)       | ``             | No       |
 | `GHCR_REPOS`          | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | ``             | No       |
 | `LOG_LEVEL`           | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info`                                                                                                          | `info`         | No       |
