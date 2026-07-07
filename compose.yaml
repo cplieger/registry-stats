@@ -6,7 +6,6 @@ services:
     restart: unless-stopped
 
     environment:
-      TZ: "Europe/Paris"
       # Set at least one repo; leaving both empty makes the container report unhealthy after the first collect.
       DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
       GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
