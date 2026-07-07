@@ -36,10 +36,13 @@ type RegistrySource interface {
 	) (entries []model.RegistryEntry, attempted int, healthy bool)
 }
 
-// HealthSignal abstracts the file-marker healthcheck used by distroless
-// containers. *health.Marker satisfies this; handlers use it to
-// render /api/health without reaching into a global.
+// HealthSignal abstracts the file-marker liveness healthcheck used by
+// distroless containers. *health.Marker satisfies it. The collect loop
+// flips it once per cycle (healthy when a cycle collected at least one
+// repo); the `registry-stats health` subcommand reads the marker file for
+// the Docker HEALTHCHECK. HTTP serving-readiness is a separate concern —
+// GET /api/health is backed by a webhttp.Ready gate, not this marker — so
+// this interface is deliberately write-only.
 type HealthSignal interface {
 	Set(healthy bool)
-	Healthy() bool
 }

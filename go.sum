@@ -4,5 +4,7 @@ github.com/cplieger/httpx/v2 v2.1.1 h1:SowDAs8mL3PqfSnFhS025sNLfmYSL+xAHP6M9MB9z
 github.com/cplieger/httpx/v2 v2.1.1/go.mod h1:DffGCIJihiQhVjn481ZYnA2HU26Qpvhd5swi+2rXdck=
 github.com/cplieger/metrics/v2 v2.2.2 h1:h5uS59t0abqIIFNe2KBkYI9QGfSuFxYwLwogZTqRzlk=
 github.com/cplieger/metrics/v2 v2.2.2/go.mod h1:92d0LHn9dLuEuw/FcsO1ZHHrMtMcj2kAfuZiHt5ghZQ=
+github.com/cplieger/webhttp v1.2.0 h1:eYOvBubDVcWTOiPPfJlLErxweCi99h6aqd7xfyZzN+Y=
+github.com/cplieger/webhttp v1.2.0/go.mod h1:LQLE9eJNI6RztoQoXsRGUpa+RlaWXE3HnL7q3rdWPsE=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
 pgregory.net/rapid v1.3.0/go.mod h1:dPlE4OBBxgXPqkP79flB6sJL1dx5azpI7HQ9MY9Z7uk=

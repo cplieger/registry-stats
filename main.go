@@ -11,8 +11,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,6 +33,7 @@ import (
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/model"
 	"github.com/cplieger/registry-stats/internal/webapi"
+	"github.com/cplieger/webhttp"
 )
 
 func main() {
@@ -40,6 +43,19 @@ func main() {
 		health.RunProbe(health.DefaultPath)
 	}
 
+	if err := run(); err != nil {
+		slog.Error("registry-stats exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// run is the composition root proper: it wires config, the health signals,
+// the registry clients, and the HTTP server, then drives the signal-driven
+// lifecycle via webhttp.Run. It returns a non-nil error when the HTTP server
+// fails to bind or serve — which main turns into a non-zero exit — and nil on
+// a clean signal-driven shutdown. Keeping the body here (rather than in main)
+// lets deferred cleanup run before the process exits on the error path.
+func run() error {
 	cfg := configpkg.LoadConfig()
 	setupLogging(cfg.LogLevel)
 	logConfig(&cfg)
@@ -54,6 +70,27 @@ func main() {
 	marker.Set(false)
 	defer marker.Cleanup()
 
+	// ready is the HTTP serving-readiness gate behind GET /api/health,
+	// deliberately distinct from the file-marker liveness probe above: it
+	// latches true only after the first successful collect (so /api/health
+	// reports ok once data exists) and is cleared on shutdown. The Docker
+	// HEALTHCHECK keeps using the file marker via `registry-stats health`.
+	var ready webhttp.Ready
+
+	srv := webapi.New(webapi.Deps{
+		Ready:         &ready,
+		Logger:        slog.Default(),
+		EnableMetrics: cfg.EnableMetrics,
+	})
+
+	// Bind the listener up front so a port-in-use error surfaces
+	// synchronously here rather than late inside a serve goroutine.
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("http server bind on %s: %w", cfg.ListenAddr, err)
+	}
+	slog.Info("http server starting", "addr", ln.Addr().String())
+
 	// Construct the shared client directly rather than via httpx.NewClient:
 	// the library's NewClient installs DefaultRedirectPolicy (same-host
 	// only), but registry-stats must follow Docker Hub / GHCR redirects
@@ -63,6 +100,7 @@ func main() {
 		Timeout:       30 * time.Second,
 		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
 	}
+	defer httpx.Close(httpClient)
 
 	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
 	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
@@ -71,26 +109,20 @@ func main() {
 	// Loki dashboards key on in their per-source panels.
 	sources := []api.RegistrySource{dh, gh}
 
-	srv := webapi.New(webapi.Deps{
-		Health:        marker,
-		Logger:        slog.Default(),
-		ListenAddr:    cfg.ListenAddr,
-		EnableMetrics: cfg.EnableMetrics,
-	})
-	srvErr := webapi.Start(srv, slog.Default())
-
-	// Mark healthy as soon as the HTTP API is listening. The first collect
-	// runs in the background so slow registries (GHCR per-package delays,
-	// Docker Hub pagination) can't push us past the Docker healthcheck
-	// grace window and trigger a restart loop. Subsequent collects in the
-	// scheduled loop still flip the marker based on their real outcome.
+	// Mark liveness healthy as soon as the HTTP API is bound. The first
+	// collect runs in the background so slow registries (GHCR per-package
+	// delays, Docker Hub pagination) can't push us past the Docker
+	// healthcheck grace window and trigger a restart loop. Subsequent
+	// collects still flip the marker based on their real outcome.
 	marker.Set(true)
 	slog.Info("http api ready, starting initial collection in background")
 
-	var initDone sync.WaitGroup
-	initDone.Go(func() {
+	// bg tracks the background collect goroutines (initial + scheduled) so
+	// the shutdown teardown can wait for them within the grace budget.
+	var bg sync.WaitGroup
+	bg.Go(func() {
 		defer recoverAndMarkUnhealthy(marker, "initial collect")
-		marker.Set(runCollect(ctx, &cfg, sources))
+		markCollect(ctx, &cfg, sources, marker, &ready)
 	})
 
 	if cfg.PollInterval == 0 {
@@ -99,29 +131,30 @@ func main() {
 		// /api/health serves 503 until the container is restarted -- there is
 		// no re-poll to recover on. The README Healthcheck section's "recovers
 		// on the next successful poll" is scheduled-mode only; caveat it there
-		// too (README.md:152).
-		slog.Info("one-shot mode, serving collected data", "addr", cfg.ListenAddr)
-		select {
-		case <-ctx.Done():
-		case err := <-srvErr:
-			if err != nil {
-				slog.Error("http server died, shutting down", "error", err)
-				stop()
-			}
-		}
+		// too (README.md:152). No scheduled loop is started; webhttp.Run
+		// (below) keeps serving the single collected snapshot until a signal or
+		// serve error arrives.
+		slog.Info("one-shot mode, serving collected data", "addr", ln.Addr().String())
 	} else {
 		slog.Info("scheduled mode", "interval", cfg.PollInterval, "jitter", "±10%")
-		runScheduled(ctx, &cfg, marker, sources, srvErr, stop)
+		bg.Go(func() { runScheduled(ctx, &cfg, marker, &ready, sources) })
 	}
 
-	// Wait (bounded) for any in-flight initial collect before shutting down
-	// the HTTP server. The collect respects ctx cancellation so this
-	// normally returns quickly; the 10s cap protects against a wedged
-	// scraper holding shutdown past stop_grace_period.
-	waitWithTimeout(&initDone, 10*time.Second)
+	// onShutdown runs once ctx is cancelled and in-flight requests have
+	// drained: flip both signals unhealthy so nothing new is routed, then
+	// bound the wait for the background collects. It shares webhttp.Run's
+	// shutdown-grace deadline.
+	onShutdown := func(shutdownCtx context.Context) {
+		slog.Info("shutting down", "cause", context.Cause(ctx))
+		ready.Set(false)
+		marker.Set(false)
+		waitWithTimeout(shutdownCtx, &bg)
+	}
 
-	webapi.Shutdown(srv, marker, context.Cause(ctx), slog.Default())
-	httpx.Close(httpClient)
+	// Run serves in the foreground until ctx is cancelled (SIGINT/SIGTERM)
+	// or Serve fails. A serve error is returned as non-nil (which main turns
+	// into a non-zero exit); a clean signal-driven shutdown returns nil.
+	return webhttp.Run(ctx, srv, ln, onShutdown, webhttp.WithShutdownGrace(10*time.Second))
 }
 
 // runCollect executes a single collection cycle against the shared
@@ -204,15 +237,37 @@ func splitOwnerRepo(id string) (owner, repo string) {
 	return owner, repo
 }
 
+// markCollect runs one collection cycle and reflects the outcome onto the
+// two health signals. The liveness marker tracks each cycle's result (a
+// cycle collecting at least one repo keeps it healthy; an all-fail cycle
+// clears it). The readiness flag only ever latches true — set once the
+// first cycle produces data, so GET /api/health advertises serving-
+// readiness once data exists — and is cleared solely on shutdown, never by
+// a later transient collect failure.
+func markCollect(
+	ctx context.Context,
+	cfg *configpkg.Config,
+	sources []api.RegistrySource,
+	marker api.HealthSignal,
+	ready *webhttp.Ready,
+) {
+	ok := runCollect(ctx, cfg, sources)
+	marker.Set(ok)
+	if ok {
+		ready.Set(true)
+	}
+}
+
 // runScheduled runs collection on each tick of a PollInterval-sized
-// timer with ±10% jitter, until ctx is cancelled.
+// timer with ±10% jitter, until ctx is cancelled. It runs in its own
+// goroutine; a dead HTTP server is handled by webhttp.Run returning in
+// the foreground, so the loop only needs to watch ctx.
 func runScheduled(
 	ctx context.Context,
 	cfg *configpkg.Config,
 	marker api.HealthSignal,
+	ready *webhttp.Ready,
 	sources []api.RegistrySource,
-	srvErr <-chan error,
-	stop context.CancelFunc,
 ) {
 	for {
 		// Add ±10% jitter to avoid predictable access patterns. Guard
@@ -227,17 +282,10 @@ func runScheduled(
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case err := <-srvErr:
-			timer.Stop()
-			if err != nil {
-				slog.Error("http server died, shutting down", "error", err)
-				stop()
-			}
-			return
 		case <-timer.C:
 			func() {
 				defer recoverAndMarkUnhealthy(marker, "scheduled collect")
-				marker.Set(runCollect(ctx, cfg, sources))
+				markCollect(ctx, cfg, sources, marker, ready)
 			}()
 		}
 	}
@@ -256,10 +304,10 @@ func recoverAndMarkUnhealthy(marker api.HealthSignal, phase string) {
 	}
 }
 
-// waitWithTimeout waits for wg up to d, then returns. Used to bound
-// graceful shutdown so a wedged collect goroutine can't hold the
-// HTTP server past stop_grace_period.
-func waitWithTimeout(wg *sync.WaitGroup, d time.Duration) {
+// waitWithTimeout blocks until wg's goroutines finish or ctx is done,
+// whichever comes first. Used in the shutdown teardown to bound how long
+// a wedged collect goroutine can hold the server past the grace deadline.
+func waitWithTimeout(ctx context.Context, wg *sync.WaitGroup) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -267,8 +315,8 @@ func waitWithTimeout(wg *sync.WaitGroup, d time.Duration) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(d):
-		slog.Warn("initial collect goroutine did not finish before shutdown timeout", "timeout", d)
+	case <-ctx.Done():
+		slog.Warn("collect goroutines did not finish before shutdown deadline")
 	}
 }
 
