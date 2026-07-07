@@ -7,53 +7,41 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
-	"github.com/cplieger/registry-stats/internal/api"
 	"github.com/cplieger/registry-stats/internal/metrics"
 	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/webhttp"
 )
 
-// fakeHealth is an in-memory api.HealthSignal for handler tests.
-type fakeHealth struct {
-	healthy atomic.Bool
-}
-
-// Compile-time assertion: *fakeHealth satisfies api.HealthSignal.
-var _ api.HealthSignal = (*fakeHealth)(nil)
-
-func (f *fakeHealth) Set(ok bool) { f.healthy.Store(ok) }
-
-func (f *fakeHealth) Healthy() bool { return f.healthy.Load() }
-
-// TestHealthHandler exercises the observable behavior of GET /api/health
-// across all three branches: a ready signal returns 200 {"status":"ok"};
-// an unready signal and a nil signal both return 503 with
-// {"status":"unready",...}. The response is always JSON.
-func TestHealthHandler(t *testing.T) {
-	healthy := &fakeHealth{}
-	healthy.Set(true)
-	unhealthy := &fakeHealth{} // zero value reports unhealthy
+// TestNew_readinessEndpoint pins the wiring of GET /api/health onto webhttp's
+// readiness gate through New's full middleware chain: 200 {"status":"ok"} when
+// the injected Ready view reports ready, and 503 {"status":"unready"} when it
+// does not — including a nil view, which New defaults to a not-ready gate
+// rather than panicking. This is the HTTP serving-readiness gate, distinct from
+// the container file-marker liveness probe.
+func TestNew_readinessEndpoint(t *testing.T) {
+	readyTrue := &webhttp.Ready{}
+	readyTrue.Set(true)
 
 	tests := []struct {
-		name        string
-		signal      api.HealthSignal
-		wantStatus  int
-		wantStatusF string
+		name       string
+		ready      webhttp.ReadinessChecker
+		wantStatus int
+		wantField  string
 	}{
-		{"ready signal returns 200 ok", healthy, http.StatusOK, "ok"},
-		{"unready signal returns 503 unready", unhealthy, http.StatusServiceUnavailable, "unready"},
-		{"nil signal returns 503 unready", nil, http.StatusServiceUnavailable, "unready"},
+		{"ready view returns 200 ok", readyTrue, http.StatusOK, "ok"},
+		{"unready view returns 503 unready", &webhttp.Ready{}, http.StatusServiceUnavailable, "unready"},
+		{"nil view returns 503 unready", nil, http.StatusServiceUnavailable, "unready"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newHandlers(tt.signal, testsupport.QuietLogger())
+			srv := New(Deps{Ready: tt.ready, Logger: testsupport.QuietLogger()})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 
-			h.health(rec, req)
+			srv.Handler.ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
@@ -65,10 +53,40 @@ func TestHealthHandler(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatalf("response body is not JSON: %v (body=%q)", err, rec.Body.String())
 			}
-			if body["status"] != tt.wantStatusF {
-				t.Errorf("status field = %q, want %q (body=%q)", body["status"], tt.wantStatusF, rec.Body.String())
+			if body["status"] != tt.wantField {
+				t.Errorf("status field = %q, want %q (body=%q)", body["status"], tt.wantField, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestNew_appliesSecurityHeaders confirms the webhttp.SecurityHeaders baseline
+// is wired into New's middleware chain: every response carries nosniff, the
+// DENY frame guard, and the referrer policy, and neither CSP nor HSTS is set
+// (this is a non-browser metrics/health endpoint).
+func TestNew_appliesSecurityHeaders(t *testing.T) {
+	readyTrue := &webhttp.Ready{}
+	readyTrue.Set(true)
+	srv := New(Deps{Ready: readyTrue, Logger: testsupport.QuietLogger()})
+
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+
+	h := rec.Header()
+	if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := h.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := h.Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Errorf("Referrer-Policy = %q, want strict-origin-when-cross-origin", got)
+	}
+	if got := h.Get("Content-Security-Policy"); got != "" {
+		t.Errorf("Content-Security-Policy = %q, want empty (no CSP on a metrics endpoint)", got)
+	}
+	if got := h.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("Strict-Transport-Security = %q, want empty (HSTS off)", got)
 	}
 }
 
@@ -92,7 +110,7 @@ func TestWithAccessLog_levelByStatus(t *testing.T) {
 			})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/x", nil)
-			WithAccessLog(next, logger).ServeHTTP(rec, req)
+			WithAccessLog(logger)(next).ServeHTTP(rec, req)
 
 			logs := buf.String()
 			if !strings.Contains(logs, "http request") {
@@ -116,10 +134,10 @@ func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := &fakeHealth{}
-			h.Set(true)
+			r := &webhttp.Ready{}
+			r.Set(true)
 			srv := New(Deps{
-				Health:        h,
+				Ready:         r,
 				Logger:        testsupport.QuietLogger(),
 				EnableMetrics: tt.enableMetrics,
 			})
@@ -145,7 +163,7 @@ func TestWithAccessLog_boundsMetricCardinalityOnUnmatchedRoutes(t *testing.T) {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	h := WithAccessLog(mux, testsupport.QuietLogger())
+	h := WithAccessLog(testsupport.QuietLogger())(mux)
 
 	// Matched route keeps its real method+path labels.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -170,47 +188,6 @@ func TestWithAccessLog_boundsMetricCardinalityOnUnmatchedRoutes(t *testing.T) {
 	}
 }
 
-// TestNewHandlers_nilLoggerFallsBackToNonNil pins newHandlers' documented
-// contract: a nil logger is replaced by a usable (non-nil) default. Without
-// the fallback the shared error-logging helper would hold a nil logger, so
-// the constructor must never leave the field nil.
-func TestNewHandlers_nilLoggerFallsBackToNonNil(t *testing.T) {
-	h := newHandlers(&fakeHealth{}, nil)
-	if h.logger == nil {
-		t.Error("newHandlers(_, nil).logger = nil, want a non-nil fallback logger")
-	}
-}
-
-// TestWriteJSON_logsOnEncodeFailure verifies writeJSON's documented "logs on
-// error" behavior: when the value cannot be JSON-encoded and a logger is
-// present, the failure is logged. A channel is an unencodable type, so the
-// encoder returns an error. This pins both halves of the error guard
-// (err != nil AND logger != nil).
-func TestWriteJSON_logsOnEncodeFailure(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	writeJSON(httptest.NewRecorder(), make(chan int), logger)
-
-	if !strings.Contains(buf.String(), "failed to write JSON response") {
-		t.Errorf("writeJSON did not log on encode failure; logs: %q", buf.String())
-	}
-}
-
-// TestWriteJSON_silentOnSuccessfulEncode verifies the converse: a value that
-// encodes cleanly produces no error log, so the success path stays quiet
-// rather than logging a spurious failure.
-func TestWriteJSON_silentOnSuccessfulEncode(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	writeJSON(httptest.NewRecorder(), map[string]string{"status": "ok"}, logger)
-
-	if strings.Contains(buf.String(), "failed to write JSON response") {
-		t.Errorf("writeJSON logged an error on a successful encode; logs: %q", buf.String())
-	}
-}
-
 // TestNew_usesSuppliedLoggerForAccessLog confirms New wires the caller's
 // logger (not a fresh default) into the access-log middleware: a request
 // routed through the returned server's handler emits its access-log line
@@ -218,35 +195,13 @@ func TestWriteJSON_silentOnSuccessfulEncode(t *testing.T) {
 func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h := &fakeHealth{}
-	h.Set(true)
-	srv := New(Deps{Health: h, Logger: logger})
+	r := &webhttp.Ready{}
+	r.Set(true)
+	srv := New(Deps{Ready: r, Logger: logger})
 
 	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
 
 	if !strings.Contains(buf.String(), "http request") {
 		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
-	}
-}
-
-// TestNew_listenAddrDefaultAndOverride pins New's address selection: an empty
-// ListenAddr falls back to the package default :9100, and a non-empty
-// ListenAddr is used verbatim on the returned server.
-func TestNew_listenAddrDefaultAndOverride(t *testing.T) {
-	tests := []struct {
-		name       string
-		listenAddr string
-		wantAddr   string
-	}{
-		{"empty falls back to default", "", ":9100"},
-		{"explicit address is used verbatim", ":18080", ":18080"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Deps{Health: &fakeHealth{}, Logger: testsupport.QuietLogger(), ListenAddr: tt.listenAddr})
-			if srv.Addr != tt.wantAddr {
-				t.Errorf("New(ListenAddr=%q).Addr = %q, want %q", tt.listenAddr, srv.Addr, tt.wantAddr)
-			}
-		})
 	}
 }
