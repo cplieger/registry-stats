@@ -105,6 +105,9 @@ here.
   against captured fragments in `internal/ghcr`. If you touch it, update the
   fixtures and keep the clear error-with-issue-link behavior on markup
   changes.
+- **Logs are UTC.** A `utcTimeAttr` slog `ReplaceAttr` forces every
+  record's timestamp to UTC, so the container needs no `TZ` and the binary
+  embeds no `time/tzdata`.
 
 ## Commits and PRs
 
