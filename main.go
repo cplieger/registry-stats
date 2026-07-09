@@ -25,14 +25,14 @@ import (
 
 	"github.com/cplieger/health"
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/api"
-	collectpkg "github.com/cplieger/registry-stats/internal/collect"
-	configpkg "github.com/cplieger/registry-stats/internal/config"
-	"github.com/cplieger/registry-stats/internal/dockerhub"
-	"github.com/cplieger/registry-stats/internal/ghcr"
-	"github.com/cplieger/registry-stats/internal/metrics"
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/webapi"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	collectpkg "github.com/cplieger/registry-stats/v2/internal/collect"
+	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
+	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
+	"github.com/cplieger/registry-stats/v2/internal/ghcr"
+	"github.com/cplieger/registry-stats/v2/internal/metrics"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/webapi"
 	"github.com/cplieger/webhttp"
 )
 

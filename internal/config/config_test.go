@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 	"pgregory.net/rapid"
 )
 

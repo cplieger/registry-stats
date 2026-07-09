@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // capturingLogger returns a logger that records every record (Debug and

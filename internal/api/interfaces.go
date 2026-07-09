@@ -11,7 +11,7 @@ package api
 import (
 	"context"
 
-	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/model"
 )
 
 // RegistrySource collects registry-specific statistics for a list of refs.

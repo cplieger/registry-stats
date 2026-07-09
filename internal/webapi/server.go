@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/registry-stats/internal/metrics"
+	"github.com/cplieger/registry-stats/v2/internal/metrics"
 	"github.com/cplieger/webhttp"
 )
 

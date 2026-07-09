@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/registry-stats/v2/internal/model"
 )
 
 // Options configures GHCR-specific scraper policy. Its zero value

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // mockClient wires an *http.Client whose transport redirects all requests
