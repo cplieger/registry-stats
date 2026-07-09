@@ -29,9 +29,9 @@ import (
 	"net/http"
 
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
 // Pagination caps. Chosen well above realistic usage so normal traffic

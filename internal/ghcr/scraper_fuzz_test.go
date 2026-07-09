@@ -3,7 +3,7 @@ package ghcr
 import (
 	"testing"
 
-	"github.com/cplieger/registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
 // FuzzParseDownloads drives the production download-count parser with

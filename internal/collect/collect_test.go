@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/collect"
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/registry-stats/v2/internal/collect"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // fakeSource is a canned-response api.RegistrySource used to exercise

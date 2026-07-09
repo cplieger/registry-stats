@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/registry-stats/internal/metrics"
-	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/v2/internal/metrics"
+	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 	"github.com/cplieger/webhttp"
 )
 

@@ -38,8 +38,8 @@ import (
 	"strings"
 
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/urlsafe"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
 // ErrHTMLFormatChanged is the sentinel returned for any GHCR HTML parse

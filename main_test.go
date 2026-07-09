@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/internal/api"
-	configpkg "github.com/cplieger/registry-stats/internal/config"
-	"github.com/cplieger/registry-stats/internal/metrics"
-	"github.com/cplieger/registry-stats/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
+	"github.com/cplieger/registry-stats/v2/internal/metrics"
+	"github.com/cplieger/registry-stats/v2/internal/model"
 )
 
 // TestLogConfig smoke-tests logConfig on a populated *Config: it emits the

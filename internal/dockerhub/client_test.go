@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/cplieger/httpx/v2"
-	"github.com/cplieger/registry-stats/internal/api"
-	"github.com/cplieger/registry-stats/internal/dockerhub"
-	"github.com/cplieger/registry-stats/internal/model"
-	"github.com/cplieger/registry-stats/internal/testsupport"
+	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
+	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // Compile-time assertion kept here (not in the package) so a change that
