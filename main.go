@@ -33,6 +33,7 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/metrics"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/webapi"
+	"github.com/cplieger/slogx"
 	"github.com/cplieger/webhttp"
 )
 
@@ -56,8 +57,13 @@ func main() {
 // a clean signal-driven shutdown. Keeping the body here (rather than in main)
 // lets deferred cleanup run before the process exits on the error path.
 func run() error {
+	// Install the UTC text handler up front at the default level so
+	// LoadConfig's own warnings (invalid POLL_INTERVAL_HOURS / LOG_LEVEL)
+	// render through the configured handler rather than slog's default; the
+	// parsed level is applied once LoadConfig has read it.
+	levelVar := slogx.Setup(slogx.Options{})
 	cfg := configpkg.LoadConfig()
-	setupLogging(cfg.LogLevel)
+	levelVar.Set(cfg.LogLevel)
 	logConfig(&cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -318,26 +324,6 @@ func waitWithTimeout(ctx context.Context, wg *sync.WaitGroup) {
 	case <-ctx.Done():
 		slog.Warn("collect goroutines did not finish before shutdown deadline")
 	}
-}
-
-// setupLogging configures slog based on the provided level. Called at the
-// top of main before any logging happens. Matches the convention in the other
-// Go apps in this repo (plex-exporter, plex-language-sync, subflux).
-func setupLogging(level slog.Level) {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr,
-		&slog.HandlerOptions{Level: level, ReplaceAttr: utcTimeAttr})))
-}
-
-// utcTimeAttr is a slog ReplaceAttr that renders the record's built-in time
-// key in UTC, so log-line timestamps are zone-stable regardless of the
-// container's TZ (the fleet logs-in-UTC standard). It rewrites only the
-// top-level time attribute; a user attribute that happens to share the "time"
-// key inside a group is left untouched.
-func utcTimeAttr(groups []string, a slog.Attr) slog.Attr {
-	if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
-		a.Value = slog.TimeValue(a.Value.Time().UTC())
-	}
-	return a
 }
 
 // logConfig logs the active configuration at startup (no secrets to redact).

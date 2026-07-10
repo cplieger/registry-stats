@@ -145,6 +145,24 @@ scrape_configs:
 The dashboard shows cumulative downloads, daily deltas, package
 overview, and tracked package count — all via standard PromQL.
 
+## Alerting
+
+registry-stats exposes Prometheus metrics at `/metrics`; scrape it (see
+[Grafana integration](#grafana-integration) for Alloy and Prometheus examples)
+and evaluate the rules in [`alerts.yaml`](alerts.yaml) with Prometheus or the
+Mimir ruler. Firing alerts deliver through your Alertmanager. They cover:
+
+| Alert | Fires when | Severity |
+| --- | --- | --- |
+| `RegistryStatsTargetDown` | the exporter is unscrapable for 15m (`up == 0`) | warning |
+| `RegistryStatsCollectStalled` | no collect cycle has completed in 3h (exporter up but not polling) | warning |
+| `RegistryStatsPullCountRegressed` | a tracked image's pull count drops below its 2-day max (a silent wrong scrape) | warning |
+
+Thresholds and the `for:` windows are starting points. The scrape `job` label
+is yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
+(matching the Alloy and Prometheus examples above), so adjust it to your scrape
+config. Route by whatever labels your Alertmanager uses.
+
 ## Healthcheck
 
 The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps the marker present, and a cycle in which every configured registry fails removes it. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. The first collect runs in the background so a slow initial poll (GHCR paces each package by a few seconds) cannot exceed the Docker healthcheck grace window and trigger a restart loop: the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. If both registries are unreachable on first boot the marker flips to unhealthy after that cycle and recovers on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.

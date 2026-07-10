@@ -337,3 +337,41 @@ func TestLoadConfig_LogLevel(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfig_invalidLogLevel_warns verifies an unrecognized LOG_LEVEL is
+// surfaced with a warning (not silently swallowed) while still falling back to
+// Info — matching the app's own warn-and-default handling of a malformed
+// POLL_INTERVAL_HOURS. Reuses captureClampLog to observe the warning.
+func TestLoadConfig_invalidLogLevel_warns(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("LOG_LEVEL", "bogus")
+	buf := captureClampLog(t)
+
+	cfg := LoadConfig()
+
+	if cfg.LogLevel != slog.LevelInfo {
+		t.Errorf("LoadConfig(LOG_LEVEL=bogus).LogLevel = %v, want Info (fallback)", cfg.LogLevel)
+	}
+	if !strings.Contains(buf.String(), "invalid LOG_LEVEL") {
+		t.Errorf("invalid LOG_LEVEL emitted no warning, want one (log=%q)", buf.String())
+	}
+}
+
+// TestLoadConfig_validLogLevel_silent confirms the warn fires only on invalid
+// input: a valid LOG_LEVEL parses without emitting the invalid-level warning.
+func TestLoadConfig_validLogLevel_silent(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("LOG_LEVEL", "warn")
+	buf := captureClampLog(t)
+
+	cfg := LoadConfig()
+
+	if cfg.LogLevel != slog.LevelWarn {
+		t.Errorf("LoadConfig(LOG_LEVEL=warn).LogLevel = %v, want Warn", cfg.LogLevel)
+	}
+	if strings.Contains(buf.String(), "invalid LOG_LEVEL") {
+		t.Errorf("valid LOG_LEVEL emitted an invalid-level warning, want none (log=%q)", buf.String())
+	}
+}
