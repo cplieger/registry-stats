@@ -10,4 +10,4 @@ require github.com/cplieger/health v1.1.6
 
 require github.com/cplieger/httpx/v2 v2.4.0
 
-require github.com/cplieger/webhttp v1.2.1
+require github.com/cplieger/webhttp v1.3.0
