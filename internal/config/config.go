@@ -15,6 +15,7 @@ import (
 
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
+	"github.com/cplieger/slogx"
 )
 
 // Default values for env-var-backed fields. Exported for test assertions.
@@ -52,12 +53,18 @@ func LoadConfig() Config {
 		pollIntervalHours = maxPollHours
 	}
 
+	rawLogLevel := GetEnv("LOG_LEVEL", "")
+	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
+	if !logLevelOK {
+		slog.Warn("invalid LOG_LEVEL, using default", "value", rawLogLevel, "default", "info")
+	}
+
 	return Config{
 		DockerHubRepos: ParseRepoRefs(GetEnv("DOCKERHUB_REPOS", "")),
 		GHCRRepos:      ParseRepoRefs(GetEnv("GHCR_REPOS", "")),
 		PollInterval:   time.Duration(pollIntervalHours) * time.Hour,
 		ListenAddr:     GetEnv("LISTEN_ADDR", DefaultListenAddr),
-		LogLevel:       parseLogLevel(GetEnv("LOG_LEVEL", "")),
+		LogLevel:       logLevel,
 		EnableMetrics:  parseBoolEnv(GetEnv("ENABLE_METRICS", "true")),
 	}
 }
@@ -70,17 +77,6 @@ func parseBoolEnv(s string) bool {
 	default:
 		return true
 	}
-}
-
-// parseLogLevel converts the LOG_LEVEL env var string to slog.Level. It
-// delegates to slog.Level.UnmarshalText (case-insensitive; also accepts offset
-// syntax such as "warn-4"), defaulting to Info for empty or unrecognized values.
-func parseLogLevel(s string) slog.Level {
-	var lvl slog.Level
-	if err := lvl.UnmarshalText([]byte(strings.TrimSpace(s))); err != nil {
-		return slog.LevelInfo
-	}
-	return lvl
 }
 
 // ParseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"

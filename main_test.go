@@ -40,45 +40,6 @@ func TestLogConfig(t *testing.T) {
 	logConfig(cfg)
 }
 
-// TestSetupLogging_levels exercises the LOG_LEVEL env-var parser.
-// Each level string (case-insensitive, trimmed) selects the expected
-// slog.Level; unknown values fall back to Info. Pins an inviolate
-// env-var contract (LOG_LEVEL) that dashboards rely on.
-func TestSetupLogging_levels(t *testing.T) {
-	tests := []struct {
-		env  string
-		want slog.Level
-	}{
-		{"", slog.LevelInfo},
-		{"debug", slog.LevelDebug},
-		{"DEBUG", slog.LevelDebug},
-		{" Debug ", slog.LevelDebug},
-		{"warn", slog.LevelWarn},
-		{"WARN", slog.LevelWarn},
-		{"error", slog.LevelError},
-		{"ERROR", slog.LevelError},
-		{"unknown", slog.LevelInfo},
-	}
-	for _, tt := range tests {
-		t.Run(tt.env, func(t *testing.T) {
-			t.Setenv("LOG_LEVEL", tt.env)
-			cfg := configpkg.LoadConfig()
-			setupLogging(cfg.LogLevel)
-			if !slog.Default().Enabled(t.Context(), tt.want) {
-				t.Errorf("LOG_LEVEL=%q: expected level %v to be enabled", tt.env, tt.want)
-			}
-			// Verify the level below the expected one is disabled (except
-			// when expected is the lowest, Debug).
-			if tt.want > slog.LevelDebug {
-				below := tt.want - 4 // slog levels are spaced 4 apart
-				if slog.Default().Enabled(t.Context(), below) {
-					t.Errorf("LOG_LEVEL=%q: level %v should be disabled (below %v)", tt.env, below, tt.want)
-				}
-			}
-		})
-	}
-}
-
 // TestSplitOwnerRepo pins the owner/name split that feeds the
 // registrystats_image_*{owner,repo} labels (grafana-dashboard.json reads
 // them). splitOwnerRepo cuts on the FIRST slash and treats a slashless

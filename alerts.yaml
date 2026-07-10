@@ -1,0 +1,49 @@
+# Recommended alert rules for registry-stats. Prometheus / Mimir ruler rule
+# group (PromQL): scrape the exporter's /metrics endpoint and evaluate these
+# with Prometheus or the Mimir ruler; firing alerts deliver through your
+# Alertmanager like any other Prometheus alert. Thresholds, the `for:` windows,
+# and the severity labels are starting points; the scrape `job` label is yours
+# (set it to match your scrape config -- the examples below assume
+# job="registry-stats").
+groups:
+  - name: registry-stats
+    rules:
+      - alert: RegistryStatsTargetDown
+        expr: up{job="registry-stats"} == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats exporter down"
+          description: >
+            The registry-stats exporter (Docker Hub / GHCR pull-count tracker)
+            has been unscrapable for 15m; image-pull dashboards will go stale.
+            Check `docker logs registry-stats` and your Alloy or Prometheus
+            scrape. The `job` label is whatever you set in your scrape config.
+      - alert: RegistryStatsCollectStalled
+        expr: sum(increase(registrystats_collects_total[3h])) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats has not completed a collect cycle in 3h"
+          description: >
+            registrystats_collects_total has not advanced in 3h (the default
+            poll interval is hourly). The exporter is up but not polling Docker
+            Hub/GHCR. Check `docker logs registry-stats` for source/scrape
+            errors.
+      - alert: RegistryStatsPullCountRegressed
+        expr: registrystats_image_pulls_total < max_over_time(registrystats_image_pulls_total[2d])
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats pull count regressed for {{ $labels.registry }}/{{ $labels.owner }}/{{ $labels.repo }}"
+          description: >
+            registrystats_image_pulls_total for this image is LOWER than its
+            highest value over the last 2 days. Real pull counts only increase,
+            so a drop means a scrape produced a wrong count without erroring
+            (the silent-wrong-count corner of the GHCR ParseDownloads heuristic
+            in internal/ghcr/scraper.go). Check `docker logs registry-stats`
+            for the affected repo; if GitHub changed its package-page markup,
+            ParseDownloads needs updating.
