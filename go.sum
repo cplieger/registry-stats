@@ -6,7 +6,7 @@ github.com/cplieger/metrics/v2 v2.2.3 h1:+NMSpLfI72xb0LlzMnZE3g9W2P8PkQy+moMAYkY
 github.com/cplieger/metrics/v2 v2.2.3/go.mod h1:Xv5sjfH3kGN5F2Ond5HpyL3+2PjCupx1GeuuUUALnOM=
 github.com/cplieger/slogx v1.1.1 h1:GNlwUtowLx1BbRAVpaYFlMcTMKW7q+Heh2guay1wDhI=
 github.com/cplieger/slogx v1.1.1/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
-github.com/cplieger/webhttp v1.3.0 h1:0DF8bCi/tFbckYyG7LWnI7RpEzrpUt8MtflqNoS2i0o=
-github.com/cplieger/webhttp v1.3.0/go.mod h1:Nb8A8w/9MzFxB90Vbt6vQ/odRPd+hPedWekRkvIFnjg=
+github.com/cplieger/webhttp v1.4.0 h1:LidvtevrN14PRLURWurFrGCkaPrDA2vovgugo+z55CY=
+github.com/cplieger/webhttp v1.4.0/go.mod h1:Nb8A8w/9MzFxB90Vbt6vQ/odRPd+hPedWekRkvIFnjg=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
 pgregory.net/rapid v1.3.0/go.mod h1:dPlE4OBBxgXPqkP79flB6sJL1dx5azpI7HQ9MY9Z7uk=
