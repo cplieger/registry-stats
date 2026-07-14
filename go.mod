@@ -8,7 +8,7 @@ require github.com/cplieger/metrics/v2 v2.2.3
 
 require github.com/cplieger/health v1.1.7
 
-require github.com/cplieger/httpx/v2 v2.4.0
+require github.com/cplieger/httpx/v2 v2.5.0
 
 require github.com/cplieger/webhttp v1.6.0
 
