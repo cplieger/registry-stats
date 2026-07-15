@@ -32,7 +32,7 @@ func TestMetricsHandler(t *testing.T) {
 		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 8`,
 		`registrystats_http_request_duration_seconds_bucket{le="0.025"}`,
 		`registrystats_collect_duration_seconds_count`,
-		`process_goroutines`,
+		`go_goroutines`,
 		`process_uptime_seconds`,
 	}
 	for _, line := range want {
