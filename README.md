@@ -103,7 +103,7 @@ Prometheus text format metrics. Includes:
 - `registrystats_collects_total{source}` — total collect runs per source (successful + failed; `collect_errors_total` is the failed subset, so `collect_errors_total / collects_total` is the per-source failure ratio)
 - `registrystats_collect_errors_total{source}` — failed collects per source
 - `registrystats_collect_duration_seconds` — collect cycle duration histogram
-- `process_goroutines`, `process_heap_bytes`, `process_uptime_seconds` — runtime metrics
+- `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds` — runtime metrics
 
 Disabled when `ENABLE_METRICS=false`.
 
