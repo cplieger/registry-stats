@@ -12,4 +12,4 @@ require github.com/cplieger/httpx/v2 v2.5.0
 
 require github.com/cplieger/webhttp v1.7.0
 
-require github.com/cplieger/slogx v1.1.1
+require github.com/cplieger/slogx v1.2.0
