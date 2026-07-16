@@ -1,11 +1,11 @@
-github.com/cplieger/health v1.2.0 h1:QQzQuvZ1IjBlH+foq7CqXBN7ClD7WLq62D6MFmA7joA=
-github.com/cplieger/health v1.2.0/go.mod h1:15Lm3XhPMU3nCEDfIH2hVAz6TXH06Wwiz9tgBi71vEE=
+github.com/cplieger/health v1.3.0 h1:RfL3tbfkrrzS3p4OHqDvy0hdmaoUQ5AuKeyPx3bYeu8=
+github.com/cplieger/health v1.3.0/go.mod h1:15Lm3XhPMU3nCEDfIH2hVAz6TXH06Wwiz9tgBi71vEE=
 github.com/cplieger/httpx/v2 v2.6.0 h1:KPBxno0EY/KcwXiB1Vi94bE4NFNaXxFyqnp02XBn9FY=
 github.com/cplieger/httpx/v2 v2.6.0/go.mod h1:Q3ulXhfiO40EGxIVofnz2KdJY1X3MSKZTwYhv/pL9W0=
 github.com/cplieger/metrics/v2 v2.3.0 h1:Ou2U0yKoXer9tR6qPuFDjbAs82MKww0s48e+ztbw2ts=
 github.com/cplieger/metrics/v2 v2.3.0/go.mod h1:Xv5sjfH3kGN5F2Ond5HpyL3+2PjCupx1GeuuUUALnOM=
-github.com/cplieger/slogx v1.2.0 h1:z9+DdEsg0JHMv9LJK5pz82Iw1Q/Qfjrrc0dVFH5gmKg=
-github.com/cplieger/slogx v1.2.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
+github.com/cplieger/slogx v1.3.0 h1:UXTm85V0ChnnTnAsSVq2Vl4Aywb7dw+FcYaBnzgnVHk=
+github.com/cplieger/slogx v1.3.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
 github.com/cplieger/webhttp v1.7.0 h1:6IX8F72urpw/+NvJXmO9Eqjehp7MzPqnWUnosN5LdW8=
 github.com/cplieger/webhttp v1.7.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
