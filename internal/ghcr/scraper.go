@@ -37,7 +37,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
@@ -67,10 +67,10 @@ const ghcrBodyCap = 2 << 20
 // applied left-to-right, these appended values always win, preserving
 // the pre-library behavior where the browser headers were installed
 // unconditionally and the body was capped at ghcrBodyCap.
-func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []httpx.Option) (string, error) {
+func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []httpx.GetOption) (string, error) {
 	// Build a fresh slice so the caller's opts (reused across every
 	// scrape via c.retryOpts) is never mutated by the append.
-	htmlOpts := make([]httpx.Option, 0, len(opts)+2)
+	htmlOpts := make([]httpx.GetOption, 0, len(opts)+2)
 	htmlOpts = append(htmlOpts, opts...)
 	htmlOpts = append(htmlOpts,
 		httpx.WithHeaders(func(req *http.Request) {
@@ -80,7 +80,7 @@ func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []
 		}),
 		httpx.WithMaxBodyBytes(ghcrBodyCap),
 	)
-	body, err := httpx.Retry(ctx, client, pageURL, htmlOpts...)
+	body, err := httpx.GetBytes(ctx, client, pageURL, htmlOpts...)
 	if err != nil {
 		// An over-cap response is a format signal, not a transport error: a
 		// GHCR page that suddenly exceeds ghcrBodyCap means the markup bloated
@@ -100,7 +100,7 @@ func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []
 // scrapePackageList fetches an owner's packages listing page and
 // returns the discovered package names. Returns ErrHTMLFormatChanged
 // (wrapped) when the HTML contains no recognized package links.
-func scrapePackageList(ctx context.Context, client *http.Client, owner string, opts []httpx.Option) ([]string, error) {
+func scrapePackageList(ctx context.Context, client *http.Client, owner string, opts []httpx.GetOption) ([]string, error) {
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages", owner)
 	html, err := fetchHTML(ctx, client, pageURL, opts)
 	if err != nil {
@@ -174,8 +174,8 @@ func ParsePackageList(html, owner string) ([]string, error) {
 
 // scrapeDownloads fetches a single package page and returns its total
 // download count. Non-2xx responses and transport errors bubble up as
-// httpx.Retry returned them; parse failures return ErrHTMLFormatChanged.
-func scrapeDownloads(ctx context.Context, client *http.Client, owner, pkg string, opts []httpx.Option) (int64, error) {
+// httpx.GetBytes returned them; parse failures return ErrHTMLFormatChanged.
+func scrapeDownloads(ctx context.Context, client *http.Client, owner, pkg string, opts []httpx.GetOption) (int64, error) {
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", owner, pkg)
 	html, err := fetchHTML(ctx, client, pageURL, opts)
 	if err != nil {
@@ -226,7 +226,7 @@ func expandWildcard(
 	client *http.Client,
 	logger *slog.Logger,
 	ref model.RepoRef,
-	opts []httpx.Option,
+	opts []httpx.GetOption,
 	seen map[string]bool,
 	packages []model.RepoRef,
 ) (out []model.RepoRef, listingFailures, listingParseFailures int) {
@@ -270,7 +270,7 @@ func buildPackageList(
 	client *http.Client,
 	logger *slog.Logger,
 	refs []model.RepoRef,
-	opts []httpx.Option,
+	opts []httpx.GetOption,
 ) (packages []model.RepoRef, listingFailures, listingParseFailures int) {
 	seen := make(map[string]bool)
 	for _, ref := range refs {

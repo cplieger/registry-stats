@@ -15,8 +15,9 @@ import (
 )
 
 // RegistrySource collects registry-specific statistics for a list of refs.
-// Implementations return registry-agnostic RegistryEntry values; the
-// orchestrator (internal/collect) maps them into per-registry slices.
+// Implementations return flat per-image RegistryEntry records; the
+// orchestrator (internal/collect) stamps each with the source's registry
+// label for the metric surface.
 // attempted counts refs the source tried to fetch (including failures)
 // so degraded detection can see the shortfall; healthy is true only
 // when the source met its per-source health criteria.

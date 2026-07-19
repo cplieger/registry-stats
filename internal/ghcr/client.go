@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 )
@@ -36,16 +36,16 @@ const (
 type Client struct {
 	http      *http.Client
 	logger    *slog.Logger
-	retryOpts []httpx.Option
+	retryOpts []httpx.GetOption
 	opts      Options
 }
 
 // NewClient returns a Client that uses the provided *http.Client for
 // all outbound requests, applying retryOpts to each call via
-// httpx.Retry. opts configures GHCR-specific pacing; its zero value
+// httpx.GetBytes. opts configures GHCR-specific pacing; its zero value
 // selects DefaultMinPacing + DefaultPacingJitter. A nil logger falls
 // back to slog.Default.
-func NewClient(client *http.Client, retryOpts []httpx.Option, opts Options, logger *slog.Logger) *Client {
+func NewClient(client *http.Client, retryOpts []httpx.GetOption, opts Options, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -73,25 +73,18 @@ func (c *Client) Source() model.RegistrySource { return model.SourceGHCR }
 // transient error cannot inject a false zero into the exposed gauge
 // (the per-day delta is computed downstream by Prometheus/Mimir, not here).
 //
-// entries carry only the GHCR-relevant fields (Name, DownloadCount);
-// PullCount / LastUpdated / Tags stay zero-valued. attempted counts
-// per-package scrape attempts (listing failures do not contribute to
-// the per-package health ratio). healthy is true when there were no
+// entries carry the GHCR-relevant fields (Owner, Repo, and the scraped
+// download count in Pulls); TagCount stays 0 — GHCR exposes no tag
+// count, so no image_tags series is emitted for its packages. attempted
+// counts per-package scrape attempts (listing failures do not contribute
+// to the per-package health ratio). healthy is true when there were no
 // per-package scrape failures, or package failures were at most half
 // of the attempts (a minority or a tie); see pkgHealthy.
 func (c *Client) Collect(
 	ctx context.Context,
 	refs []model.RepoRef,
 ) (entries []model.RegistryEntry, attempted int, healthy bool) {
-	results, attempted, healthy := collect(ctx, c, refs)
-	entries = make([]model.RegistryEntry, 0, len(results))
-	for _, r := range results {
-		entries = append(entries, model.RegistryEntry{
-			Name:          r.Package,
-			DownloadCount: r.DownloadCount,
-		})
-	}
-	return entries, attempted, healthy
+	return collect(ctx, c, refs)
 }
 
 // Compile-time assertion: *Client satisfies api.RegistrySource.
@@ -101,7 +94,7 @@ var _ api.RegistrySource = (*Client)(nil)
 // the pre-refactor result shape plus attempted count (total scrapes
 // across successes and failures) so the caller can decide its return
 // values.
-func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.GhcrStats, attempted int, healthy bool) {
+func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RegistryEntry, attempted int, healthy bool) {
 	failures := 0
 	pkgParseFailures := 0
 	total := 0
@@ -191,7 +184,7 @@ func (c *Client) pacingDelay() time.Duration {
 // when ok is true; parseFailed marks an ErrHTMLFormatChanged so the
 // caller can tally format drift separately from transport failures.
 type scrapeResult struct {
-	stat        model.GhcrStats
+	stat        model.RegistryEntry
 	ok          bool
 	parseFailed bool
 }
@@ -220,7 +213,7 @@ func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeRes
 	}
 	c.logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
 	return scrapeResult{
-		stat: model.GhcrStats{Package: ref.Owner + "/" + ref.Repo, DownloadCount: downloads},
+		stat: model.RegistryEntry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads},
 		ok:   true,
 	}
 }

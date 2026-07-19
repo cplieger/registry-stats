@@ -18,9 +18,8 @@ runs the signal-driven lifecycle. It contains no business logic, globals, or
 type aliases; everything testable lives under `internal/`.
 
 `internal/api/interfaces.go` is the composition spine. The small interfaces
-there (`RegistrySource`, `HealthSignal`, `HTTPDoer`) are what every other
-package depends on, and what test fakes implement. Concrete types live in their
-own packages:
+there (`RegistrySource`, `HealthSignal`) are what every other package depends
+on, and what test fakes implement. Concrete types live in their own packages:
 
 - `internal/config` — env-var loading and validation (`LoadConfig`).
 - `internal/dockerhub`, `internal/ghcr` — the two `RegistrySource`
@@ -90,9 +89,9 @@ here.
 ## Conventions and gotchas
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
-  to the `cplieger` shared libs (`httpx`, `metrics`, `health`) and
-  `pgregory.net/rapid` (test-only). Prefer the standard library before
-  reaching for a new dependency.
+  to the `cplieger` shared libs (`httpx`, `metrics`, `health`, `webhttp`,
+  `slogx`) and `pgregory.net/rapid` (test-only). Prefer the standard library
+  before reaching for a new dependency.
 - **`RegistrySource.Name()` must equal `Source().String()`.** Both surface the
   same lowercase registry label — one in log k/v pairs, the other for typed
   routing. They must never drift.

@@ -1,4 +1,4 @@
-// Package metrics is a thin wrapper around github.com/cplieger/metrics/v2
+// Package metrics is a thin wrapper around github.com/cplieger/metrics/v3
 // holding the registry-stats-specific metric instances and the SetImageMetrics
 // adapter (which converts a per-cycle slice of ImageMetric records into the
 // equivalent labeled-gauge state). The registry prefix ("registrystats") is
@@ -8,9 +8,10 @@ package metrics
 import (
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
-	cm "github.com/cplieger/metrics/v2"
+	cm "github.com/cplieger/metrics/v3"
 )
 
 // registry holds every metric this package exposes. The "registrystats" prefix
@@ -44,12 +45,13 @@ var (
 	CollectDuration = cm.NewHistogram(
 		"collect_duration_seconds",
 		"Collection cycle duration",
-		cm.WithBuckets(cm.APIBuckets),
+		cm.WithBuckets(cm.APIBuckets()),
 	)
 
 	// Per-image gauges populated by SetImageMetrics. Two parallel labeled
-	// gauges (pulls + tags) keyed on (registry, owner, repo). Exposed via
-	// Reset+Set on each cycle so deleted images naturally disappear.
+	// gauges (pulls + tags) keyed on (registry, owner, repo). Updated via
+	// Set-then-delete-stale on each cycle so deleted images disappear
+	// without the gauges ever being observably empty mid-update.
 	imagePulls = cm.NewLabeledGauge(
 		"image_pulls_total",
 		"Total pull count per image",
@@ -83,25 +85,54 @@ type ImageMetric struct {
 	Tags     int
 }
 
-// SetImageMetrics replaces the current image gauge data for one collect cycle:
-// each gauge is cleared (Reset) then repopulated (Set) so images that disappear
-// from the snapshot stop emitting. It is NOT atomic -- imagePulls and imageTags are
-// updated independently with no enclosing lock, so a concurrent /metrics scrape (or
-// the overlapping initial-vs-scheduled collect in main.go) may briefly observe a
-// partial update. Each underlying library gauge op is individually mutex-guarded, so
-// there is no data race, and the next collect cycle restores a consistent view.
+// setMu serializes SetImageMetrics passes: the initial and the first
+// scheduled collect can overlap (see main.go), and each pass reads and
+// replaces the previous cycle's label sets below.
+var setMu sync.Mutex
+
+// prevPulls and prevTags hold the label sets the previous SetImageMetrics
+// pass emitted, so the next pass can delete exactly the series that
+// disappeared instead of resetting the whole gauge. Guarded by setMu.
+var prevPulls, prevTags map[[3]string]bool
+
+// SetImageMetrics replaces the current image gauge data for one collect
+// cycle. Current values are Set in place first, then series absent from
+// this cycle are Deleted (diffed against the previous pass), so images
+// that disappear stop emitting. Unlike a Reset+Set pass, the gauges are
+// never observably empty mid-update: a concurrent /metrics scrape sees
+// every series with either its previous or its current cycle's value,
+// never a partially-populated set — so a scrape landing mid-update
+// cannot fake a pull-count regression to downstream alerting. (A scrape
+// may still straddle the per-series updates themselves — some series
+// fresh, some one cycle stale — which is benign for cumulative counts.)
 func SetImageMetrics(images []ImageMetric) {
-	imagePulls.Reset()
-	imageTags.Reset()
+	setMu.Lock()
+	defer setMu.Unlock()
+	pulls := make(map[[3]string]bool, len(images))
+	tags := make(map[[3]string]bool, len(images))
 	for _, m := range images {
+		key := [3]string{m.Registry, m.Owner, m.Repo}
 		imagePulls.Set(float64(m.Pulls), m.Registry, m.Owner, m.Repo)
-		// Emit a tags series only for a positive count: GHCR entries carry no
-		// tag count (Collect populates DownloadCount only), so their Tags is 0
-		// and image_tags=0 would be misleading; a 0 pull count is a real value.
+		pulls[key] = true
+		// Emit a tags series only for a positive count: GHCR entries carry
+		// no tag count, and a Docker Hub count-fetch failure leaves 0, so
+		// image_tags=0 would be misleading; a 0 pull count is a real value.
 		if m.Tags > 0 {
 			imageTags.Set(float64(m.Tags), m.Registry, m.Owner, m.Repo)
+			tags[key] = true
 		}
 	}
+	for key := range prevPulls {
+		if !pulls[key] {
+			imagePulls.Delete(key[0], key[1], key[2])
+		}
+	}
+	for key := range prevTags {
+		if !tags[key] {
+			imageTags.Delete(key[0], key[1], key[2])
+		}
+	}
+	prevPulls, prevTags = pulls, tags
 }
 
 // RecordHTTP records one HTTP request into the package HTTP metrics via the

@@ -1,7 +1,6 @@
 package dockerhub_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
@@ -21,20 +20,23 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":9999999999}`))
 
 	f.Fuzz(func(_ *testing.T, data []byte) {
-		_, _, _ = dockerhub.ParseRepoMeta(data)
+		_, _ = dockerhub.ParseRepoMeta(data)
 	})
 }
 
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
-// parser. Invariant: every repo it returns is namespaced under the
-// requested owner ("owner/..."), so a crafted listing response cannot
-// smuggle a foreign owner into the snapshot shape downstream code trusts.
+// parser. Invariant: every entry it returns carries exactly the
+// requested owner and a non-empty repo name (the urlsafe guard drops
+// unsafe and empty names), so a crafted listing response can neither
+// smuggle a foreign owner into the label set downstream code trusts nor
+// inject an empty/unsafe path segment into the tags URL built from it.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`not json`))
 	f.Add([]byte(``))
+	f.Add([]byte(`{"results":[{"name":""},{"name":"../evil"},{"name":"ok"}]}`))
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -43,34 +45,39 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 			return
 		}
 		for _, r := range repos {
-			if !strings.HasPrefix(r.Repo, owner+"/") {
-				t.Errorf("ParseRepoListPage(%q) produced repo %q without %q prefix", data, r.Repo, owner+"/")
+			if r.Owner != owner {
+				t.Errorf("ParseRepoListPage(%q) produced entry with owner %q, want %q", data, r.Owner, owner)
+			}
+			if r.Repo == "" {
+				t.Errorf("ParseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
 			}
 		}
 	})
 }
 
-// FuzzDockerHubTagListUnmarshal drives the production tag-page parser.
-// Invariant: every returned tag has a non-empty name. collectTags relies
-// on this filter so a nameless tag never reaches the snapshot's tag slice.
-// The committed seed {"results":[{}]} pins the empty-name-drop edge.
-func FuzzDockerHubTagListUnmarshal(f *testing.F) {
-	f.Add([]byte(`{"next":"","results":[{"name":"latest","digest":"sha256:abc","full_size":1024}]}`))
-	f.Add([]byte(`{"next":"page2","results":[]}`))
+// FuzzDockerHubTagCountUnmarshal drives the production tag-count parser.
+// The Docker Hub tags response is untrusted input feeding the image_tags
+// gauge, so the invariant is: a nil error implies a non-negative count
+// (a response without a usable count — malformed JSON, absent field,
+// negative value — must error so it can never reach the gauge). The
+// {"results":[{}]} seed carries over from the deleted tag-page parser's
+// committed corpus (valid JSON with no usable payload).
+func FuzzDockerHubTagCountUnmarshal(f *testing.F) {
+	f.Add([]byte(`{"count":164,"next":"page2","results":[{"name":"latest","digest":"sha256:abc"}]}`))
+	f.Add([]byte(`{"count":0,"next":"","results":[]}`))
+	f.Add([]byte(`{"count":-1}`))
+	f.Add([]byte(`{"results":[{}]}`))
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`not json`))
 	f.Add([]byte(``))
-	f.Add([]byte(`{"results":[{"name":"v1.0","digest":"sha256:def","full_size":2048}]}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, tags, err := dockerhub.ParseTagPage(data)
+		n, err := dockerhub.ParseTagCount(data)
 		if err != nil {
 			return
 		}
-		for _, tag := range tags {
-			if tag.Name == "" {
-				t.Errorf("ParseTagPage(%q) returned an empty tag name, want all empties filtered", data)
-			}
+		if n < 0 {
+			t.Errorf("ParseTagCount(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }

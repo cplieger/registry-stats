@@ -10,6 +10,7 @@ import (
 
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	"github.com/cplieger/registry-stats/v2/internal/collect"
+	"github.com/cplieger/registry-stats/v2/internal/metrics"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
@@ -54,26 +55,23 @@ func newFakeGHCR() *fakeSource {
 // fixedTime returns a clock that always returns the same instant.
 func fixedTime(t time.Time) func() time.Time { return func() time.Time { return t } }
 
-func TestRun_healthy_returns_snapshot_with_both_registries(t *testing.T) {
+func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []model.RegistryEntry{
-		{
-			Name: "owner/app", LastUpdated: "2026-03-06T12:00:00Z", PullCount: 42,
-			Tags: []model.TagInfo{{Name: "latest"}},
-		},
+		{Owner: "owner", Repo: "app", Pulls: 42, TagCount: 2},
 	}
 	dh.attempted = 1
 	dh.healthy = true
 
 	gh := newFakeGHCR()
-	gh.entries = []model.RegistryEntry{{Name: "owner/pkg", DownloadCount: 500}}
+	gh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "pkg", Pulls: 500}}
 	gh.attempted = 1
 	gh.healthy = true
 
 	fixed := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
 
-	snap, healthy := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		Now:     fixedTime(fixed),
@@ -90,20 +88,17 @@ func TestRun_healthy_returns_snapshot_with_both_registries(t *testing.T) {
 	if !healthy {
 		t.Error("Run() healthy = false, want true")
 	}
-	if snap == nil {
-		t.Fatal("Run() snap = nil, want non-nil")
+	want := []metrics.ImageMetric{
+		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42, Tags: 2},
+		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500, Tags: 0},
 	}
-	if !snap.Timestamp.Equal(fixed) {
-		t.Errorf("snap.Timestamp = %v, want %v", snap.Timestamp, fixed)
+	if len(images) != len(want) {
+		t.Fatalf("images = %+v, want %+v", images, want)
 	}
-	if len(snap.DockerHub) != 1 || snap.DockerHub[0].Repo != "owner/app" || snap.DockerHub[0].PullCount != 42 {
-		t.Errorf("snap.DockerHub = %+v, want [owner/app 42]", snap.DockerHub)
-	}
-	if len(snap.DockerHub[0].Tags) != 1 || snap.DockerHub[0].Tags[0].Name != "latest" {
-		t.Errorf("snap.DockerHub[0].Tags = %+v, want [latest]", snap.DockerHub[0].Tags)
-	}
-	if len(snap.GHCR) != 1 || snap.GHCR[0].Package != "owner/pkg" || snap.GHCR[0].DownloadCount != 500 {
-		t.Errorf("snap.GHCR = %+v, want [owner/pkg 500]", snap.GHCR)
+	for i := range want {
+		if images[i] != want[i] {
+			t.Errorf("images[%d] = %+v, want %+v", i, images[i], want[i])
+		}
 	}
 	// RefsFor plumbed through correctly.
 	if len(dh.lastRefs) != 1 || dh.lastRefs[0].Repo != "app" {
@@ -118,7 +113,7 @@ func TestRun_skips_empty_refs(t *testing.T) {
 	ctx := t.Context()
 	// GHCR has no refs - should be skipped entirely, not invoked.
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Name: "owner/app", PullCount: 1}}
+	dh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
@@ -145,15 +140,15 @@ func TestRun_skips_empty_refs(t *testing.T) {
 
 func TestRun_no_sources_configured_returns_unhealthy(t *testing.T) {
 	ctx := t.Context()
-	snap, healthy := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{},
 		Logger:  testsupport.QuietLogger(),
 	})
 	if healthy {
-		t.Error("Run() healthy = true, want false for empty-snapshot path")
+		t.Error("Run() healthy = true, want false for empty-cycle path")
 	}
-	if snap == nil {
-		t.Fatal("Run() snap = nil, want non-nil empty snapshot")
+	if len(images) != 0 {
+		t.Errorf("images = %+v, want empty", images)
 	}
 }
 
@@ -164,7 +159,7 @@ func TestRun_all_sources_empty_entries_returns_unhealthy(t *testing.T) {
 	gh := newFakeGHCR()
 	gh.attempted = 2
 
-	snap, healthy := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(name string) []model.RepoRef {
@@ -174,24 +169,24 @@ func TestRun_all_sources_empty_entries_returns_unhealthy(t *testing.T) {
 	if healthy {
 		t.Error("Run() healthy = true, want false when all collections failed")
 	}
-	if snap == nil || len(snap.DockerHub) != 0 || len(snap.GHCR) != 0 {
-		t.Errorf("snap = %+v, want empty snapshot", snap)
+	if len(images) != 0 {
+		t.Errorf("images = %+v, want empty", images)
 	}
 }
 
-func TestRun_partial_success_returns_snapshot_with_degraded_flag(t *testing.T) {
+func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Name: "owner/app", PullCount: 1}}
+	dh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
 	// GHCR has refs but returns no entries and flags unhealthy. The
-	// snapshot still saves because DockerHub produced data.
+	// cycle still serves data because DockerHub produced some.
 	gh := newFakeGHCR()
 	gh.attempted = 2
 
-	_, healthy := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(name string) []model.RepoRef {
@@ -201,22 +196,25 @@ func TestRun_partial_success_returns_snapshot_with_degraded_flag(t *testing.T) {
 	if healthy {
 		t.Error("Run() healthy = true, want false (GHCR flagged unhealthy)")
 	}
+	if len(images) != 1 {
+		t.Errorf("images = %+v, want the one DockerHub record served", images)
+	}
 }
 
-func TestRun_unknown_source_drops_entries_and_logs(t *testing.T) {
+func TestRun_unknown_source_drops_entries_and_keeps_health(t *testing.T) {
 	ctx := t.Context()
 	unknown := &fakeSource{
 		name:      "mystery",
 		source:    model.SourceUnknown,
-		entries:   []model.RegistryEntry{{Name: "x/y", PullCount: 1}},
+		entries:   []model.RegistryEntry{{Owner: "x", Repo: "y", Pulls: 1}},
 		attempted: 1, healthy: true,
 	}
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Name: "o/a", PullCount: 2}}
+	dh.entries = []model.RegistryEntry{{Owner: "o", Repo: "a", Pulls: 2}}
 	dh.attempted = 1
 	dh.healthy = true
 
-	_, healthy := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{unknown, dh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
@@ -224,36 +222,41 @@ func TestRun_unknown_source_drops_entries_and_logs(t *testing.T) {
 	if !healthy {
 		t.Error("Run() healthy = false, want true (dockerhub was fine)")
 	}
+	// The unknown source has no registry label to stamp; its entries
+	// must not reach the metric records.
+	if len(images) != 1 || images[0].Registry != "dockerhub" || images[0].Repo != "a" {
+		t.Errorf("images = %+v, want only the dockerhub record", images)
+	}
 }
 
-func TestRun_entries_with_empty_name_are_dropped(t *testing.T) {
+func TestRun_entries_with_empty_repo_are_dropped(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []model.RegistryEntry{
-		{Name: "", PullCount: 9}, // dropped
-		{Name: "o/good", PullCount: 1},
+		{Owner: "o", Repo: "", Pulls: 9}, // dropped
+		{Owner: "o", Repo: "good", Pulls: 1},
 	}
 	dh.attempted = 2
 	dh.healthy = true
 
 	gh := newFakeGHCR()
 	gh.entries = []model.RegistryEntry{
-		{Name: "", DownloadCount: 7}, // dropped
-		{Name: "o/p", DownloadCount: 3},
+		{Owner: "o", Repo: "", Pulls: 7}, // dropped
+		{Owner: "o", Repo: "p", Pulls: 3},
 	}
 	gh.attempted = 2
 	gh.healthy = true
 
-	snap, _ := collect.Run(ctx, collect.Options{
+	images, _ := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "x"}} },
 	})
-	if len(snap.DockerHub) != 1 || snap.DockerHub[0].Repo != "o/good" {
-		t.Errorf("DockerHub empty-name should drop; got %+v", snap.DockerHub)
+	if len(images) != 2 {
+		t.Fatalf("images = %+v, want 2 records (empty-repo entries dropped)", images)
 	}
-	if len(snap.GHCR) != 1 || snap.GHCR[0].Package != "o/p" {
-		t.Errorf("GHCR empty-name should drop; got %+v", snap.GHCR)
+	if images[0].Repo != "good" || images[1].Repo != "p" {
+		t.Errorf("images = %+v, want repos good and p", images)
 	}
 }
 
@@ -278,20 +281,16 @@ func TestRun_defaults_logger_and_now(t *testing.T) {
 	// should fall back to slog.Default() and time.Now respectively.
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Name: "o/a", PullCount: 1}}
+	dh.entries = []model.RegistryEntry{{Owner: "o", Repo: "a", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
-	snap, _ := collect.Run(ctx, collect.Options{
+	images, healthy := collect.Run(ctx, collect.Options{
 		Sources: []api.RegistrySource{dh},
 		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
-	if snap == nil {
-		t.Fatal("snap = nil")
-	}
-	// Timestamp should be recent (within a generous 1-minute window).
-	if time.Since(snap.Timestamp) > time.Minute {
-		t.Errorf("snap.Timestamp = %v, should be recent", snap.Timestamp)
+	if !healthy || len(images) != 1 {
+		t.Fatalf("Run() = (%+v, %v), want one record and healthy", images, healthy)
 	}
 }
 
@@ -311,8 +310,8 @@ func captureLogs() (*slog.Logger, *bytes.Buffer) {
 // silent even when unhealthy.
 func TestRun_severe_degradation_warn_condition(t *testing.T) {
 	const degradedMsg = "docker hub collection severely degraded"
-	dhEntries := []model.RegistryEntry{{Name: "owner/app", PullCount: 1}}
-	ghEntries := []model.RegistryEntry{{Name: "owner/pkg", DownloadCount: 1}}
+	dhEntries := []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	ghEntries := []model.RegistryEntry{{Owner: "owner", Repo: "pkg", Pulls: 1}}
 
 	tests := []struct {
 		name     string

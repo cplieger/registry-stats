@@ -1,14 +1,14 @@
 // Package collect is the registry-stats collection orchestrator. It
-// loops over a set of api.RegistrySource implementations, assembles a
-// single *model.Snapshot from their per-source []model.RegistryEntry
-// outputs, and returns a healthy flag so the caller can flip its
-// healthcheck marker accordingly.
+// loops over a set of api.RegistrySource implementations, stamps each
+// source's flat []model.RegistryEntry output with its registry label,
+// and returns the combined per-image metric records plus a healthy flag
+// so the caller can flip its healthcheck marker accordingly.
 //
 // The orchestrator is deliberately tiny: each source owns its own
 // *http.Client, retry options, logging, and pacing. Run's job is the
-// orchestration layer above that — route each source's entries back
-// into the right typed slice, and surface partial-degradation warnings
-// without failing the whole cycle.
+// orchestration layer above that — invoke each configured source, keep
+// the per-source health accounting, and surface partial-degradation
+// warnings without failing the whole cycle.
 package collect
 
 import (
@@ -25,8 +25,8 @@ import (
 // that actually fetch data; RefsFor maps each source's Name() to the
 // []model.RepoRef it should fetch, allowing the orchestrator to stay
 // agnostic of the per-registry config slice layout. A nil Logger falls
-// back to slog.Default. Now is the clock used for the snapshot timestamp
-// (tests inject a deterministic clock; production passes time.Now).
+// back to slog.Default. Now is the clock used for the cycle-duration
+// log (tests inject a deterministic clock; production passes time.Now).
 type Options struct {
 	Logger  *slog.Logger
 	Now     func() time.Time
@@ -36,18 +36,18 @@ type Options struct {
 
 // Run orchestrates a single collection cycle. It invokes each source's
 // Collect (skipping sources whose ref slice is empty so empty-config
-// paths stay zero-cost), assembles the result into a *model.Snapshot,
-// and returns the assembled snapshot plus a healthy flag.
+// paths stay zero-cost), stamps each entry with its source's registry
+// label, and returns the combined per-image records plus a healthy flag.
 //
 // Return contract:
-//   - (snap, true)  -- healthy cycle: every invoked source met its per-source threshold.
-//   - (snap, false) -- degraded/empty cycle: an invoked source was unhealthy, or no
+//   - (images, true)  -- healthy cycle: every invoked source met its per-source threshold.
+//   - (images, false) -- degraded/empty cycle: an invoked source was unhealthy, or no
 //     invoked source produced an entry.
 //
-// registry-stats is stateless: Run never persists the snapshot. The healthy flag drives
+// registry-stats is stateless: Run never persists the result. The healthy flag drives
 // only the partial-failure WARN below; the caller derives its health marker separately
 // (see main.runCollect).
-func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool) {
+func Run(ctx context.Context, opts Options) (images []metrics.ImageMetric, healthy bool) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -59,9 +59,11 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool)
 
 	start := now()
 	logger.Info("starting collection")
-	snap = &model.Snapshot{Timestamp: start.UTC()}
 	degraded := false
 	invokedAnySource := false
+	// Per-source counts tracked separately so the summary logs keep the
+	// docker_hub/ghcr keys Loki dashboards filter on.
+	var dockerHubCount, ghcrCount int
 
 	for _, src := range opts.Sources {
 		refs := refsFor(opts, src.Name())
@@ -69,48 +71,57 @@ func Run(ctx context.Context, opts Options) (snap *model.Snapshot, healthy bool)
 			continue
 		}
 		invokedAnySource = true
-		if !collectSource(ctx, logger, src, refs, snap) {
+		srcImages, srcHealthy := collectSource(ctx, logger, src, refs)
+		if !srcHealthy {
 			degraded = true
 		}
+		switch src.Source() {
+		case model.SourceDockerHub:
+			dockerHubCount = len(srcImages)
+		case model.SourceGHCR:
+			ghcrCount = len(srcImages)
+		}
+		images = append(images, srcImages...)
 	}
 
 	// An all-empty cycle has nothing to expose; return healthy=false so the caller marks unhealthy.
-	if len(snap.DockerHub) == 0 && len(snap.GHCR) == 0 {
+	if len(images) == 0 {
 		if !invokedAnySource {
 			logger.Warn("no repos configured")
 		} else {
 			logger.Error("all collections failed")
 		}
-		return snap, false
+		return images, false
 	}
 
 	if degraded {
 		logger.Warn("partial collection failure, serving available data",
-			"docker_hub", len(snap.DockerHub), "ghcr", len(snap.GHCR))
+			"docker_hub", dockerHubCount, "ghcr", ghcrCount)
 	}
 
 	logger.Info("collection complete",
-		"docker_hub", len(snap.DockerHub),
-		"ghcr", len(snap.GHCR),
+		"docker_hub", dockerHubCount,
+		"ghcr", ghcrCount,
 		"duration", now().Sub(start).Round(time.Millisecond))
 
-	return snap, !degraded
+	return images, !degraded
 }
 
-// collectSource invokes a single source's Collect, routes its entries
-// into the matching typed slice on snap, and reports whether the source
-// met its health threshold. A DockerHub source that returns partial
-// data while flagging unhealthy gets the severe-degradation warn
-// (matching main.go's pre-refactor phrasing); any unhealthy source bumps
-// the per-source error metric. Routing happens regardless of health so a
-// degraded-but-nonempty source still contributes its entries.
+// collectSource invokes a single source's Collect and stamps its entries
+// with the source's registry label, reporting whether the source met its
+// health threshold. A DockerHub source that returns partial data while
+// flagging unhealthy gets the severe-degradation warn (matching
+// main.go's pre-refactor phrasing); any unhealthy source bumps the
+// per-source error metric. Entries are stamped regardless of health so
+// a degraded-but-nonempty source still contributes its data. A source
+// whose Source() is unknown has no registry label to stamp, so its
+// entries are dropped (only its health accounting is kept).
 func collectSource(
 	ctx context.Context,
 	logger *slog.Logger,
 	src api.RegistrySource,
 	refs []model.RepoRef,
-	snap *model.Snapshot,
-) (srcHealthy bool) {
+) (images []metrics.ImageMetric, srcHealthy bool) {
 	entries, attempted, srcHealthy := src.Collect(ctx, refs)
 	// Count every invoked source as a collect run; collect_errors_total below is
 	// the failed subset, so collect_errors_total / collects_total is a valid
@@ -124,13 +135,27 @@ func collectSource(
 		metrics.CollectErrors.Inc(src.Name())
 	}
 
-	switch src.Source() {
-	case model.SourceDockerHub:
-		snap.DockerHub = entriesToDockerHub(entries)
-	case model.SourceGHCR:
-		snap.GHCR = entriesToGHCR(entries)
+	registry := src.Source().String()
+	if registry == "" {
+		return nil, srcHealthy
 	}
-	return srcHealthy
+	images = make([]metrics.ImageMetric, 0, len(entries))
+	for _, e := range entries {
+		// Defensive: a zero-value entry would emit a broken {owner,repo}
+		// label pair. The registry clients always populate Repo, so this
+		// only strips entries a future source regression could produce.
+		if e.Repo == "" {
+			continue
+		}
+		images = append(images, metrics.ImageMetric{
+			Registry: registry,
+			Owner:    e.Owner,
+			Repo:     e.Repo,
+			Pulls:    e.Pulls,
+			Tags:     e.TagCount,
+		})
+	}
+	return images, srcHealthy
 }
 
 // refsFor resolves refs for a given source name, returning nil when
@@ -143,56 +168,4 @@ func refsFor(opts Options, name string) []model.RepoRef {
 		return nil
 	}
 	return opts.RefsFor(name)
-}
-
-// entriesToDockerHub maps the registry-agnostic []model.RegistryEntry
-// back into the typed []model.RepoStats slice the snapshot's
-// docker_hub field carries. The per-source dockerhub.Client
-// populates Name/LastUpdated/PullCount/Tags from its Collect call;
-// this helper copies them into the destination shape field-for-field.
-//
-// Entries with empty Name are skipped defensively — the dockerhub
-// client always populates Name, but stripping empty entries keeps the
-// snapshot shape clean if a future source regression produces a zero
-// value.
-func entriesToDockerHub(entries []model.RegistryEntry) []model.RepoStats {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make([]model.RepoStats, 0, len(entries))
-	for _, e := range entries {
-		if e.Name == "" {
-			continue
-		}
-		out = append(out, model.RepoStats{
-			Repo:        e.Name,
-			LastUpdated: e.LastUpdated,
-			PullCount:   e.PullCount,
-			Tags:        e.Tags,
-		})
-	}
-	return out
-}
-
-// entriesToGHCR maps the registry-agnostic []model.RegistryEntry back
-// into the typed []model.GhcrStats slice. The per-source ghcr.Client
-// populates Name and DownloadCount; this helper copies them across.
-// Zero-download entries are NOT filtered here — ghcr.Client already
-// skips scrape failures so any entry that reaches this mapper is a
-// real observed count.
-func entriesToGHCR(entries []model.RegistryEntry) []model.GhcrStats {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make([]model.GhcrStats, 0, len(entries))
-	for _, e := range entries {
-		if e.Name == "" {
-			continue
-		}
-		out = append(out, model.GhcrStats{
-			Package:       e.Name,
-			DownloadCount: e.DownloadCount,
-		})
-	}
-	return out
 }
