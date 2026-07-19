@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
@@ -27,8 +27,8 @@ func mockClient(srv *httptest.Server) *http.Client {
 
 // shortRetry returns httpx options with a 1 ms base delay so retry
 // tests don't wait a full second between attempts.
-func shortRetry() []httpx.Option {
-	return []httpx.Option{httpx.WithBaseDelay(time.Millisecond)}
+func shortRetry() []httpx.GetOption {
+	return []httpx.GetOption{httpx.WithBaseDelay(time.Millisecond)}
 }
 
 // fastPacing returns Options with microsecond pacing/jitter so mock
@@ -434,9 +434,9 @@ func TestParseDownloads_ContentBeforeTitle(t *testing.T) {
 
 // TestCollect_ExplicitMock exercises *Client.Collect against a mock
 // server for a single explicit ref, asserting the returned entry's
-// Name and DownloadCount plus healthy=true. Migrated from
-// TestCollectGHCRExplicitMock in main_test.go and previously driven
-// through the free-function ghcr.Collect shim.
+// owner/repo pair and scraped download count plus healthy=true.
+// Migrated from TestCollectGHCRExplicitMock in main_test.go and
+// previously driven through the free-function ghcr.Collect shim.
 func TestCollect_ExplicitMock(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/mypkg", func(w http.ResponseWriter, _ *http.Request) {
@@ -458,11 +458,11 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("Collect returned %d entries, want 1", len(entries))
 	}
-	if entries[0].Name != "owner/mypkg" {
-		t.Errorf("Name = %q, want %q", entries[0].Name, "owner/mypkg")
+	if entries[0].Owner != "owner" || entries[0].Repo != "mypkg" {
+		t.Errorf("entry ref = %s/%s, want owner/mypkg", entries[0].Owner, entries[0].Repo)
 	}
-	if entries[0].DownloadCount != 4567 {
-		t.Errorf("DownloadCount = %d, want 4567", entries[0].DownloadCount)
+	if entries[0].Pulls != 4567 {
+		t.Errorf("Pulls = %d, want 4567", entries[0].Pulls)
 	}
 }
 

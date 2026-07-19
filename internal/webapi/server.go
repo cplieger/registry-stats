@@ -138,6 +138,10 @@ func WithAccessLog(logger *slog.Logger) webhttp.Middleware {
 			case rw.Status() >= 400:
 				lvl = slog.LevelWarn
 			}
+			// Logging the raw query is safe here: registry-stats has no
+			// auth and no endpoint takes a secret-bearing query parameter
+			// (contrast seadex-scout, which deliberately never logs its
+			// apikey-carrying query string).
 			logger.Log(r.Context(), lvl, "http request",
 				"method", r.Method,
 				"path", r.URL.Path,

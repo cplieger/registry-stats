@@ -1,6 +1,6 @@
 package main
 
-// main_test.go is intentionally small: the two tests below exercise the
+// main_test.go is intentionally small: the tests below exercise the
 // only behavior main.go owns that isn't already covered by a direct
 // internal/* package test.
 //
@@ -40,69 +40,6 @@ func TestLogConfig(t *testing.T) {
 	logConfig(cfg)
 }
 
-// TestSplitOwnerRepo pins the owner/name split that feeds the
-// registrystats_image_*{owner,repo} labels (grafana-dashboard.json reads
-// them). splitOwnerRepo cuts on the FIRST slash and treats a slashless
-// identifier as a bare repo with empty owner.
-func TestSplitOwnerRepo(t *testing.T) {
-	tests := []struct {
-		name      string
-		id        string
-		wantOwner string
-		wantRepo  string
-	}{
-		{"owner and repo", "cplieger/subflux", "cplieger", "subflux"},
-		{"no slash yields empty owner", "alpine", "", "alpine"},
-		{"empty string", "", "", ""},
-		{"multiple slashes split on first", "a/b/c", "a", "b/c"},
-		{"trailing slash empty repo", "owner/", "owner", ""},
-		{"leading slash empty owner", "/repo", "", "repo"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			owner, repo := splitOwnerRepo(tt.id)
-			if owner != tt.wantOwner || repo != tt.wantRepo {
-				t.Errorf("splitOwnerRepo(%q) = (%q, %q), want (%q, %q)",
-					tt.id, owner, repo, tt.wantOwner, tt.wantRepo)
-			}
-		})
-	}
-}
-
-// TestUpdateImageMetrics_splitsOwnerRepoLabels pins the observable metric
-// contract: updateImageMetrics splits each "owner/name" snapshot identifier
-// into separate owner/repo labels and counts DockerHub tags. Asserted through
-// the real /metrics output (metrics.Handler), the same boundary Alloy scrapes.
-// SetImageMetrics mutates process-global gauges (Reset+Set), so this test must
-// not call t.Parallel().
-func TestUpdateImageMetrics_splitsOwnerRepoLabels(t *testing.T) {
-	snap := &model.Snapshot{
-		DockerHub: []model.RepoStats{
-			{Repo: "cplieger/subflux", PullCount: 1234, Tags: []model.TagInfo{{Name: "latest"}, {Name: "v1"}}},
-		},
-		GHCR: []model.GhcrStats{
-			{Package: "cplieger/vibekit", DownloadCount: 56},
-		},
-	}
-	updateImageMetrics(snap)
-
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	w := httptest.NewRecorder()
-	metrics.Handler()(w, r)
-	body := w.Body.String()
-
-	want := []string{
-		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
-		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 2`,
-		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
-	}
-	for _, line := range want {
-		if !strings.Contains(body, line) {
-			t.Errorf("metrics output missing %q\n got:\n%s", line, body)
-		}
-	}
-}
-
 // mainFakeSource is a canned api.RegistrySource for driving runCollect in
 // isolation from any HTTP path.
 type mainFakeSource struct {
@@ -127,7 +64,7 @@ func (f *mainFakeSource) Collect(_ context.Context, _ []model.RepoRef) ([]model.
 func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	dh := &mainFakeSource{
 		src:     model.SourceDockerHub,
-		entries: []model.RegistryEntry{{Name: "o/app", PullCount: 1}},
+		entries: []model.RegistryEntry{{Owner: "o", Repo: "app", Pulls: 1}},
 		healthy: true,
 	}
 	gh := &mainFakeSource{src: model.SourceGHCR, healthy: false} // no entries, unhealthy
@@ -148,6 +85,49 @@ func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
 	cfg := &configpkg.Config{DockerHubRepos: []model.RepoRef{{Owner: "o", Repo: "app"}}}
 	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh}); got {
 		t.Error("runCollect() = true, want false (no repo collected)")
+	}
+}
+
+// TestRunCollect_publishesImageMetrics pins the end-to-end metric contract
+// through the composition root: with metrics enabled, one runCollect cycle
+// flows each source's flat records into the {registry,owner,repo} gauge
+// labels on the real /metrics output (the same boundary the collector
+// scrapes, and the label set grafana-dashboard.json queries). Mutates
+// process-global metrics, so no t.Parallel.
+func TestRunCollect_publishesImageMetrics(t *testing.T) {
+	dh := &mainFakeSource{
+		src:     model.SourceDockerHub,
+		entries: []model.RegistryEntry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: 2}},
+		healthy: true,
+	}
+	gh := &mainFakeSource{
+		src:     model.SourceGHCR,
+		entries: []model.RegistryEntry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
+		healthy: true,
+	}
+	cfg := &configpkg.Config{
+		DockerHubRepos: []model.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
+		GHCRRepos:      []model.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
+		EnableMetrics:  true,
+	}
+	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh, gh}); !got {
+		t.Fatal("runCollect() = false, want true")
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	metrics.Handler()(w, r)
+	body := w.Body.String()
+
+	want := []string{
+		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
+		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 2`,
+		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("metrics output missing %q\n got:\n%s", line, body)
+		}
 	}
 }
 

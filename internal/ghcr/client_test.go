@@ -253,8 +253,8 @@ func TestCollect_listingFailuresExcludedFromHealth(t *testing.T) {
 	if !healthy {
 		t.Error("Collect healthy = false, want true (listing failures excluded from package health)")
 	}
-	if len(entries) != 1 || entries[0].DownloadCount != 99 {
-		t.Fatalf("entries = %+v, want exactly one entry with DownloadCount=99", entries)
+	if len(entries) != 1 || entries[0].Pulls != 99 {
+		t.Fatalf("entries = %+v, want exactly one entry with Pulls=99", entries)
 	}
 }
 
@@ -313,8 +313,8 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 	if !healthy {
 		t.Errorf("healthy = false, want true (listing failures excluded; the one package scrape succeeded)")
 	}
-	if len(entries) != 1 || entries[0].DownloadCount != 99 {
-		t.Fatalf("entries = %+v, want exactly one entry with DownloadCount=99", entries)
+	if len(entries) != 1 || entries[0].Pulls != 99 {
+		t.Fatalf("entries = %+v, want exactly one entry with Pulls=99", entries)
 	}
 	logs := buf.String()
 	if !strings.Contains(logs, "listing HTML format may have changed") {

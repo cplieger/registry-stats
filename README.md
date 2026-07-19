@@ -21,7 +21,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 ### Why this design
 
 - **Stateless** — no on-disk persistence required. The app polls registries and exposes current counts as Prometheus metrics. Time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies** — no non-`cplieger` runtime deps beyond `golang.org/x/sync`; the `cplieger` `httpx` / `health` / `metrics` libraries supply retry/backoff, the health probe, and Prometheus exposition. Small, auditable supply chain.
+- **Minimal dependencies** — zero non-`cplieger` runtime deps; the `cplieger` `httpx` / `health` / `metrics` / `webhttp` libraries supply retry/backoff, the health probe, Prometheus exposition, and the HTTP server lifecycle. Small, auditable supply chain.
 - **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
 - **Public repos only** — avoids credential management entirely.
 
@@ -86,11 +86,12 @@ The HTTP server listens on port 9100.
 
 #### `GET /api/health`
 
-Returns `{"status":"ok"}` when healthy, or `{"status":"unready","reason":"..."}` with HTTP 503
-when the most recent collect cycle returned no data (every configured registry failed, or no repos
-are configured). The marker is set healthy as soon as the HTTP API is listening, so a slow first
-collect cannot trip the Docker healthcheck grace window; it flips to 503 only once a collect cycle
-completes with an empty result. Used as the Docker healthcheck endpoint.
+Serving-readiness gate. Returns `{"status":"unready","reason":"..."}` with HTTP 503 until the
+first collect cycle produces data, then `{"status":"ok"}`. Readiness latches: once set it is
+cleared only on shutdown — a later failed cycle does not flip the endpoint back to 503
+(per-cycle collection health is the file marker's job; see [Healthcheck](#healthcheck)). The
+Docker healthcheck does not use this endpoint: it runs the `health` subcommand against the
+marker file.
 
 #### `GET /metrics`
 
@@ -165,7 +166,7 @@ config. Route by whatever labels your Alertmanager uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps the marker present, and a cycle in which every configured registry fails removes it. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. The first collect runs in the background so a slow initial poll (GHCR paces each package by a few seconds) cannot exceed the Docker healthcheck grace window and trigger a restart loop: the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. If both registries are unreachable on first boot the marker flips to unhealthy after that cycle and recovers on the next successful poll. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps the marker present, and a cycle in which every configured registry fails removes it. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. The first collect runs in the background so a slow initial poll (GHCR paces each package by a few seconds) cannot exceed the Docker healthcheck grace window and trigger a restart loop: the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. If both registries are unreachable on first boot the marker flips to unhealthy after that cycle and recovers on the next successful poll — in scheduled mode. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 
@@ -193,7 +194,7 @@ registries legitimately redirect to their own CDNs/blob
 stores).
 
 **Details for advanced users:** URL path segments validated via
-`isSafeURLSegment` (rejects `/%\?#@:`). Response bodies capped
+`IsSafeURLSegment` (allowlist `[A-Za-z0-9._-]`). Response bodies capped
 via `io.LimitReader` (10 MB JSON, 2 MB HTML). HTTP server sets
 all five timeouts. Retry-After response headers are honoured on
 429/503 responses (capped at the configured retry backoff
@@ -230,7 +231,6 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | ------------------ | ---------------------------------------------------------------- |
 | golang             | [Go](https://hub.docker.com/_/golang)                            |
 | Distroless static  | [Distroless](https://github.com/GoogleContainerTools/distroless) |
-| golang.org/x/sync  | [Go stdlib](https://pkg.go.dev/golang.org/x/sync)                |
 | pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid)              |
 
 ## Credits

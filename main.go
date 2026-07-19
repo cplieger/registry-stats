@@ -18,13 +18,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/httpx/v2"
+	"github.com/cplieger/httpx/v3"
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/v2/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
@@ -39,9 +38,15 @@ import (
 
 func main() {
 	// CLI health probe for Docker healthcheck (distroless has no curl/wget).
-	// Checks for a marker file instead of making an HTTP request — no port needed.
+	// Checks for a marker file instead of making an HTTP request — no port
+	// needed. Polling mode arms a freshness deadline: the collect loop
+	// refreshes the marker each cycle, so a marker older than 3 intervals
+	// means a wedged loop and a restart fixes it. One-shot mode
+	// (POLL_INTERVAL_HOURS=0) disables the deadline (WithMaxAge(0) is a
+	// no-op): after the single collect the marker is deliberately static.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
-		health.RunProbe(health.DefaultPath)
+		health.RunProbe(health.DefaultPath,
+			health.WithMaxAge(3*configpkg.PollInterval()))
 	}
 
 	if err := run(); err != nil {
@@ -106,7 +111,7 @@ func run() error {
 		Timeout:       30 * time.Second,
 		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
 	}
-	defer httpx.Close(httpClient)
+	defer httpClient.CloseIdleConnections()
 
 	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
 	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
@@ -133,12 +138,11 @@ func run() error {
 
 	if cfg.PollInterval == 0 {
 		// One-shot mode: the background initial collect above is the ONLY
-		// collect. If it returns an empty snapshot the marker stays false and
+		// collect. If it collects nothing the marker stays false and
 		// /api/health serves 503 until the container is restarted -- there is
-		// no re-poll to recover on. The README Healthcheck section's "recovers
-		// on the next successful poll" is scheduled-mode only; caveat it there
-		// too (README.md:152). No scheduled loop is started; webhttp.Run
-		// (below) keeps serving the single collected snapshot until a signal or
+		// no re-poll to recover on (the README Healthcheck section documents
+		// this caveat). No scheduled loop is started; webhttp.Run (below)
+		// keeps serving the single collected data set until a signal or
 		// serve error arrives.
 		slog.Info("one-shot mode, serving collected data", "addr", ln.Addr().String())
 	} else {
@@ -165,13 +169,13 @@ func run() error {
 
 // runCollect executes a single collection cycle against the shared
 // composition-root dependencies and returns the boolean healthcheck
-// signal: true iff collect.Run produced a non-empty snapshot.
+// signal: true iff collect.Run produced a non-empty image set.
 //
 // Return semantics:
 //
-//	true  — snapshot collected successfully (fully healthy or partial-
+//	true  — data collected successfully (fully healthy or partial-
 //	        success with at least one registry's data).
-//	false — nothing collected: empty-snapshot guard fired or all
+//	false — nothing collected: empty-cycle guard fired or all
 //	        collections failed.
 func runCollect(
 	ctx context.Context,
@@ -179,7 +183,7 @@ func runCollect(
 	sources []api.RegistrySource,
 ) bool {
 	start := time.Now()
-	snap, _ := collectpkg.Run(ctx, collectpkg.Options{
+	images, _ := collectpkg.Run(ctx, collectpkg.Options{
 		Sources: sources,
 		Logger:  slog.Default(),
 		Now:     time.Now,
@@ -199,48 +203,13 @@ func runCollect(
 	// the same denominator.
 	metrics.CollectDuration.Observe(time.Since(start).Seconds())
 	if cfg.EnableMetrics {
-		updateImageMetrics(snap)
+		metrics.SetImageMetrics(images)
 	}
 	// Health marker = "at least one repo collected this cycle", per the documented contract that
 	// partial failures stay healthy as long as one repo succeeds (README/CONTRIBUTING). This is
 	// intentionally NOT collect.Run's healthy verdict (!degraded), which is stricter and would flip
 	// the marker unhealthy on any partial failure. Run's verdict drives only its partial-failure WARN.
-	return len(snap.DockerHub) > 0 || len(snap.GHCR) > 0
-}
-
-// updateImageMetrics converts a snapshot into ImageMetric slice and
-// pushes it to the metrics package for /metrics rendering. Snapshot
-// identifiers are "owner/name"; split each into the separate owner
-// and repo labels the metric contract (and grafana-dashboard.json) expect.
-func updateImageMetrics(snap *model.Snapshot) {
-	imgs := make([]metrics.ImageMetric, 0, len(snap.DockerHub)+len(snap.GHCR))
-	for _, dh := range snap.DockerHub {
-		owner, repo := splitOwnerRepo(dh.Repo)
-		imgs = append(imgs, metrics.ImageMetric{
-			Registry: model.SourceDockerHub.String(), Owner: owner, Repo: repo,
-			Pulls: dh.PullCount, Tags: len(dh.Tags),
-		})
-	}
-	for _, gh := range snap.GHCR {
-		owner, repo := splitOwnerRepo(gh.Package)
-		imgs = append(imgs, metrics.ImageMetric{
-			Registry: model.SourceGHCR.String(), Owner: owner, Repo: repo,
-			Pulls: gh.DownloadCount,
-		})
-	}
-	metrics.SetImageMetrics(imgs)
-}
-
-// splitOwnerRepo splits an "owner/name" snapshot identifier into its
-// owner and repo-name parts on the first slash -- the inverse of how the
-// registry clients build it (ref.Owner + "/" + ref.Repo). An identifier
-// without a slash yields an empty owner and the whole string as repo.
-func splitOwnerRepo(id string) (owner, repo string) {
-	owner, repo, ok := strings.Cut(id, "/")
-	if !ok {
-		return "", id
-	}
-	return owner, repo
+	return len(images) > 0
 }
 
 // markCollect runs one collection cycle and reflects the outcome onto the

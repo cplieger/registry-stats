@@ -1,50 +1,22 @@
-// Package model holds the pure data types that describe a registry-stats
-// snapshot. Types here carry no behavior beyond JSON struct tags. The
-// TagInfo/ImageInfo tags map the Docker Hub /tags/ API response (parsed via
-// dockerhub.ParseTagPage) and must stay identical to that upstream shape. The
-// Snapshot/RepoStats/GhcrStats tags are legacy on-disk-store keys retained
-// only by the model round-trip tests; v2 is stateless and never marshals
-// these types in production.
+// Package model holds the pure data types shared across registry-stats
+// packages: the flat per-image record RegistrySource implementations emit,
+// the owner/repo ref parsed from env config, and the typed registry
+// identity. Types here carry no behavior beyond RegistrySource.String;
+// nothing in this package is ever serialized (v2 is stateless).
 package model
 
-import "time"
-
-// Snapshot is the root object assembled once per collection cycle.
-type Snapshot struct {
-	Timestamp time.Time   `json:"timestamp"`
-	DockerHub []RepoStats `json:"docker_hub,omitempty"`
-	GHCR      []GhcrStats `json:"ghcr,omitempty"`
-}
-
-// RepoStats is a Docker Hub repo's pull count plus tag metadata.
-type RepoStats struct {
-	Repo        string    `json:"repo"`
-	LastUpdated string    `json:"last_updated"`
-	Tags        []TagInfo `json:"tags"`
-	PullCount   int64     `json:"pull_count"`
-}
-
-// TagInfo is a single tag as returned by the Docker Hub /tags/ endpoint.
-type TagInfo struct {
-	Name        string      `json:"name"`
-	LastUpdated string      `json:"last_updated"`
-	Digest      string      `json:"digest"`
-	Images      []ImageInfo `json:"images,omitempty"`
-	FullSize    int64       `json:"full_size"`
-}
-
-// ImageInfo is a single per-architecture manifest inside a multi-arch tag.
-type ImageInfo struct {
-	Architecture string `json:"architecture"`
-	OS           string `json:"os"`
-	Digest       string `json:"digest"`
-	Size         int64  `json:"size"`
-}
-
-// GhcrStats is a GHCR package's scraped download count.
-type GhcrStats struct {
-	Package       string `json:"package"`
-	DownloadCount int64  `json:"download_count"`
+// RegistryEntry is the flat per-image record a RegistrySource emits for
+// one collected image: the owner/repo label parts kept separate (they
+// feed the {registry,owner,repo} gauge labels directly, without a
+// join/split round-trip), the cumulative pull/download count, and the
+// repo's total tag count. TagCount 0 means "emit no image_tags series
+// this cycle": GHCR never populates it, and Docker Hub leaves it 0 when
+// the count fetch fails or the repo genuinely has no tags.
+type RegistryEntry struct {
+	Owner    string
+	Repo     string
+	Pulls    int64
+	TagCount int
 }
 
 // RepoRef is an owner/repo pair parsed from env var input. Repo is "*" for
@@ -52,19 +24,6 @@ type GhcrStats struct {
 type RepoRef struct {
 	Owner string
 	Repo  string
-}
-
-// RegistryEntry is the registry-agnostic Collect() result used by
-// api.RegistrySource implementations. Later steps map it into the
-// per-registry snapshot slices (Snapshot.DockerHub / Snapshot.GHCR). Zero-value fields are
-// ignored for the registry that doesn't populate them (Tags/PullCount are
-// Docker Hub-only, DownloadCount is GHCR-only).
-type RegistryEntry struct {
-	Name          string
-	LastUpdated   string
-	Tags          []TagInfo
-	PullCount     int64
-	DownloadCount int64
 }
 
 // RegistrySource is the typed identity of a container registry that

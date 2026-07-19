@@ -33,10 +33,11 @@ type Config struct {
 	EnableMetrics  bool            // serve /metrics endpoint (env ENABLE_METRICS)
 }
 
-// LoadConfig reads configuration from environment variables with sensible
-// defaults. Clamps poll interval to a bounded maximum to prevent
-// time.Duration overflow.
-func LoadConfig() Config {
+// PollInterval returns the effective POLL_INTERVAL_HOURS as a duration
+// (0 = one-shot), parsed and clamped with the same rules LoadConfig
+// applies. Exported separately so the health subcommand can derive its
+// probe max-age from the same source of truth before config load.
+func PollInterval() time.Duration {
 	rawPollHours := strings.TrimSpace(GetEnv("POLL_INTERVAL_HOURS", "1"))
 	pollIntervalHours, err := strconv.Atoi(rawPollHours)
 	if err != nil || pollIntervalHours < 0 {
@@ -52,6 +53,14 @@ func LoadConfig() Config {
 		slog.Warn("POLL_INTERVAL_HOURS clamped", "requested", pollIntervalHours, "max", maxPollHours)
 		pollIntervalHours = maxPollHours
 	}
+	return time.Duration(pollIntervalHours) * time.Hour
+}
+
+// LoadConfig reads configuration from environment variables with sensible
+// defaults. Clamps poll interval to a bounded maximum to prevent
+// time.Duration overflow.
+func LoadConfig() Config {
+	pollInterval := PollInterval()
 
 	rawLogLevel := GetEnv("LOG_LEVEL", "")
 	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
@@ -62,7 +71,7 @@ func LoadConfig() Config {
 	return Config{
 		DockerHubRepos: ParseRepoRefs(GetEnv("DOCKERHUB_REPOS", "")),
 		GHCRRepos:      ParseRepoRefs(GetEnv("GHCR_REPOS", "")),
-		PollInterval:   time.Duration(pollIntervalHours) * time.Hour,
+		PollInterval:   pollInterval,
 		ListenAddr:     GetEnv("LISTEN_ADDR", DefaultListenAddr),
 		LogLevel:       logLevel,
 		EnableMetrics:  parseBoolEnv(GetEnv("ENABLE_METRICS", "true")),
