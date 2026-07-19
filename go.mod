@@ -12,4 +12,4 @@ require github.com/cplieger/slogx v1.3.0
 
 require github.com/cplieger/metrics/v3 v3.0.0
 
-require github.com/cplieger/httpx/v3 v3.0.0
+require github.com/cplieger/httpx/v3 v3.1.1
