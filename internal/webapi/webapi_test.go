@@ -90,7 +90,11 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 	}
 }
 
-func TestWithAccessLog_levelByStatus(t *testing.T) {
+// TestAccessLogLevel_byStatus pins the app's level POLICY (fed to
+// webhttp.WithLogLevel) and its wiring: 2xx/3xx at DEBUG (scrape-quiet),
+// 4xx at WARN, 5xx at ERROR, observed end-to-end through the composed
+// webhttp.Logging middleware.
+func TestAccessLogLevel_byStatus(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    int
@@ -110,10 +114,13 @@ func TestWithAccessLog_levelByStatus(t *testing.T) {
 			})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/x", nil)
-			WithAccessLog(logger)(next).ServeHTTP(rec, req)
+			webhttp.Logging(
+				webhttp.WithLogger(logger),
+				webhttp.WithLogLevel(accessLogLevel),
+			)(next).ServeHTTP(rec, req)
 
 			logs := buf.String()
-			if !strings.Contains(logs, "http request") {
+			if !strings.Contains(logs, "msg=http") {
 				t.Fatalf("status %d: no access-log line emitted, got %q", tt.status, logs)
 			}
 			if !strings.Contains(logs, tt.wantLevel) {
@@ -151,19 +158,24 @@ func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
 	}
 }
 
-// TestWithAccessLog_boundsMetricCardinalityOnUnmatchedRoutes pins the
-// cardinality bound on registrystats_http_requests_total. A matched route
-// records its real {method,path}; an unmatched route (r.Pattern == "")
-// collapses BOTH labels to "unmatched" so an arbitrary client-supplied
-// method or path on a 404/405 cannot mint unbounded metric series in Mimir.
-// The collapse is observable only via the metrics exposition: the access
-// log deliberately keeps the raw path, so a log assertion cannot witness it.
-func TestWithAccessLog_boundsMetricCardinalityOnUnmatchedRoutes(t *testing.T) {
+// TestRecordHTTPMetric_boundsCardinalityOnUnmatchedRoutes pins the
+// cardinality bound on registrystats_http_requests_total through the
+// composed webhttp.Logging middleware and its request-aware metric hook. A
+// matched route records its real {method,path}; an unmatched route
+// (r.Pattern == "") collapses BOTH labels to "unmatched" so an arbitrary
+// client-supplied method or path on a 404/405 cannot mint unbounded metric
+// series in Mimir. The collapse is observable only via the metrics
+// exposition: the access log deliberately keeps the raw path, so a log
+// assertion cannot witness it.
+func TestRecordHTTPMetric_boundsCardinalityOnUnmatchedRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	h := WithAccessLog(testsupport.QuietLogger())(mux)
+	h := webhttp.Logging(
+		webhttp.WithLogger(testsupport.QuietLogger()),
+		webhttp.WithRecordMetricRequest(recordHTTPMetric),
+	)(mux)
 
 	// Matched route keeps its real method+path labels.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -201,7 +213,7 @@ func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
 
 	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
 
-	if !strings.Contains(buf.String(), "http request") {
+	if !strings.Contains(buf.String(), "msg=http") {
 		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
 	}
 }
