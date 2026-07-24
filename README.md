@@ -9,21 +9,21 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/registry-stats/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/registry-stats)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/registry-stats/releases)
 
-Track how many times your container images are pulled — with a ready-made Grafana dashboard.
+Track how many times your container images are pulled, with a ready-made Grafana dashboard.
 
 ## What it does
 
-When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded — but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
+When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded, but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
 
-- **Prometheus metrics** (`/metrics`) — pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
+- **Prometheus metrics** (`/metrics`): pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
 - Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to automatically discover and track all public repos for an owner. Wildcards are resolved on each poll cycle, so newly published images are picked up automatically.
 
 ### Why this design
 
-- **Stateless** — no on-disk persistence required. The app polls registries and exposes current counts as Prometheus metrics. Time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies** — zero non-`cplieger` runtime deps; the `cplieger` `httpx` / `health` / `metrics` / `webhttp` libraries supply retry/backoff, the health probe, Prometheus exposition, and the HTTP server lifecycle. Small, auditable supply chain.
-- **Distroless, rootless container** — runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
-- **Public repos only** — avoids credential management entirely.
+- **Stateless**: no on-disk persistence required. The app exposes current counts; time-series history lives in your Prometheus/Mimir backend.
+- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, and `slogx` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, and UTC logging. Small, auditable supply chain.
+- **Distroless, rootless container**: runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
+- **Public repos only**: avoids credential management entirely.
 
 ### Limitations
 
@@ -40,7 +40,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 
 ## Quick start
 
-The image is published to both `ghcr.io/cplieger/registry-stats` and `docker.io/cplieger/registry-stats` — use whichever registry you prefer.
+The image is published to both `ghcr.io/cplieger/registry-stats` and `docker.io/cplieger/registry-stats`; use whichever registry you prefer.
 
 ```yaml
 services:
@@ -80,31 +80,28 @@ services:
 
 ## API reference
 
-The HTTP server listens on port 9100.
-
 ### Endpoints
 
 #### `GET /api/health`
 
 Serving-readiness gate. Returns `{"status":"unready","reason":"..."}` with HTTP 503 until the
-first collect cycle produces data, then `{"status":"ok"}`. Readiness latches: once set it is
-cleared only on shutdown — a later failed cycle does not flip the endpoint back to 503
+first collect cycle produces data, then `{"status":"ok"}`. Readiness latches: once set, it is
+cleared only on shutdown, so a later failed cycle does not flip the endpoint back to 503
 (per-cycle collection health is the file marker's job; see [Healthcheck](#healthcheck)). The
-Docker healthcheck does not use this endpoint: it runs the `health` subcommand against the
-marker file.
+Docker healthcheck runs the `health` subcommand against the marker file, not this endpoint.
 
 #### `GET /metrics`
 
 Prometheus text format metrics. Includes:
 
-- `registrystats_image_pulls_total{registry,owner,repo}` — current pull count per image
-- `registrystats_image_tags{registry,owner,repo}` — tag count per image
-- `registrystats_http_requests_total{method,path,status}` — HTTP request counters
-- `registrystats_http_request_duration_seconds` — request latency histogram
-- `registrystats_collects_total{source}` — total collect runs per source (successful + failed; `collect_errors_total` is the failed subset, so `collect_errors_total / collects_total` is the per-source failure ratio)
-- `registrystats_collect_errors_total{source}` — failed collects per source
-- `registrystats_collect_duration_seconds` — collect cycle duration histogram
-- `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds` — runtime metrics
+- `registrystats_image_pulls_total{registry,owner,repo}`: current pull count per image
+- `registrystats_image_tags{registry,owner,repo}`: tag count per image
+- `registrystats_http_requests_total{method,path,status}`: HTTP request counters
+- `registrystats_http_request_duration_seconds`: request latency histogram
+- `registrystats_collects_total{source}`: collect runs per source, successful and failed
+- `registrystats_collect_errors_total{source}`: failed collects per source
+- `registrystats_collect_duration_seconds`: collect cycle duration histogram
+- `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds`: runtime metrics
 
 Disabled when `ENABLE_METRICS=false`.
 
@@ -112,46 +109,25 @@ Disabled when `ENABLE_METRICS=false`.
 
 Registry Stats exposes Prometheus metrics at `/metrics`. The included
 `grafana-dashboard.json` uses PromQL and requires only a standard
-Prometheus datasource — no plugins needed.
+Prometheus datasource; no plugins needed.
 
 ### Setup
 
-1. Add a scrape target for `registry-stats:9100` in your
-   Prometheus/Alloy/Grafana Agent config
+1. Add a scrape target for `registry-stats:9100` in your collector
+   (Prometheus, Alloy, or any Prometheus-compatible scraper); the shipped
+   alert rules assume `job="registry-stats"`
 2. Import `grafana-dashboard.json` in Grafana
 3. Select your Prometheus/Mimir datasource when prompted
 
-**Alloy example:**
-
-```alloy
-prometheus.scrape "registry_stats" {
-  targets         = [{ __address__ = "registry-stats:9100" }]
-  forward_to      = [prometheus.remote_write.default.receiver]
-  scrape_interval = "60s"
-  job_name        = "registry-stats"
-  metrics_path    = "/metrics"
-}
-```
-
-**Prometheus example (`prometheus.yml`):**
-
-```yaml
-scrape_configs:
-  - job_name: registry-stats
-    scrape_interval: 60s
-    static_configs:
-      - targets: ["registry-stats:9100"]
-```
-
 The dashboard shows cumulative downloads, daily deltas, package
-overview, and tracked package count — all via standard PromQL.
+overview, and tracked package count.
 
 ## Alerting
 
 registry-stats exposes Prometheus metrics at `/metrics`; scrape it (see
-[Grafana integration](#grafana-integration) for Alloy and Prometheus examples)
-and evaluate the rules in [`alerts.yaml`](alerts.yaml) with Prometheus or the
-Mimir ruler. Firing alerts deliver through your Alertmanager. They cover:
+[Grafana integration](#grafana-integration)) and evaluate the rules in
+[`alerts.yaml`](alerts.yaml) with Prometheus or the Mimir ruler. Firing alerts
+deliver through your Alertmanager. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
@@ -161,47 +137,34 @@ Mimir ruler. Firing alerts deliver through your Alertmanager. They cover:
 
 Thresholds and the `for:` windows are starting points. The scrape `job` label
 is yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
-(matching the Alloy and Prometheus examples above), so adjust it to your scrape
-config. Route by whatever labels your Alertmanager uses.
+(matching the setup step above), so adjust it to your scrape config. Route by
+whatever labels your Alertmanager uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck using a marker file at `/tmp/.healthy`. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps the marker present, and a cycle in which every configured registry fails removes it. The `health` subcommand (`/registry-stats health`) checks for this file and exits 0 when healthy. The first collect runs in the background so a slow initial poll (GHCR paces each package by a few seconds) cannot exceed the Docker healthcheck grace window and trigger a restart loop: the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. If both registries are unreachable on first boot the marker flips to unhealthy after that cycle and recovers on the next successful poll — in scheduled mode. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy. Wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps it, and a cycle in which every configured registry fails removes it. The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. In scheduled mode the probe also enforces a freshness deadline: a marker older than three poll intervals reports unhealthy, so a wedged collect loop gets restarted. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 
-**No vulnerabilities found.** All scans clean across the full scanner battery.
+The Prometheus metrics endpoint is designed for internal scraping and has no
+authentication (standard for internal metrics APIs); do not expose port 9100
+to untrusted networks. The container runs as `nonroot` on a distroless base
+image with no shell or package manager.
 
-| Tool                                                                | Result                              |
-| ------------------------------------------------------------------- | ----------------------------------- |
-| [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) | No vulnerabilities in call graph    |
-| [golangci-lint](https://golangci-lint.run/) (gosec)                 | 0 issues                            |
-| [trivy](https://trivy.dev/)                                         | 0 vulnerabilities (distroless base) |
-| [grype](https://github.com/anchore/grype)                           | 0 vulnerabilities                   |
-| [gitleaks](https://github.com/gitleaks/gitleaks)                    | No secrets detected                 |
-| [semgrep](https://semgrep.dev/)                                     | 1 info (false positive)             |
-| [hadolint](https://github.com/hadolint/hadolint)                    | Clean                               |
+The HTTP client follows redirects only within a `docker.com` / `github.com` /
+`githubusercontent.com` host allowlist with a 5-hop cap, so a compromised or
+misconfigured upstream cannot bounce the polling request to an arbitrary
+third-party host (the registries legitimately redirect to their own CDNs and
+blob stores). URL path segments built from registry data are validated
+against an `[A-Za-z0-9._-]` allowlist. Response bodies are capped at 10 MB
+for JSON and 2 MB for HTML; a GHCR page that exceeds the HTML cap is treated
+as a format-change signal, not silently truncated. The HTTP server sets all
+five timeouts, and `Retry-After` headers on 429/503 responses are honoured
+up to the configured retry backoff ceiling.
 
-Prometheus metrics endpoint designed for internal scraping.
-No authentication required (standard for internal metrics APIs).
-Runs as `nonroot` on a distroless base image with no shell. The
-HTTP client follows redirects only
-within a host allowlist (`httpx.DockerGitHubRedirectPolicy`:
-`docker.com` / `github.com` / `githubusercontent.com`, 5-hop
-cap) so a compromised or misconfigured upstream cannot bounce
-the polling request to an arbitrary third-party host (the
-registries legitimately redirect to their own CDNs/blob
-stores).
-
-**Details for advanced users:** URL path segments validated via
-`IsSafeURLSegment` (allowlist `[A-Za-z0-9._-]`). Response bodies capped
-via `io.LimitReader` (10 MB JSON, 2 MB HTML). HTTP server sets
-all five timeouts. Retry-After response headers are honoured on
-429/503 responses (capped at the configured retry backoff
-ceiling). A GHCR page that exceeds the HTML body cap is treated
-as a format-change signal, not silently truncated. Semgrep flags
-`math/rand/v2` usage, which is correct for jitter timing (not
-crypto).
+One accepted scanner finding: semgrep flags the use of `math/rand/v2`, which
+is correct here because it generates scheduling jitter, not cryptographic
+material.
 
 ### Hardened deployment
 
@@ -218,10 +181,9 @@ the Quick start service:
       - "/tmp:size=1m,mode=1777,noexec,nosuid,nodev"
 ```
 
-`read_only: true` makes the root filesystem read-only, so the
-file-marker health probe needs a writable `/tmp`; the tmpfs
-supplies it. `size=1m` is ample for the bare `/tmp/.healthy`
-marker, the only thing registry-stats writes to disk.
+`read_only: true` requires the file-marker health probe to have a writable
+`/tmp`; the tmpfs supplies it. `size=1m` is ample: the marker is the only
+thing registry-stats writes to disk.
 
 ## Dependencies
 
@@ -250,4 +212,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).

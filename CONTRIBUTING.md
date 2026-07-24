@@ -12,25 +12,26 @@ schedule and exposes download-count metrics as Prometheus time series
 (`/metrics`) plus a health endpoint (`/api/health`) on port 9100. History is
 owned by the scraping backend (Mimir/Prometheus); the app itself is stateless.
 
-`main.go` is a **pure composition root** — it wires config → `httpx.Client` →
-`dockerhub.Client` + `ghcr.Client` → health marker → `webapi` server, then
-runs the signal-driven lifecycle. It contains no business logic, globals, or
-type aliases; everything testable lives under `internal/`.
+`main.go` is a **pure composition root**: it wires config → `*http.Client`
+(with the `httpx` redirect policy) → `dockerhub.Client` + `ghcr.Client` →
+health marker → `webapi` server, then runs the signal-driven lifecycle. It
+contains no business logic, globals, or type aliases; everything testable
+lives under `internal/`.
 
 `internal/api/interfaces.go` is the composition spine. The small interfaces
 there (`RegistrySource`, `HealthSignal`) are what every other package depends
 on, and what test fakes implement. Concrete types live in their own packages:
 
-- `internal/config` — env-var loading and validation (`LoadConfig`).
-- `internal/dockerhub`, `internal/ghcr` — the two `RegistrySource`
+- `internal/config`: env-var loading and validation (`LoadConfig`).
+- `internal/dockerhub`, `internal/ghcr`: the two `RegistrySource`
   implementations. Docker Hub uses the unauthenticated API; GHCR **scrapes
   public package HTML** (there is no official download-count API).
-- `internal/collect` — orchestrates a single collect cycle across sources.
-- `internal/webapi` — HTTP server: `/metrics` (Prometheus exposition) and
+- `internal/collect`: orchestrates a single collect cycle across sources.
+- `internal/webapi`: HTTP server: `/metrics` (Prometheus exposition) and
   `/api/health`.
-- `internal/metrics` — thin wrapper around `github.com/cplieger/metrics`
+- `internal/metrics`: thin wrapper around `github.com/cplieger/metrics`
   holding the `registrystats_*` instances and `SetImageMetrics`.
-- `internal/model`, `internal/urlsafe`, `internal/testsupport` — domain
+- `internal/model`, `internal/urlsafe`, `internal/testsupport`: domain
   types, URL-segment validation, and shared test helpers.
 
 Dependencies flow one direction: concrete packages depend on `internal/api`,
@@ -78,7 +79,7 @@ Run one with:
 go test -run='^$' -fuzz=FuzzName -fuzztime=30s ./internal/ghcr
 ```
 
-Mutation testing (`.gremlins.yaml`) runs on a central weekly schedule — you do
+Mutation testing (`.gremlins.yaml`) runs on a central weekly schedule; you do
 not need to run gremlins per-change, but new logic should be killable by a
 test rather than relying on the exclude list.
 
@@ -93,10 +94,10 @@ here.
   `slogx`) and `pgregory.net/rapid` (test-only). Prefer the standard library
   before reaching for a new dependency.
 - **`RegistrySource.Name()` must equal `Source().String()`.** Both surface the
-  same lowercase registry label — one in log k/v pairs, the other for typed
+  same lowercase registry label: one in log k/v pairs, the other for typed
   routing. They must never drift.
 - **Validate any URL path segment** built from registry data through
-  `internal/urlsafe` — guards against traversal and injection.
+  `internal/urlsafe`, which guards against traversal and injection.
 - **Health is a file marker** (`/tmp/.healthy`), checked by the
   `registry-stats health` subcommand for the distroless healthcheck. Partial
   collect failures stay healthy as long as one repo succeeds.
@@ -111,7 +112,7 @@ here.
 ## Commits and PRs
 
 Branch from `main`, keep changes focused with tests, and open a PR. Commit
-messages follow [Conventional Commits](https://www.conventionalcommits.org/) —
+messages follow [Conventional Commits](https://www.conventionalcommits.org/);
 git-cliff parses them to build release notes and pick the version bump
 (`feat:` → minor, `fix:`/`sec:` → patch/security, `feat!:` → major; `chore`,
 `ci`, `docs`, `test`, etc. don't release). See `cliff.toml` for the parser.
@@ -121,5 +122,5 @@ git-cliff parses them to build release notes and pick the version bump
 By participating you agree to the org-wide
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report vulnerabilities through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md),
 never in a public issue.
