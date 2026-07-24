@@ -68,14 +68,24 @@ func New(d Deps) *http.Server {
 		mux.HandleFunc("GET /metrics", metrics.Handler())
 	}
 
-	// Middleware via webhttp.Chain (first listed is outermost): the app access
-	// log (the Logging role) → Recoverer → SecurityHeaders. Logging stays
-	// outermost so a recovered panic is logged as its 500, not the
-	// StatusRecorder's default 200. SecurityHeaders applies only the baseline
-	// (nosniff, X-Frame-Options: DENY, Referrer-Policy) — no CSP or HSTS,
-	// since this is a non-browser metrics/health endpoint.
+	// Middleware via webhttp.Chain (first listed is outermost): the shared
+	// access logger (the Logging role) → Recoverer → SecurityHeaders. Logging
+	// stays outermost so a recovered panic is logged as its 500, not the
+	// StatusRecorder's default 200. The logger carries registry-stats' two
+	// POLICIES as hooks — accessLogLevel keeps ~15s Prometheus scrape lines
+	// at DEBUG while raising 4xx/5xx, and recordHTTPMetric keys the
+	// bounded-cardinality registrystats_http_requests_total on the matched
+	// route template — while the line itself (request-id minting/threading,
+	// deferred panic-safe emission, hook isolation) is the library's.
+	// SecurityHeaders applies only the baseline (nosniff, X-Frame-Options:
+	// DENY, Referrer-Policy) — no CSP or HSTS, since this is a non-browser
+	// metrics/health endpoint.
 	handler := webhttp.Chain(mux,
-		WithAccessLog(logger),
+		webhttp.Logging(
+			webhttp.WithLogger(logger),
+			webhttp.WithLogLevel(accessLogLevel),
+			webhttp.WithRecordMetricRequest(recordHTTPMetric),
+		),
 		webhttp.Recoverer(webhttp.WithRecoverLogger(logger)),
 		webhttp.SecurityHeaders(),
 	)
@@ -89,65 +99,42 @@ func New(d Deps) *http.Server {
 	)
 }
 
-// WithAccessLog returns Chain-composable middleware (a webhttp.Middleware) that
-// emits one structured log line per HTTP request, at DEBUG for 2xx/3xx (quiet
-// by default; set LOG_LEVEL=debug to see them, so ~15s Prometheus scrapes do
-// not flood Loki), WARN for 4xx, and ERROR for 5xx. This keeps dashboard
-// failures traceable without drowning them in normal-poll noise.
-//
-// It also records the bounded-cardinality registrystats_http_requests_total
-// metric through a webhttp.StatusRecorder. The metric labels key on the
-// matched route TEMPLATE (r.Pattern), collapsing any unmatched/probe request
-// to method="unmatched",path="unmatched" so a scanner cannot mint unbounded
-// series. That r.Pattern-keyed guard is why the access logger stays app-side
-// rather than moving onto webhttp.Logging + WithRecordMetric: webhttp's hook
-// receives r.URL.Path (and no *http.Request), so it cannot reproduce the
-// template-keyed collapse.
-func WithAccessLog(logger *slog.Logger) webhttp.Middleware {
-	if logger == nil {
-		logger = slog.Default()
+// accessLogLevel is the access-line LEVEL policy fed to webhttp.WithLogLevel:
+// DEBUG for 2xx/3xx (quiet by default; set LOG_LEVEL=debug to see them, so
+// ~15s Prometheus scrapes do not flood Loki), WARN for 4xx, and ERROR for
+// 5xx. This keeps dashboard failures traceable without drowning them in
+// normal-poll noise. Everything else about the line — attributes, request-id
+// minting and threading, deferred panic-safe emission — is webhttp.Logging's
+// mechanism.
+func accessLogLevel(_ *http.Request, status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
 	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			rw := webhttp.NewStatusRecorder(w)
-			next.ServeHTTP(rw, r)
-			dur := time.Since(start)
-			// Bound both labels to the matched route. r.Pattern is empty for a
-			// 404/405, so an arbitrary client-supplied method/path token
-			// collapses to "unmatched". When a route matched, use the pattern's
-			// path TEMPLATE rather than r.URL.Path: a path-cleaning redirect
-			// (e.g. GET /api/./health -> /api/health, HTTP 301) keeps a non-empty
-			// r.Pattern but leaves r.URL.Path holding the raw, uncleaned path,
-			// which a scanner can vary without bound (/api//health, /api/./health,
-			// /api/x/../health, ...) to mint unbounded series.
-			metricPath := "unmatched"
-			metricMethod := "unmatched"
-			if r.Pattern != "" {
-				metricMethod = r.Method
-				metricPath = r.Pattern
-				if _, p, ok := strings.Cut(r.Pattern, " "); ok {
-					metricPath = p
-				}
-			}
-			metrics.RecordHTTP(metricMethod, metricPath, rw.Status(), dur)
-			lvl := slog.LevelDebug
-			switch {
-			case rw.Status() >= 500:
-				lvl = slog.LevelError
-			case rw.Status() >= 400:
-				lvl = slog.LevelWarn
-			}
-			// Logging the raw query is safe here: registry-stats has no
-			// auth and no endpoint takes a secret-bearing query parameter
-			// (contrast seadex-scout, which deliberately never logs its
-			// apikey-carrying query string).
-			logger.Log(r.Context(), lvl, "http request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"query", r.URL.RawQuery,
-				"status", rw.Status(),
-				"duration_ms", dur.Milliseconds())
-		})
+	return slog.LevelDebug
+}
+
+// recordHTTPMetric records the bounded-cardinality
+// registrystats_http_requests_total sample from webhttp.Logging's
+// request-aware metric hook (webhttp.WithRecordMetricRequest). The labels key
+// on the matched route TEMPLATE: r.Pattern is empty for a 404/405, so an
+// arbitrary client-supplied method/path token collapses to
+// method="unmatched",path="unmatched" and a scanner cannot mint unbounded
+// series. When a route matched, the pattern's path TEMPLATE is used rather
+// than r.URL.Path: a path-cleaning redirect (e.g. GET /api/./health ->
+// /api/health, HTTP 301) keeps a non-empty r.Pattern but leaves r.URL.Path
+// holding the raw, uncleaned path, which a scanner can vary without bound
+// (/api//health, /api/./health, /api/x/../health, ...).
+func recordHTTPMetric(r *http.Request, status int, d time.Duration) {
+	metricMethod, metricPath := "unmatched", "unmatched"
+	if r.Pattern != "" {
+		metricMethod = r.Method
+		metricPath = r.Pattern
+		if _, p, ok := strings.Cut(r.Pattern, " "); ok {
+			metricPath = p
+		}
 	}
+	metrics.RecordHTTP(metricMethod, metricPath, status, d)
 }

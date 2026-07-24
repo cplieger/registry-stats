@@ -13,3 +13,5 @@ require github.com/cplieger/slogx v1.4.0
 require github.com/cplieger/metrics/v3 v3.0.1
 
 require github.com/cplieger/httpx/v3 v3.2.0
+
+replace github.com/cplieger/webhttp => ../webhttp
