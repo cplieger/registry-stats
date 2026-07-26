@@ -37,7 +37,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
