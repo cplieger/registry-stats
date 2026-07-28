@@ -158,45 +158,79 @@ func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
 	}
 }
 
-// TestRecordHTTPMetric_boundsCardinalityOnUnmatchedRoutes pins the
-// cardinality bound on registrystats_http_requests_total through the
-// composed webhttp.Logging middleware and its request-aware metric hook. A
-// matched route records its real {method,path}; an unmatched route
-// (r.Pattern == "") collapses BOTH labels to "unmatched" so an arbitrary
-// client-supplied method or path on a 404/405 cannot mint unbounded metric
-// series in Mimir. The collapse is observable only via the metrics
-// exposition: the access log deliberately keeps the raw path, so a log
-// assertion cannot witness it.
-func TestRecordHTTPMetric_boundsCardinalityOnUnmatchedRoutes(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	h := webhttp.Logging(
-		webhttp.WithLogger(testsupport.QuietLogger()),
-		webhttp.WithRecordMetricRequest(recordHTTPMetric),
-	)(mux)
+// TestNew_boundsHTTPMetricCardinality pins the label vocabulary of
+// registrystats_http_requests_total through New's REAL route table and
+// middleware chain — which is where the bound now lives. The labels are
+// derived by webhttp's WithRecordRouteMetric and handed to
+// metrics.RecordHTTP; this app has no derivation of its own, so the property
+// under test is the WIRING: that New reaches for the hook whose labels are
+// bounded by construction rather than the request-aware one.
+//
+// Two halves. The bound: a client-chosen method token collapses to the fixed
+// "other" bucket and an unmatched path to the fixed "unmatched" marker, so a
+// scanner cannot mint series in Mimir. The non-collapse: a matched route
+// keeps its real method and route template — including HEAD, which ServeMux
+// routes to the GET pattern and which the metric must still record as HEAD
+// so the metric and the access line for one request_id agree — and an
+// unmatched request keeps its real METHOD, only the path collapsing. That
+// last part is a deliberate change from the app's former hand-rolled
+// derivation, which collapsed both labels onto method="unmatched"; the
+// retired value is asserted absent below.
+//
+// Observable only via the metrics exposition: the access log deliberately
+// keeps the raw path and the verbatim method, so a log assertion cannot
+// witness the collapse.
+func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
+	const hostilePunct = "M!#$%&'*+-.^_`|~" // every byte a valid RFC 9110 tchar
 
-	// Matched route keeps its real method+path labels.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
-	// Unmatched path with an arbitrary client method token: both labels collapse.
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("WEIRDPROBE", "/wp-login.php", nil))
+	ready := &webhttp.Ready{}
+	ready.Set(true)
+	srv := New(Deps{Ready: ready, Logger: testsupport.QuietLogger(), EnableMetrics: true})
+
+	for _, req := range []struct{ method, target string }{
+		{http.MethodGet, "/api/health"},   // matched
+		{http.MethodHead, "/api/health"},  // matched via the GET pattern
+		{http.MethodGet, "/metrics"},      // matched, second route
+		{http.MethodPost, "/api/health"},  // 405: path matches, method does not
+		{http.MethodGet, "/wp-login.php"}, // 404
+		{"WEIRDPROBE", "/wp-login.php"},   // 404 with an arbitrary method token
+		{hostilePunct, "/api/health"},     // 405 with a punctuation-only token
+	} {
+		srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(req.method, req.target, nil))
+	}
 
 	rec := httptest.NewRecorder()
 	metrics.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `method="unmatched",path="unmatched"`) {
-		t.Errorf("unmatched route did not collapse to method=unmatched,path=unmatched; metrics:\n%s", body)
+	present := map[string]string{
+		`{method="GET",path="/api/health",status="200"}`:  "matched route lost its real method+template (over-collapse)",
+		`{method="HEAD",path="/api/health",status="200"}`: "HEAD was not preserved: ServeMux routes it to the GET pattern, but the metric must still record HEAD so it agrees with the access line for the same request_id",
+		`{method="GET",path="/metrics",status="200"}`:     "second matched route lost its real method+template",
+		`{method="POST",path="unmatched",status="405"}`:   "a 405 must keep its real method and collapse only the path",
+		`{method="GET",path="unmatched",status="404"}`:    "a 404 must keep its real method and collapse only the path",
+		`{method="other",path="unmatched",status="404"}`:  "a non-standard method must bucket to \"other\", not vanish",
 	}
-	if strings.Contains(body, `method="WEIRDPROBE"`) {
-		t.Errorf("raw client method token leaked into a metric label (cardinality bound broken); metrics:\n%s", body)
+	for series, why := range present {
+		t.Run("present "+series, func(t *testing.T) {
+			if !strings.Contains(body, series) {
+				t.Errorf("%s: %s missing from exposition:\n%s", why, series, body)
+			}
+		})
 	}
-	if strings.Contains(body, `path="/wp-login.php"`) {
-		t.Errorf("raw unmatched path leaked into a metric label (cardinality bound broken); metrics:\n%s", body)
+
+	absent := map[string]string{
+		`method="WEIRDPROBE"`:  "a client-supplied method token reached a metric label (cardinality bound broken)",
+		hostilePunct:           "a punctuation-only method token reached a metric label (cardinality bound broken)",
+		`path="/wp-login.php"`: "a raw unmatched path reached a metric label (cardinality bound broken)",
+		`method="unmatched"`:   "the retired method collapse is back: the method label is bounded by a closed nine-method set plus \"other\", so an unmatched request keeps its real method and only the path collapses",
 	}
-	if !strings.Contains(body, `path="/api/health"`) {
-		t.Errorf("matched route lost its real path label (over-collapse); metrics:\n%s", body)
+	for probe, why := range absent {
+		t.Run("absent "+probe, func(t *testing.T) {
+			if strings.Contains(body, probe) {
+				t.Errorf("%s: found %q in exposition:\n%s", why, probe, body)
+			}
+		})
 	}
 }
 
