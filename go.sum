@@ -4,9 +4,9 @@ github.com/cplieger/httpx/v4 v4.2.1 h1:KrkuZKrOVWD8EoDXW16DJhvN+68Zm+FbSEVtn4ZNv
 github.com/cplieger/httpx/v4 v4.2.1/go.mod h1:bfJDGEQRWEwLu6mlwk49PfDIAETABwhlp+DAWFXo8XE=
 github.com/cplieger/metrics/v3 v3.0.1 h1:hyEQgUZOXumW1rGMtAk29rLjy2xFAO3RWbd6kzclEHg=
 github.com/cplieger/metrics/v3 v3.0.1/go.mod h1:EghyCDLd5c24KYisJ+tasMxIzC/jHaY31Cklb2Zxw/s=
-github.com/cplieger/slogx v1.4.0 h1:VlT8gYxqrQHxyEd7VKLy+QCmm3Utut3DQ6Y0P09uv3Q=
-github.com/cplieger/slogx v1.4.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
-github.com/cplieger/webhttp v1.19.0 h1:Xz0qKJh6ACuBx/FYyMWiqxqZds4YJAnwciXzmUXD0Jw=
-github.com/cplieger/webhttp v1.19.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
+github.com/cplieger/slogx v1.5.0 h1:4K5E9IG0nkYopJqv+BV/YsaMwPSCzyUvdPex24DeKds=
+github.com/cplieger/slogx v1.5.0/go.mod h1:15KA2NVx725imQe/PYXUmd3oM2oMpYpqwU+hdHtz7Fc=
+github.com/cplieger/webhttp v1.20.0 h1:quSLOpIysQF3+m0GqN4baklQxJyt3VtLDxPuOKPOAyw=
+github.com/cplieger/webhttp v1.20.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
 pgregory.net/rapid v1.3.0/go.mod h1:dPlE4OBBxgXPqkP79flB6sJL1dx5azpI7HQ9MY9Z7uk=

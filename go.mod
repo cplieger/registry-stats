@@ -6,9 +6,9 @@ require pgregory.net/rapid v1.3.0
 
 require github.com/cplieger/health v1.4.0
 
-require github.com/cplieger/webhttp v1.19.0
+require github.com/cplieger/webhttp v1.20.0
 
-require github.com/cplieger/slogx v1.4.0
+require github.com/cplieger/slogx v1.5.0
 
 require github.com/cplieger/metrics/v3 v3.0.1
 
