@@ -282,15 +282,22 @@ func recoverAndMarkUnhealthy(marker api.HealthSignal, phase string) {
 // waitWithTimeout blocks until wg's goroutines finish or ctx is done,
 // whichever comes first. Used in the shutdown teardown to bound how long
 // a wedged collect goroutine can hold the server past the grace deadline.
+//
+// webhttp.AwaitDone owns the wait, including the recheck the bare two-case
+// select got wrong: webhttp.Run derives the teardown context from the SAME
+// deadline srv.Shutdown just spent, so a drain that used the whole grace hands
+// this function an ALREADY-EXPIRED context, and a select with both cases ready
+// picks pseudo-randomly — reporting collect goroutines that DID finish as
+// wedged, roughly half the time. AwaitDone re-checks completion after ctx
+// fires, so completion wins. The policy stays here: whether to warn, and in
+// whose words.
 func waitWithTimeout(ctx context.Context, wg *sync.WaitGroup) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	if !webhttp.AwaitDone(ctx, done) {
 		slog.Warn("collect goroutines did not finish before shutdown deadline")
 	}
 }
