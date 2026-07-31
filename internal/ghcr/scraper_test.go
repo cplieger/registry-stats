@@ -630,3 +630,157 @@ func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 		})
 	}
 }
+
+// legacyPackageKey is the exact pre-keyenc expression both dedup sites used:
+// a '/' concatenation with no escaping. Kept as the oracle for the tests
+// below, which assert what the adoption did and did not change.
+func legacyPackageKey(owner, pkg string) string {
+	return owner + "/" + pkg
+}
+
+// TestPackageKeyOrdinaryInputIsPlainColonJoin pins the shape of the key for
+// ordinary input: keyenc introduces no escaping, no hashing and no other
+// decoration for components that carry neither ':' nor '\', so the key is
+// exactly owner + ":" + pkg. Every component this site can produce today is
+// separator-free (urlsafe.IsSafeURLSegment, plus the literal "*"), so this is
+// the shape in production.
+//
+// The separator deliberately changed from '/' to keyenc's ':' — the one
+// intended byte change of the adoption. It is free because the key lives only
+// inside a single buildPackageList call: never persisted, never logged, never
+// a metric label, never compared across runs.
+func TestPackageKeyOrdinaryInputIsPlainColonJoin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		owner string
+		pkg   string
+	}{
+		{name: "typical", owner: "cplieger", pkg: "registry-stats"},
+		{name: "wildcard marker", owner: "cplieger", pkg: "*"},
+		{name: "dots and underscores", owner: "home.assistant", pkg: "my_repo"},
+		{name: "hyphens", owner: "some-owner", pkg: "fclones-scheduler"},
+		{name: "digits", owner: "o123", pkg: "p456"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			want := tt.owner + ":" + tt.pkg
+			if got := packageKey(tt.owner, tt.pkg); got != want {
+				t.Errorf("packageKey(%q, %q) = %q, want %q", tt.owner, tt.pkg, got, want)
+			}
+			// The same input under the old encoder differed only in the
+			// separator: nothing else about the key changed.
+			if got, legacy := packageKey(tt.owner, tt.pkg), legacyPackageKey(tt.owner, tt.pkg); got != strings.ReplaceAll(legacy, "/", ":") {
+				t.Errorf("packageKey(%q, %q) = %q, want the legacy key %q with '/' -> ':' and no other change",
+					tt.owner, tt.pkg, got, legacy)
+			}
+		})
+	}
+}
+
+// TestPackageKeySeparatorCannotForgeAnotherPair pins that distinct (owner,
+// package) pairs the old '/' concatenation collapsed now produce distinct
+// keys. These inputs are unreachable today — ParseRepoRefs and
+// packageListParser.scanLine both gate components through
+// urlsafe.IsSafeURLSegment, which rejects '/' — so this is a guard on the
+// encoder, not a live bug: it is what keeps the key correct if the allowlist
+// is ever relaxed or a component starts arriving from an unfiltered source.
+//
+// Asserts both halves, so the test cannot pass vacuously: the legacy form
+// really did collide on these pairs, and the keyenc form does not.
+func TestPackageKeySeparatorCannotForgeAnotherPair(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		ownerA, pkgA   string
+		ownerB, pkgB   string
+		legacyCollides bool
+	}{
+		{
+			name:   "slash at end of owner vs start of package",
+			ownerA: "cplieger/app", pkgA: "v2",
+			ownerB: "cplieger", pkgB: "app/v2",
+			legacyCollides: true,
+		},
+		{
+			name:   "slash swallowing the whole package name",
+			ownerA: "owner/app1", pkgA: "sub",
+			ownerB: "owner", pkgB: "app1/sub",
+			legacyCollides: true,
+		},
+		{
+			// keyenc's own separator must not forge a pair either, now that
+			// ':' is the separator this site joins on.
+			name:   "colon at end of owner vs start of package",
+			ownerA: "owner:app1", pkgA: "sub",
+			ownerB: "owner", pkgB: "app1:sub",
+			legacyCollides: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			legacyA := legacyPackageKey(tt.ownerA, tt.pkgA)
+			legacyB := legacyPackageKey(tt.ownerB, tt.pkgB)
+			if collided := legacyA == legacyB; collided != tt.legacyCollides {
+				t.Fatalf("premise broken: legacy collision = %v (%q vs %q), want %v",
+					collided, legacyA, legacyB, tt.legacyCollides)
+			}
+			gotA := packageKey(tt.ownerA, tt.pkgA)
+			gotB := packageKey(tt.ownerB, tt.pkgB)
+			if gotA == gotB {
+				t.Errorf("(%q, %q) and (%q, %q) must not share a dedup key, both = %q",
+					tt.ownerA, tt.pkgA, tt.ownerB, tt.pkgB, gotA)
+			}
+		})
+	}
+}
+
+// TestBuildPackageListSharedKeyEncodingPreventsDuplicates guards the invariant
+// that makes the two dedup sites correct: the wildcard pass and the
+// explicit-ref pass write into ONE `seen` map, so they must encode a pair
+// identically. If only one of them were changed, the explicit ref would no
+// longer match its wildcard twin and the same package would be returned twice,
+// scraped twice and exported twice.
+//
+// TestBuildPackageList_WildcardDedup asserts set membership and so cannot see
+// a duplicate; this test counts occurrences, which is the part that fails if
+// the two encodings ever drift apart.
+func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/users/owner/packages") && !strings.Contains(r.URL.Path, "/container/") {
+			_, _ = w.Write([]byte(`<a href="/users/owner/packages/container/package/app1">app1</a>
+<a href="/users/owner/packages/container/package/app2">app2</a>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	refs := []model.RepoRef{
+		{Owner: "owner", Repo: "*"},
+		{Owner: "owner", Repo: "app1"}, // already found by the wildcard
+		{Owner: "owner", Repo: "app2"}, // already found by the wildcard
+		{Owner: "owner", Repo: "app3"}, // genuinely new
+	}
+	packages, listFail, parseFail := buildPackageList(
+		t.Context(), mockClient(srv), testsupport.QuietLogger(), refs, shortRetry())
+	if listFail != 0 || parseFail != 0 {
+		t.Fatalf("listing failures: listFail=%d parseFail=%d", listFail, parseFail)
+	}
+
+	counts := make(map[model.RepoRef]int, len(packages))
+	for _, p := range packages {
+		counts[p]++
+	}
+	for ref, n := range counts {
+		if n != 1 {
+			t.Errorf("package %s/%s returned %d times, want exactly 1 (the wildcard and explicit passes disagree on the dedup key encoding)",
+				ref.Owner, ref.Repo, n)
+		}
+	}
+	if len(packages) != 3 {
+		t.Errorf("len(packages) = %d, want 3 (app1, app2, app3); got %+v", len(packages), packages)
+	}
+}

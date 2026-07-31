@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/keyenc"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
@@ -216,6 +217,39 @@ func ParseDownloads(html string) (int64, error) {
 	return count, nil
 }
 
+// packageKey builds the dedup key for one (owner, package) pair. It is the
+// single encoder for buildPackageList's `seen` map, which BOTH the wildcard
+// expansion (owner + scraped package name) and the explicit-ref pass (owner +
+// configured repo) write into — sharing one map is what lets a wildcard-found
+// package suppress the same package listed explicitly. Because they share the
+// map they must share the encoding: if the two builders ever disagreed on how
+// a pair becomes a string, the explicit ref would stop matching its wildcard
+// twin and get appended a second time, so the same image would be scraped and
+// exported twice. Having one function is what makes that impossible.
+//
+// The components are escaped with keyenc rather than concatenated so the key's
+// injectivity is a property of the key, not an inherited guarantee from a
+// validator two packages away. Today every component is separator-free —
+// config's ParseRepoRefs gates owner and repo through
+// urlsafe.IsSafeURLSegment ([A-Za-z0-9._-], so no ':' and no '\'), the literal
+// "*" wildcard marker contains neither, and scraped names are filtered through
+// the same predicate in packageListParser.scanLine — so no collision is
+// reachable today and this changes no behavior. It stops the key from
+// depending on that: were the allowlist relaxed, a third component added, or a
+// name sourced from somewhere that does not filter, a name carrying the
+// separator could forge another pair's key. The consequence would be a silent
+// data hole rather than a wrong number: the forged key already reads as seen,
+// so the real package is dropped from the returned list, never scraped, and
+// its registrystats_image_pulls_total series simply stops appearing on
+// /metrics — a gap in the dashboard with nothing logged.
+//
+// The bytes changed with the adoption ('/' -> ':'). That is free here: this
+// key exists only inside one buildPackageList call, is never persisted,
+// logged, exported as a metric label, or compared across runs.
+func packageKey(owner, pkg string) string {
+	return keyenc.Join(owner, pkg)
+}
+
 // expandWildcard scrapes one wildcard owner's package listing and
 // appends each new (deduplicated) package ref to packages. It returns
 // the grown slice plus listing-failure and format-drift-failure counts
@@ -250,7 +284,7 @@ func expandWildcard(
 		return packages, 1, 0
 	}
 	for _, name := range names {
-		key := ref.Owner + "/" + name
+		key := packageKey(ref.Owner, name)
 		if !seen[key] {
 			seen[key] = true
 			packages = append(packages, model.RepoRef{Owner: ref.Owner, Repo: name})
@@ -265,6 +299,9 @@ func expandWildcard(
 // covered by a wildcard. Returns the deduplicated list plus counts of
 // listing-level failures and format-drift listing failures so the
 // caller can decide whether to log a format-change alert.
+//
+// Both passes key the `seen` map through packageKey — see that function for
+// why the shared map requires a shared encoder.
 func buildPackageList(
 	ctx context.Context,
 	client *http.Client,
@@ -286,7 +323,7 @@ func buildPackageList(
 		if ref.Repo == "*" {
 			continue
 		}
-		key := ref.Owner + "/" + ref.Repo
+		key := packageKey(ref.Owner, ref.Repo)
 		if !seen[key] {
 			seen[key] = true
 			packages = append(packages, ref)
