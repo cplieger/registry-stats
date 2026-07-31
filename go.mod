@@ -13,3 +13,5 @@ require github.com/cplieger/slogx v1.5.0
 require github.com/cplieger/metrics/v3 v3.0.1
 
 require github.com/cplieger/httpx/v4 v4.2.1
+
+require github.com/cplieger/keyenc v1.0.0
