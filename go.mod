@@ -6,7 +6,7 @@ require pgregory.net/rapid v1.3.0
 
 require github.com/cplieger/health v1.4.0
 
-require github.com/cplieger/webhttp v1.21.0
+require github.com/cplieger/webhttp v1.22.0
 
 require github.com/cplieger/slogx v1.6.0
 
