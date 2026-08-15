@@ -1,7 +1,6 @@
 package dockerhub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -53,7 +52,7 @@ func TestClient_ListRepos_PaginatesOwner(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	repos, err := listRepos(context.Background(), c, "testowner")
+	repos, err := listRepos(t.Context(), c, "testowner")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestClient_ListRepos_ParseError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	_, err := listRepos(context.Background(), c, "testowner")
+	_, err := listRepos(t.Context(), c, "testowner")
 	if err == nil {
 		t.Error("expected parse error for invalid JSON")
 	}
@@ -102,7 +101,7 @@ func TestClient_TagCount_ReadsCountField(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	got := tagCount(context.Background(), c, "owner", "app")
+	got := tagCount(t.Context(), c, "owner", "app")
 	if got != 164 {
 		t.Errorf("tagCount = %d, want 164 (the count field, not len(results))", got)
 	}
@@ -118,7 +117,7 @@ func TestClient_TagCount_FetchErrorReturnsZero(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	if got := tagCount(context.Background(), c, "owner", "app"); got != 0 {
+	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on fetch error", got)
 	}
 }
@@ -130,7 +129,7 @@ func TestClient_TagCount_ParseErrorReturnsZero(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	if got := tagCount(context.Background(), c, "owner", "app"); got != 0 {
+	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on parse error", got)
 	}
 }
@@ -142,7 +141,7 @@ func TestClient_TagCount_MissingCountReturnsZero(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	if got := tagCount(context.Background(), c, "owner", "app"); got != 0 {
+	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 when the response carries no count field", got)
 	}
 }
@@ -204,7 +203,7 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	repos, err := listRepos(context.Background(), c, "o")
+	repos, err := listRepos(t.Context(), c, "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
 	}
@@ -233,7 +232,7 @@ func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(mockClient(srv), shortRetry(), 0, nil)
-	if got := tagCount(context.Background(), c, "o", "a"); got != 0 {
+	if got := tagCount(t.Context(), c, "o", "a"); got != 0 {
 		t.Errorf("tagCount on a failing server = %d, want 0", got)
 	}
 }
