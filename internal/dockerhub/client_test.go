@@ -2,7 +2,6 @@ package dockerhub_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -68,7 +67,7 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
-	entries, attempted, healthy := c.Collect(context.Background(), refs)
+	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1", attempted)
@@ -106,7 +105,7 @@ func TestClient_Collect_TagCountFailureKeepsEntry(t *testing.T) {
 	defer srv.Close()
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	entries, attempted, healthy := c.Collect(context.Background(), []model.RepoRef{{Owner: "owner", Repo: "myapp"}})
+	entries, attempted, healthy := c.Collect(t.Context(), []model.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
 	if attempted != 1 || !healthy {
 		t.Errorf("attempted = %d, healthy = %v; want 1, true (a tag-count failure is not a repo failure)", attempted, healthy)
@@ -137,7 +136,7 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, attempted, healthy := c.Collect(context.Background(), refs)
+	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
@@ -172,7 +171,7 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"},
 	}
-	entries, attempted, _ := c.Collect(context.Background(), refs)
+	entries, attempted, _ := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1 (wildcard covered the explicit ref)", attempted)
@@ -190,7 +189,7 @@ func TestClient_Collect_DegradedOnAllFailures(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
-	entries, attempted, healthy := c.Collect(context.Background(), refs)
+	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
@@ -217,7 +216,7 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "a"}}
-	entries, _, _ := c.Collect(context.Background(), refs)
+	entries, _, _ := c.Collect(t.Context(), refs)
 
 	if len(entries) != 1 {
 		t.Fatalf("entries len = %d, want 1 (good/a survives bad wildcard listing)", len(entries))
@@ -244,7 +243,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		defer srv.Close()
 
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-		entries, attempted, healthy := c.Collect(context.Background(), wildcard)
+		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if healthy {
 			t.Errorf("healthy = true, want false (wildcard listing wholly failed)")
@@ -267,7 +266,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		defer srv.Close()
 
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-		entries, _, healthy := c.Collect(context.Background(), wildcard)
+		entries, _, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
 			t.Errorf("healthy = false, want true (owner legitimately has zero repos)")
@@ -298,7 +297,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		defer srv.Close()
 
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-		entries, attempted, healthy := c.Collect(context.Background(), wildcard)
+		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
 			t.Errorf("healthy = false, want true (partial listing failure, one repo returned)")
@@ -338,7 +337,7 @@ func TestClient_PageCap_TruncatesOwnerListing(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 1, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "o", Repo: "*"}}
-	_, attempted, _ := c.Collect(context.Background(), refs)
+	_, attempted, _ := c.Collect(t.Context(), refs)
 
 	if ownerPages != 1 {
 		t.Errorf("owner-listing requests = %d, want 1 (pageCap=1 enforced)", ownerPages)
@@ -382,7 +381,7 @@ func TestClient_Collect_ExplicitRefParseError(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
-	entries, attempted, _ := c.Collect(context.Background(), refs)
+	entries, attempted, _ := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1", attempted)
@@ -400,7 +399,7 @@ func TestClient_Collect_ExplicitRefFetchError(t *testing.T) {
 
 	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
 	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
-	entries, attempted, healthy := c.Collect(context.Background(), refs)
+	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1", attempted)
@@ -442,7 +441,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 
 		logger, buf := captureLogger()
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
-		c.Collect(context.Background(), wildcard)
+		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), whollyMsg) {
 			t.Errorf("Collect with a wholesale listing failure did not log %q; logs:\n%s", whollyMsg, buf.String())
@@ -471,7 +470,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 
 		logger, buf := captureLogger()
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
-		c.Collect(context.Background(), wildcard)
+		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), partiallyMsg) {
 			t.Errorf("Collect with a partial listing failure did not log %q; logs:\n%s", partiallyMsg, buf.String())
@@ -491,7 +490,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 
 		logger, buf := captureLogger()
 		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
-		c.Collect(context.Background(), wildcard)
+		c.Collect(t.Context(), wildcard)
 
 		if strings.Contains(buf.String(), whollyMsg) || strings.Contains(buf.String(), partiallyMsg) {
 			t.Errorf("Collect with a successful wildcard listing logged a failure warn, want silence; logs:\n%s", buf.String())
