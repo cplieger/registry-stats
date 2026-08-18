@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
@@ -51,7 +52,7 @@ func TestClient_ListRepos_PaginatesOwner(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	repos, err := listRepos(t.Context(), c, "testowner")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
@@ -73,7 +74,7 @@ func TestClient_ListRepos_ParseError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	_, err := listRepos(t.Context(), c, "testowner")
 	if err == nil {
 		t.Error("expected parse error for invalid JSON")
@@ -100,7 +101,7 @@ func TestClient_TagCount_ReadsCountField(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	got := tagCount(t.Context(), c, "owner", "app")
 	if got != 164 {
 		t.Errorf("tagCount = %d, want 164 (the count field, not len(results))", got)
@@ -116,7 +117,7 @@ func TestClient_TagCount_FetchErrorReturnsZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on fetch error", got)
 	}
@@ -128,7 +129,7 @@ func TestClient_TagCount_ParseErrorReturnsZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on parse error", got)
 	}
@@ -140,7 +141,7 @@ func TestClient_TagCount_MissingCountReturnsZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 when the response carries no count field", got)
 	}
@@ -202,7 +203,7 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	repos, err := listRepos(t.Context(), c, "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
@@ -231,8 +232,59 @@ func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(mockClient(srv), shortRetry(), 0, nil)
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry()})
 	if got := tagCount(t.Context(), c, "o", "a"); got != 0 {
 		t.Errorf("tagCount on a failing server = %d, want 0", got)
+	}
+}
+
+func tagCountHandler(count int) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"count":   count,
+			"next":    "",
+			"results": []map[string]any{{"name": "latest"}},
+		})
+	}
+}
+
+// TestClient_PageCap_TruncatesOwnerListing lives in the internal test file
+// because withPageCap is the unexported test seam (go.md forbids a test-only
+// parameter on the production constructor, which is where the cap used to
+// ride).
+func TestClient_PageCap_TruncatesOwnerListing(t *testing.T) {
+	// A tiny pageCap (1) should visit only one page of the owner listing
+	// even if the server signals "next" — proving the cap is applied.
+	// Count requests to the owner-listing path specifically (the mux
+	// pattern /v2/repositories/o/ would otherwise also match nested
+	// paths like /v2/repositories/o/a/tags/, so filter by exact URL).
+	ownerPages := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/repositories/o/" {
+			ownerPages++
+			json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{{"name": "a", "pull_count": 1}},
+				"next":    "keep-going", // server keeps offering more pages
+			})
+			return
+		}
+		// Tags endpoint under the same prefix: serve a count so the
+		// wildcard expansion's tag-count fetch for "a" succeeds quietly.
+		tagCountHandler(1)(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c.pageCap = 1 // in-package: the cap needs no production setter
+	refs := []registry.RepoRef{{Owner: "o", Repo: "*"}}
+	_, attempted, _ := c.Collect(t.Context(), refs)
+
+	if ownerPages != 1 {
+		t.Errorf("owner-listing requests = %d, want 1 (pageCap=1 enforced)", ownerPages)
+	}
+	if attempted != 1 {
+		t.Errorf("attempted = %d, want 1 (one repo from the capped page)", attempted)
 	}
 }

@@ -10,17 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
-
-// Compile-time assertion kept here (not in the package) so a change that
-// narrows api.RegistrySource past what *Client satisfies trips the build
-// in the test binary before reaching any other consumer.
-var _ api.RegistrySource = (*dockerhub.Client)(nil)
 
 func mockClient(srv *httptest.Server) *http.Client {
 	return testsupport.MockClient(srv)
@@ -46,8 +40,8 @@ func tagCountHandler(count int) http.HandlerFunc {
 }
 
 func TestClient_Name(t *testing.T) {
-	c := dockerhub.NewClient(http.DefaultClient, shortRetry(), 0, testsupport.QuietLogger())
-	if got := c.Name(); got != "dockerhub" {
+	c := dockerhub.NewClient(http.DefaultClient, dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	if got := c.Source().String(); got != "dockerhub" {
 		t.Errorf("Name() = %q, want dockerhub", got)
 	}
 }
@@ -65,8 +59,8 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
@@ -104,8 +98,8 @@ func TestClient_Collect_TagCountFailureKeepsEntry(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	entries, attempted, healthy := c.Collect(t.Context(), []model.RepoRef{{Owner: "owner", Repo: "myapp"}})
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	entries, attempted, healthy := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
 	if attempted != 1 || !healthy {
 		t.Errorf("attempted = %d, healthy = %v; want 1, true (a tag-count failure is not a repo failure)", attempted, healthy)
@@ -134,8 +128,8 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "*"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
@@ -166,8 +160,8 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"},
 	}
@@ -187,8 +181,8 @@ func TestClient_Collect_DegradedOnAllFailures(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
@@ -214,8 +208,8 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "a"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "a"}}
 	entries, _, _ := c.Collect(t.Context(), refs)
 
 	if len(entries) != 1 {
@@ -233,7 +227,7 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 // outage leaves attempted == 0, which the severe-degradation rule alone
 // reads as healthy — masking the outage from collect_errors_total.
 func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
-	wildcard := []model.RepoRef{{Owner: "o", Repo: "*"}}
+	wildcard := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 
 	t.Run("wholesale_failure_is_unhealthy", func(t *testing.T) {
 		// Owner listing 404s on page 1 → zero usable repos → wholesale outage.
@@ -242,7 +236,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if healthy {
@@ -265,7 +259,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		srv := httptest.NewServer(mux)
 		defer srv.Close()
 
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, _, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
@@ -296,7 +290,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		srv := httptest.NewServer(mux)
 		defer srv.Close()
 
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
@@ -311,56 +305,20 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 	})
 }
 
-func TestClient_PageCap_TruncatesOwnerListing(t *testing.T) {
-	// A tiny pageCap (1) should visit only one page of the owner listing
-	// even if the server signals "next" — proving the cap is applied.
-	// Count requests to the owner-listing path specifically (the mux
-	// pattern /v2/repositories/o/ would otherwise also match nested
-	// paths like /v2/repositories/o/a/tags/, so filter by exact URL).
-	ownerPages := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v2/repositories/o/" {
-			ownerPages++
-			json.NewEncoder(w).Encode(map[string]any{
-				"results": []map[string]any{{"name": "a", "pull_count": 1}},
-				"next":    "keep-going", // server keeps offering more pages
-			})
-			return
-		}
-		// Tags endpoint under the same prefix: serve a count so the
-		// wildcard expansion's tag-count fetch for "a" succeeds quietly.
-		tagCountHandler(1)(w, r)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 1, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "o", Repo: "*"}}
-	_, attempted, _ := c.Collect(t.Context(), refs)
-
-	if ownerPages != 1 {
-		t.Errorf("owner-listing requests = %d, want 1 (pageCap=1 enforced)", ownerPages)
-	}
-	if attempted != 1 {
-		t.Errorf("attempted = %d, want 1 (one repo from the capped page)", attempted)
-	}
-}
-
 func TestDegraded(t *testing.T) {
 	tests := []struct {
 		name      string
-		results   []model.RegistryEntry
+		results   []registry.Entry
 		attempted int
 		want      bool
 	}{
 		{"zero attempted", nil, 0, false},
 		{"all failed (0 of 3)", nil, 3, true},
-		{"empty results (0 of 1)", []model.RegistryEntry{}, 1, true},
-		{"majority failed (1 of 3)", []model.RegistryEntry{{Repo: "b"}}, 3, true},
-		{"exactly half (1 of 2)", []model.RegistryEntry{{Repo: "b"}}, 2, false},
-		{"all succeeded (2 of 2)", []model.RegistryEntry{{Repo: "b"}, {Repo: "d"}}, 2, false},
-		{"one of one", []model.RegistryEntry{{Repo: "b"}}, 1, false},
+		{"empty results (0 of 1)", []registry.Entry{}, 1, true},
+		{"majority failed (1 of 3)", []registry.Entry{{Repo: "b"}}, 3, true},
+		{"exactly half (1 of 2)", []registry.Entry{{Repo: "b"}}, 2, false},
+		{"all succeeded (2 of 2)", []registry.Entry{{Repo: "b"}, {Repo: "d"}}, 2, false},
+		{"one of one", []registry.Entry{{Repo: "b"}}, 1, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -379,8 +337,8 @@ func TestClient_Collect_ExplicitRefParseError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, _ := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
@@ -397,8 +355,8 @@ func TestClient_Collect_ExplicitRefFetchError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "myapp"}}
+	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
@@ -431,7 +389,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		whollyMsg    = "docker hub listing wholly failed"
 		partiallyMsg = "docker hub listing partially failed"
 	)
-	wildcard := []model.RepoRef{{Owner: "o", Repo: "*"}}
+	wildcard := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 
 	t.Run("wholesale_error_logs_wholly", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -440,7 +398,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		defer srv.Close()
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), whollyMsg) {
@@ -469,7 +427,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		defer srv.Close()
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), partiallyMsg) {
@@ -489,7 +447,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		defer srv.Close()
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), shortRetry(), 0, logger)
+		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if strings.Contains(buf.String(), whollyMsg) || strings.Contains(buf.String(), partiallyMsg) {

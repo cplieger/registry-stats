@@ -23,17 +23,16 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/httpx/v5"
 	collectpkg "github.com/cplieger/registry-stats/v2/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
 	"github.com/cplieger/registry-stats/v2/internal/ghcr"
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/webapi"
 	"github.com/cplieger/slogx"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/webhttp/v2"
 )
 
 func main() {
@@ -45,8 +44,12 @@ func main() {
 	// (POLL_INTERVAL_HOURS=0) disables the deadline (WithMaxAge(0) is a
 	// no-op): after the single collect the marker is deliberately static.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
-		health.RunProbe(health.DefaultPath,
-			health.WithMaxAge(3*configpkg.PollInterval()))
+		// Warnings discarded: the probe runs many times an hour against the
+		// same environment, and the serving process already reports a
+		// malformed POLL_INTERVAL_HOURS once at startup. RunProbe exits, so
+		// nothing downstream needs them.
+		interval, _ := configpkg.PollInterval()
+		health.RunProbe(health.DefaultPath, health.WithMaxAge(3*interval))
 	}
 
 	if err := run(); err != nil {
@@ -62,12 +65,18 @@ func main() {
 // a clean signal-driven shutdown. Keeping the body here (rather than in main)
 // lets deferred cleanup run before the process exits on the error path.
 func run() error {
-	// Install the UTC text handler up front at the default level so
-	// LoadConfig's own warnings (invalid POLL_INTERVAL_HOURS / LOG_LEVEL)
-	// render through the configured handler rather than slog's default; the
-	// parsed level is applied once LoadConfig has read it.
+	// Install the UTC text handler up front at the DEFAULT level, load config,
+	// then emit its warnings BEFORE applying the parsed level. Order is
+	// load-bearing: config itself never logs (go-rulebook C1), so main owns
+	// the emission — and a valid LOG_LEVEL=error applied first would swallow
+	// every config warning, which is exactly the diagnostic an operator who
+	// mistyped a value needs. Emitting first reproduces the old behavior,
+	// where the warnings were logged inside Load before any level was set.
 	levelVar := slogx.Setup(slogx.Options{})
-	cfg := configpkg.LoadConfig()
+	cfg, warns := configpkg.Load()
+	for _, w := range warns {
+		slog.Warn(w.Msg, w.Attrs...)
+	}
 	levelVar.Set(cfg.LogLevel)
 	logConfig(&cfg)
 
@@ -113,12 +122,12 @@ func run() error {
 	}
 	defer httpClient.CloseIdleConnections()
 
-	dh := dockerhub.NewClient(httpClient, nil, 0, slog.Default())
-	gh := ghcr.NewClient(httpClient, nil, ghcr.Options{}, slog.Default())
+	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
+	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
 
 	// Pin {dh, gh} order: DockerHub-then-GHCR is the scrape sequence
 	// Loki dashboards key on in their per-source panels.
-	sources := []api.RegistrySource{dh, gh}
+	sources := []collectpkg.Source{dh, gh}
 
 	// Mark liveness healthy as soon as the HTTP API is bound. The first
 	// collect runs in the background so slow registries (GHCR per-package
@@ -180,18 +189,18 @@ func run() error {
 func runCollect(
 	ctx context.Context,
 	cfg *configpkg.Config,
-	sources []api.RegistrySource,
+	sources []collectpkg.Source,
 ) bool {
 	start := time.Now()
 	images, _ := collectpkg.Run(ctx, collectpkg.Options{
 		Sources: sources,
 		Logger:  slog.Default(),
 		Now:     time.Now,
-		RefsFor: func(name string) []model.RepoRef {
+		RefsFor: func(name string) []registry.RepoRef {
 			switch name {
-			case model.SourceDockerHub.String():
+			case registry.DockerHub.String():
 				return cfg.DockerHubRepos
-			case model.SourceGHCR.String():
+			case registry.GHCR.String():
 				return cfg.GHCRRepos
 			}
 			return nil
@@ -201,9 +210,9 @@ func runCollect(
 	// collect.collectSource so they count only invoked sources (those with
 	// configured refs), keeping collects_total and collect_errors_total over
 	// the same denominator.
-	metrics.CollectDuration.Observe(time.Since(start).Seconds())
+	obs.CollectDuration.Observe(time.Since(start).Seconds())
 	if cfg.EnableMetrics {
-		metrics.SetImageMetrics(images)
+		obs.SetImage(images)
 	}
 	// Health marker = "at least one repo collected this cycle", per the documented contract that
 	// partial failures stay healthy as long as one repo succeeds (README/CONTRIBUTING). This is
@@ -222,8 +231,8 @@ func runCollect(
 func markCollect(
 	ctx context.Context,
 	cfg *configpkg.Config,
-	sources []api.RegistrySource,
-	marker api.HealthSignal,
+	sources []collectpkg.Source,
+	marker healthSignal,
 	ready *webhttp.Ready,
 ) {
 	ok := runCollect(ctx, cfg, sources)
@@ -240,9 +249,9 @@ func markCollect(
 func runScheduled(
 	ctx context.Context,
 	cfg *configpkg.Config,
-	marker api.HealthSignal,
+	marker healthSignal,
 	ready *webhttp.Ready,
-	sources []api.RegistrySource,
+	sources []collectpkg.Source,
 ) {
 	for {
 		// Add ±10% jitter to avoid predictable access patterns. Guard
@@ -266,13 +275,25 @@ func runScheduled(
 	}
 }
 
+// healthSignal is the write-only file-marker liveness seam this composition
+// root drives — declared here at its consumer per the interface-placement
+// rule (the old internal/api hub held it). *health.Marker satisfies it. The
+// collect loop flips it once per cycle (healthy when a cycle collected at
+// least one repo); the `registry-stats health` subcommand reads the marker
+// file for the Docker HEALTHCHECK. HTTP serving-readiness is a separate
+// concern — GET /api/health is backed by a webhttp.Ready gate, not this
+// marker — so this interface is deliberately write-only.
+type healthSignal interface {
+	Set(healthy bool)
+}
+
 // recoverAndMarkUnhealthy is a deferred panic recoverer for the
 // collection goroutines. On panic it logs at ERROR (preserving the
 // legacy "<phase> panicked" key+panic value used by Loki alerts) and
 // flips the health marker so the orchestrator observes the failure.
 // phase is the short name of the calling context ("initial collect"
 // or "scheduled collect").
-func recoverAndMarkUnhealthy(marker api.HealthSignal, phase string) {
+func recoverAndMarkUnhealthy(marker healthSignal, phase string) {
 	if r := recover(); r != nil {
 		slog.Error(phase+" panicked", "panic", r)
 		marker.Set(false)

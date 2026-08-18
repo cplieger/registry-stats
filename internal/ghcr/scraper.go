@@ -19,7 +19,7 @@
 //     whether to emit the "format may be changing" WARN/ERROR logs.
 //
 // The package exposes a *Client (for composition-root wiring via
-// api.RegistrySource). The HTML-handling internals (fetchHTML,
+// collect.Source). The HTML-handling internals (fetchHTML,
 // scrapePackageList, scrapeDownloads, buildPackageList) are
 // unexported — all collection flows go through *Client.Collect.
 // ParseDownloads and ParsePackageList stay exported as pure-core
@@ -37,9 +37,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/keyenc"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
@@ -259,11 +259,11 @@ func expandWildcard(
 	ctx context.Context,
 	client *http.Client,
 	logger *slog.Logger,
-	ref model.RepoRef,
+	ref registry.RepoRef,
 	opts []httpx.GetOption,
 	seen map[string]bool,
-	packages []model.RepoRef,
-) (out []model.RepoRef, listingFailures, listingParseFailures int) {
+	packages []registry.RepoRef,
+) (out []registry.RepoRef, listingFailures, listingParseFailures int) {
 	names, err := scrapePackageList(ctx, client, ref.Owner, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -287,7 +287,7 @@ func expandWildcard(
 		key := packageKey(ref.Owner, name)
 		if !seen[key] {
 			seen[key] = true
-			packages = append(packages, model.RepoRef{Owner: ref.Owner, Repo: name})
+			packages = append(packages, registry.RepoRef{Owner: ref.Owner, Repo: name})
 		}
 	}
 	logger.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
@@ -306,9 +306,9 @@ func buildPackageList(
 	ctx context.Context,
 	client *http.Client,
 	logger *slog.Logger,
-	refs []model.RepoRef,
+	refs []registry.RepoRef,
 	opts []httpx.GetOption,
-) (packages []model.RepoRef, listingFailures, listingParseFailures int) {
+) (packages []registry.RepoRef, listingFailures, listingParseFailures int) {
 	seen := make(map[string]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {

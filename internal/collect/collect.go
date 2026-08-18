@@ -1,6 +1,6 @@
 // Package collect is the registry-stats collection orchestrator. It
-// loops over a set of api.RegistrySource implementations, stamps each
-// source's flat []model.RegistryEntry output with its registry label,
+// loops over a set of Source implementations, stamps each
+// source's flat []registry.Entry output with its registry label,
 // and returns the combined per-image metric records plus a healthy flag
 // so the caller can flip its healthcheck marker accordingly.
 //
@@ -16,22 +16,46 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/api"
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
+// Source collects registry-specific statistics for a list of refs — the
+// one seam this orchestrator drives, declared here at its consumer (the
+// old internal/api hub held it at arm's length from everyone who used it).
+// Implementations return flat per-image registry.Entry records; Run stamps
+// each with the source's registry label for the metric surface. attempted
+// counts refs the source tried to fetch (including failures) so degraded
+// detection can see the shortfall; healthy is true only when the source met
+// its per-source health criteria.
+//
+// Source() returns the typed registry.ID — Run routes entries by it without
+// a string compare, and derives the lowercase on-wire log label via its
+// String(). The old interface also carried Name() with a prose invariant
+// that Name() == Source().String(); both implementations defined Name as
+// exactly that call, so the method carried zero information and the
+// compiler could not enforce the invariant. Deriving the label from the one
+// authoritative method deletes the drift surface (C11 side finding).
+type Source interface {
+	Source() registry.ID
+	Collect(
+		ctx context.Context,
+		refs []registry.RepoRef,
+	) (entries []registry.Entry, attempted int, healthy bool)
+}
+
 // Options configures a single Run. Sources are the registry clients
-// that actually fetch data; RefsFor maps each source's Name() to the
-// []model.RepoRef it should fetch, allowing the orchestrator to stay
+// that actually fetch data; RefsFor maps each source's on-wire name
+// (Source().String()) to the
+// []registry.RepoRef it should fetch, allowing the orchestrator to stay
 // agnostic of the per-registry config slice layout. A nil Logger falls
 // back to slog.Default. Now is the clock used for the cycle-duration
 // log (tests inject a deterministic clock; production passes time.Now).
 type Options struct {
 	Logger  *slog.Logger
 	Now     func() time.Time
-	RefsFor func(name string) []model.RepoRef
-	Sources []api.RegistrySource
+	RefsFor func(name string) []registry.RepoRef
+	Sources []Source
 }
 
 // Run orchestrates a single collection cycle. It invokes each source's
@@ -47,7 +71,7 @@ type Options struct {
 // registry-stats is stateless: Run never persists the result. The healthy flag drives
 // only the partial-failure WARN below; the caller derives its health marker separately
 // (see main.runCollect).
-func Run(ctx context.Context, opts Options) (images []metrics.ImageMetric, healthy bool) {
+func Run(ctx context.Context, opts Options) (images []obs.ImageMetric, healthy bool) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -66,7 +90,7 @@ func Run(ctx context.Context, opts Options) (images []metrics.ImageMetric, healt
 	var dockerHubCount, ghcrCount int
 
 	for _, src := range opts.Sources {
-		refs := refsFor(opts, src.Name())
+		refs := refsFor(opts, src.Source().String())
 		if len(refs) == 0 {
 			continue
 		}
@@ -76,9 +100,9 @@ func Run(ctx context.Context, opts Options) (images []metrics.ImageMetric, healt
 			degraded = true
 		}
 		switch src.Source() {
-		case model.SourceDockerHub:
+		case registry.DockerHub:
 			dockerHubCount = len(srcImages)
-		case model.SourceGHCR:
+		case registry.GHCR:
 			ghcrCount = len(srcImages)
 		}
 		images = append(images, srcImages...)
@@ -119,27 +143,27 @@ func Run(ctx context.Context, opts Options) (images []metrics.ImageMetric, healt
 func collectSource(
 	ctx context.Context,
 	logger *slog.Logger,
-	src api.RegistrySource,
-	refs []model.RepoRef,
-) (images []metrics.ImageMetric, srcHealthy bool) {
+	src Source,
+	refs []registry.RepoRef,
+) (images []obs.ImageMetric, srcHealthy bool) {
 	entries, attempted, srcHealthy := src.Collect(ctx, refs)
 	// Count every invoked source as a collect run; collect_errors_total below is
 	// the failed subset, so collect_errors_total / collects_total is a valid
 	// per-source failure ratio.
-	metrics.CollectsTotal.Inc(src.Name())
+	obs.CollectsTotal.Inc(src.Source().String())
 	if !srcHealthy {
-		if src.Source() == model.SourceDockerHub && len(entries) > 0 {
+		if src.Source() == registry.DockerHub && len(entries) > 0 {
 			logger.Warn("docker hub collection severely degraded",
 				"succeeded", len(entries), "attempted", attempted)
 		}
-		metrics.CollectErrors.Inc(src.Name())
+		obs.CollectErrors.Inc(src.Source().String())
 	}
 
-	registry := src.Source().String()
-	if registry == "" {
+	label := src.Source().String()
+	if label == "" {
 		return nil, srcHealthy
 	}
-	images = make([]metrics.ImageMetric, 0, len(entries))
+	images = make([]obs.ImageMetric, 0, len(entries))
 	for _, e := range entries {
 		// Defensive: a zero-value entry would emit a broken {owner,repo}
 		// label pair. The registry clients always populate Repo, so this
@@ -147,8 +171,8 @@ func collectSource(
 		if e.Repo == "" {
 			continue
 		}
-		images = append(images, metrics.ImageMetric{
-			Registry: registry,
+		images = append(images, obs.ImageMetric{
+			Registry: label,
 			Owner:    e.Owner,
 			Repo:     e.Repo,
 			Pulls:    e.Pulls,
@@ -163,7 +187,7 @@ func collectSource(
 // equivalent to "no refs for any source", which short-circuits the
 // whole loop — useful for orchestrator-only tests that pass canned
 // entries via fake sources with baked-in state.
-func refsFor(opts Options, name string) []model.RepoRef {
+func refsFor(opts Options, name string) []registry.RepoRef {
 	if opts.RefsFor == nil {
 		return nil
 	}

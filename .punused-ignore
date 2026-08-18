@@ -2,14 +2,15 @@
 # line, matched against punused's output line; full-line `#` comments carry the
 # reason. Invalid-by-construction classes: `.kiro/steering/tools.md`.
 #
-# SourceUnknown is `RegistrySource = iota`, i.e. the zero value: any unset
-# RegistrySource IS SourceUnknown, so it is produced without any textual
-# reference. It is read transitively in production -- String()'s default branch
-# returns "", and internal/collect drops a source whose registry label is empty
-# while keeping its health accounting. Deleting it would be a behavior change,
-# not a cleanup: SourceDockerHub would slide to iota 0, a zero value would
-# render as "dockerhub", and that guard would become unreachable.
-constant SourceUnknown
+# registry.Unknown is `ID = iota`, i.e. the zero value: any unset ID IS
+# Unknown, so it is produced without any textual reference. It is read
+# transitively in production -- String()'s default branch returns "", and
+# internal/collect drops a source whose registry label is empty while keeping
+# its health accounting. Deleting it would be a behavior change, not a
+# cleanup: DockerHub would slide to iota 0, a zero value would render as
+# "dockerhub", and that guard would become unreachable. (Renamed from
+# SourceUnknown in the go-rulebook C17 model->registry rename.)
+constant Unknown
 #
 # internal/testsupport is the shared fixture package for the ghcr, dockerhub,
 # collect and webapi test suites: MockClient pairs RedirectTransport with the

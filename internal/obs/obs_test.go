@@ -1,4 +1,4 @@
-package metrics
+package obs
 
 import (
 	"net/http"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// scrapeBody renders the current /metrics output. SetImageMetrics
+// scrapeBody renders the current /metrics output. SetImage
 // mutates process-global gauges, so tests here must stay serial (no
 // t.Parallel) and each pins only its own final state.
 func scrapeBody(t *testing.T) string {
@@ -24,7 +24,7 @@ func TestMetricsHandler(t *testing.T) {
 	CollectErrors.Inc("ghcr")
 	HTTPDuration.Observe(0.013)
 	CollectDuration.Observe(1.42)
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "cplieger", Repo: "subflux", Pulls: 1234, Tags: 8},
 		{Registry: "ghcr", Owner: "cplieger", Repo: "vibekit", Pulls: 56, Tags: 0},
 	})
@@ -60,14 +60,14 @@ func TestMetricsHandler(t *testing.T) {
 // and images present in both cycles carry the new values.
 func TestSetImageMetrics_replacesSeriesSet(t *testing.T) {
 	// First call sets two images.
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 1, Tags: 1},
 		{Registry: "dockerhub", Owner: "a", Repo: "y", Pulls: 2, Tags: 2},
 	})
 
 	// Second call replaces with a single image — the dropped ones should
 	// disappear from the next handler output.
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "z", Pulls: 3, Tags: 3},
 	})
 
@@ -87,10 +87,10 @@ func TestSetImageMetrics_replacesSeriesSet(t *testing.T) {
 // no tags) keeps its pulls series with the fresh value but loses its
 // image_tags series — a stale count must not linger from the prior cycle.
 func TestSetImageMetrics_tagsDroppingToZeroRemovesSeries(t *testing.T) {
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 10, Tags: 4},
 	})
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 11, Tags: 0},
 	})
 
@@ -108,10 +108,10 @@ func TestSetImageMetrics_tagsDroppingToZeroRemovesSeries(t *testing.T) {
 // empty update removes every previously-emitted image series (matching
 // the old Reset semantics for a cycle that collected nothing).
 func TestSetImageMetrics_emptyCycleClearsAll(t *testing.T) {
-	SetImageMetrics([]ImageMetric{
+	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "gone", Pulls: 5, Tags: 1},
 	})
-	SetImageMetrics(nil)
+	SetImage(nil)
 
 	body := scrapeBody(t)
 
