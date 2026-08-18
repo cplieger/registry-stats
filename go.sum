@@ -2,8 +2,8 @@ github.com/cplieger/health v1.5.1 h1:HxMLi2KOgNwCJ9yo+YicnRQXelD5B0hJTfmG/eJ0cWc
 github.com/cplieger/health v1.5.1/go.mod h1:pFkWxVKbja/KO/bkI0ybdN4LipfX8yNTqSM/S0ufrhE=
 github.com/cplieger/httpx/v4 v4.3.1 h1:XDyP4i0k02B6wvnW4mp0KQ7vM6RIHtzkkP0Gzzu2GVI=
 github.com/cplieger/httpx/v4 v4.3.1/go.mod h1:0coefCZ470kiMATdNrU0CY5a4g/W7pFy0433CVZHwWc=
-github.com/cplieger/keyenc v1.0.2 h1:1DjKsJOOXOu7Qdhupj7S5Wq6fcrA1moKnBZBrF37XiE=
-github.com/cplieger/keyenc v1.0.2/go.mod h1:Q9zMsHPmtkcMvl8PjC2r3YIOoDicMlUcwkEdv+9oK2I=
+github.com/cplieger/keyenc v1.0.3 h1:PD5dj5VCa2GfHYaohdYsAloRiWcM9sWBx8yw5rXG3hg=
+github.com/cplieger/keyenc v1.0.3/go.mod h1:Q9zMsHPmtkcMvl8PjC2r3YIOoDicMlUcwkEdv+9oK2I=
 github.com/cplieger/metrics/v3 v3.0.2 h1:pInB8dVRbgVsxi9a4np2uZcCsYXH9yvB6EBNJ2q+6/U=
 github.com/cplieger/metrics/v3 v3.0.2/go.mod h1:PARPw0Ez8ZiPaiDCKQ3f4RJlgq5Ibpsy2kC8sUjRJHI=
 github.com/cplieger/slogx v1.6.1 h1:f9C3LeGPD6uxAU096O7ggUcvmon8vFmG6WMkscMI6rU=
