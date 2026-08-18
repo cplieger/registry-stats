@@ -1,8 +1,8 @@
 package config
 
 import (
-	"bytes"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,7 +29,7 @@ func TestParseRepoRefs(t *testing.T) {
 		{"noowner/", 0},
 	}
 	for _, tt := range tests {
-		got := ParseRepoRefs(tt.input)
+		got, _ := ParseRepoRefs(tt.input)
 		if len(got) != tt.want {
 			t.Errorf("ParseRepoRefs(%q) = %d items, want %d", tt.input, len(got), tt.want)
 		}
@@ -37,7 +37,7 @@ func TestParseRepoRefs(t *testing.T) {
 }
 
 func TestParseRepoRefsWildcard(t *testing.T) {
-	refs := ParseRepoRefs("owner/repo,owner2/*,owner3/pkg")
+	refs, _ := ParseRepoRefs("owner/repo,owner2/*,owner3/pkg")
 	if len(refs) != 3 {
 		t.Fatalf("len = %d, want 3", len(refs))
 	}
@@ -53,7 +53,7 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", ":8080")
 	t.Setenv("LOG_LEVEL", "debug")
 
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if len(cfg.DockerHubRepos) != 2 {
 		t.Errorf("DockerHubRepos len = %d, want 2", len(cfg.DockerHubRepos))
@@ -79,7 +79,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
 	}
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h", cfg.PollInterval)
@@ -94,7 +94,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 func TestLoadConfigInvalidNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h fallback", cfg.PollInterval)
@@ -103,7 +103,7 @@ func TestLoadConfigInvalidNumbers(t *testing.T) {
 
 func TestLoadConfigNegativeNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "-5")
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h fallback for negative", cfg.PollInterval)
@@ -115,7 +115,7 @@ func TestLoadConfigWildcard(t *testing.T) {
 	t.Setenv("GHCR_REPOS", "cplieger/*,cplieger/fclones")
 	t.Setenv("POLL_INTERVAL_HOURS", "1")
 
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if len(cfg.DockerHubRepos) != 1 || cfg.DockerHubRepos[0].Repo != "*" {
 		t.Errorf("DockerHubRepos = %+v, want [cplieger/*]", cfg.DockerHubRepos)
@@ -132,7 +132,7 @@ func TestLoadConfigZeroValues(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 
-	cfg := LoadConfig()
+	cfg, _ := Load()
 
 	if cfg.PollInterval != 0 {
 		t.Errorf("PollInterval = %v, want 0 (one-shot mode)", cfg.PollInterval)
@@ -144,50 +144,10 @@ func TestLoadConfig_poll_interval_clamped_to_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 
-	cfg := LoadConfig()
+	cfg, _ := Load()
 	const maxPollHours = 24 * 365
 	if cfg.PollInterval != time.Duration(maxPollHours)*time.Hour {
 		t.Errorf("PollInterval = %v, want %v (clamped)", cfg.PollInterval, time.Duration(maxPollHours)*time.Hour)
-	}
-}
-
-func TestGetEnv(t *testing.T) {
-	t.Run("returns env value when set", func(t *testing.T) {
-		t.Setenv("TEST_GETENV_KEY", "myvalue")
-		got := GetEnv("TEST_GETENV_KEY", "fallback")
-		if got != "myvalue" {
-			t.Errorf("GetEnv() = %q, want %q", got, "myvalue")
-		}
-	})
-
-	t.Run("returns fallback when not set", func(t *testing.T) {
-		got := GetEnv("TEST_GETENV_NONEXISTENT_KEY_12345", "fallback")
-		if got != "fallback" {
-			t.Errorf("GetEnv() = %q, want %q", got, "fallback")
-		}
-	})
-
-	t.Run("returns fallback when empty", func(t *testing.T) {
-		t.Setenv("TEST_GETENV_EMPTY", "")
-		got := GetEnv("TEST_GETENV_EMPTY", "default")
-		if got != "default" {
-			t.Errorf("GetEnv() = %q, want %q", got, "default")
-		}
-	})
-}
-
-func TestGetEnvDistinguishesUnsetFromEmpty(t *testing.T) {
-	// Unset: should return fallback
-	got := GetEnv("TOTALLY_NONEXISTENT_VAR_XYZ_123", "default")
-	if got != "default" {
-		t.Errorf("GetEnv(unset) = %q, want %q", got, "default")
-	}
-
-	// Set to non-empty: should return the value
-	t.Setenv("TEST_GETENV_SET", "hello")
-	got = GetEnv("TEST_GETENV_SET", "default")
-	if got != "hello" {
-		t.Errorf("GetEnv(set) = %q, want %q", got, "hello")
 	}
 }
 
@@ -195,7 +155,7 @@ func TestGetEnvDistinguishesUnsetFromEmpty(t *testing.T) {
 func TestParseRepoRefs_never_panics(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		input := rapid.String().Draw(t, "input")
-		refs := ParseRepoRefs(input)
+		refs, _ := ParseRepoRefs(input)
 		for _, ref := range refs {
 			if ref.Owner == "" {
 				t.Errorf("ParseRepoRefs(%q) produced empty owner", input)
@@ -210,7 +170,7 @@ func TestParseRepoRefs_never_panics(t *testing.T) {
 func TestParseRepoRefs_output_always_safe(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		input := rapid.String().Draw(t, "input")
-		refs := ParseRepoRefs(input)
+		refs, _ := ParseRepoRefs(input)
 		for _, ref := range refs {
 			if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {
 				t.Errorf("ParseRepoRefs(%q) produced unsafe repo %q", input, ref.Repo)
@@ -227,18 +187,49 @@ func TestParseRepoRefs_output_always_safe(t *testing.T) {
 // they assert against the exact threshold.
 const clampMaxPollHours = 24 * 365
 
-// captureClampLog redirects the global slog default to a buffer-backed
-// text handler for the test's duration and returns the buffer. LoadConfig
-// emits its clamp warning through the package-global slog, so capturing
-// the default logger is the only way to observe whether the warning
-// fired. The default is restored in cleanup.
-func captureClampLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(orig) })
-	return buf
+// warningsContain reports whether any returned Warning's message contains
+// substr. Config never logs (go-rulebook C1 relocation): warnings are values,
+// so the tests read them directly instead of capturing the global logger.
+func warningsContain(warns []Warning, substr string) bool {
+	for _, w := range warns {
+		if strings.Contains(w.Msg, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWarningsCarryStructuredAttrs pins the k/v shape main emits: the
+// pre-relocation code logged these as slog attributes, so flattening them
+// into prose would break any Loki filter or alert keyed on the attribute
+// rather than the message text.
+func TestWarningsCarryStructuredAttrs(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "not-a-ref")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
+	t.Setenv("LOG_LEVEL", "bogus")
+
+	_, warns := Load()
+
+	want := map[string][]any{
+		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {"value", "notanumber"},
+		"invalid LOG_LEVEL, using default":                     {"value", "bogus", "default", "info"},
+		"skipping invalid repo ref":                            {"input", "not-a-ref", "expected", "owner/repo or owner/*"},
+	}
+	got := make(map[string][]any, len(warns))
+	for _, w := range warns {
+		got[w.Msg] = w.Attrs
+	}
+	for msg, attrs := range want {
+		gotAttrs, ok := got[msg]
+		if !ok {
+			t.Errorf("no warning with message %q (got %v)", msg, got)
+			continue
+		}
+		if !reflect.DeepEqual(gotAttrs, attrs) {
+			t.Errorf("warning %q attrs = %v, want %v", msg, gotAttrs, attrs)
+		}
+	}
 }
 
 // TestLoadConfig_clamp_boundary_silent_at_exact_max verifies that a
@@ -251,18 +242,17 @@ func TestLoadConfig_clamp_boundary_silent_at_exact_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours))
-	buf := captureClampLog(t)
 
-	cfg := LoadConfig()
+	cfg, warns := Load()
 
 	want := time.Duration(clampMaxPollHours) * time.Hour
 	if cfg.PollInterval != want {
-		t.Errorf("LoadConfig(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v",
+		t.Errorf("Load(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v",
 			clampMaxPollHours, cfg.PollInterval, want)
 	}
-	if strings.Contains(buf.String(), "POLL_INTERVAL_HOURS clamped") {
-		t.Errorf("LoadConfig at exact max %d emitted a clamp warning, want none at the boundary (log=%q)",
-			clampMaxPollHours, buf.String())
+	if warningsContain(warns, "POLL_INTERVAL_HOURS clamped") {
+		t.Errorf("Load at exact max %d returned a clamp warning, want none at the boundary (warns=%v)",
+			clampMaxPollHours, warns)
 	}
 }
 
@@ -274,17 +264,16 @@ func TestLoadConfig_clamp_warns_one_above_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
-	buf := captureClampLog(t)
 
-	cfg := LoadConfig()
+	cfg, warns := Load()
 
 	want := time.Duration(clampMaxPollHours) * time.Hour
 	if cfg.PollInterval != want {
-		t.Errorf("LoadConfig(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v (clamped)",
+		t.Errorf("Load(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v (clamped)",
 			clampMaxPollHours+1, cfg.PollInterval, want)
 	}
-	if !strings.Contains(buf.String(), "POLL_INTERVAL_HOURS clamped") {
-		t.Errorf("LoadConfig above max emitted no clamp warning, want one (log=%q)", buf.String())
+	if !warningsContain(warns, "POLL_INTERVAL_HOURS clamped") {
+		t.Errorf("Load above max returned no clamp warning, want one (warns=%v)", warns)
 	}
 }
 
@@ -305,7 +294,7 @@ func TestLoadConfig_EnableMetrics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.env, func(t *testing.T) {
 			t.Setenv("ENABLE_METRICS", tt.env)
-			cfg := LoadConfig()
+			cfg, _ := Load()
 			if cfg.EnableMetrics != tt.want {
 				t.Errorf("LoadConfig(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
 			}
@@ -330,7 +319,7 @@ func TestLoadConfig_LogLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.env, func(t *testing.T) {
 			t.Setenv("LOG_LEVEL", tt.env)
-			cfg := LoadConfig()
+			cfg, _ := Load()
 			if cfg.LogLevel != tt.want {
 				t.Errorf("LoadConfig(LOG_LEVEL=%q).LogLevel = %v, want %v", tt.env, cfg.LogLevel, tt.want)
 			}
@@ -346,15 +335,14 @@ func TestLoadConfig_invalidLogLevel_warns(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("LOG_LEVEL", "bogus")
-	buf := captureClampLog(t)
 
-	cfg := LoadConfig()
+	cfg, warns := Load()
 
 	if cfg.LogLevel != slog.LevelInfo {
-		t.Errorf("LoadConfig(LOG_LEVEL=bogus).LogLevel = %v, want Info (fallback)", cfg.LogLevel)
+		t.Errorf("Load(LOG_LEVEL=bogus).LogLevel = %v, want Info (fallback)", cfg.LogLevel)
 	}
-	if !strings.Contains(buf.String(), "invalid LOG_LEVEL") {
-		t.Errorf("invalid LOG_LEVEL emitted no warning, want one (log=%q)", buf.String())
+	if !warningsContain(warns, "invalid LOG_LEVEL") {
+		t.Errorf("invalid LOG_LEVEL returned no warning, want one (warns=%v)", warns)
 	}
 }
 
@@ -364,14 +352,13 @@ func TestLoadConfig_validLogLevel_silent(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("LOG_LEVEL", "warn")
-	buf := captureClampLog(t)
 
-	cfg := LoadConfig()
+	cfg, warns := Load()
 
 	if cfg.LogLevel != slog.LevelWarn {
-		t.Errorf("LoadConfig(LOG_LEVEL=warn).LogLevel = %v, want Warn", cfg.LogLevel)
+		t.Errorf("Load(LOG_LEVEL=warn).LogLevel = %v, want Warn", cfg.LogLevel)
 	}
-	if strings.Contains(buf.String(), "invalid LOG_LEVEL") {
-		t.Errorf("valid LOG_LEVEL emitted an invalid-level warning, want none (log=%q)", buf.String())
+	if warningsContain(warns, "invalid LOG_LEVEL") {
+		t.Errorf("valid LOG_LEVEL returned an invalid-level warning, want none (warns=%v)", warns)
 	}
 }

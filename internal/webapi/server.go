@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/webhttp/v2"
 )
 
 // Default HTTP server timeouts. Chosen for a LAN-only setup:
@@ -64,7 +64,7 @@ func New(d Deps) *http.Server {
 	// "process alive?"), different mechanism (HTTP vs marker file).
 	mux.Handle("GET /api/health", webhttp.ReadinessHandler(ready))
 	if d.EnableMetrics {
-		mux.HandleFunc("GET /metrics", metrics.Handler())
+		mux.HandleFunc("GET /metrics", obs.Handler())
 	}
 
 	// Middleware via webhttp.Chain (first listed is outermost): the shared
@@ -78,7 +78,7 @@ func New(d Deps) *http.Server {
 	// (request-id minting/threading, deferred panic-safe emission, hook
 	// isolation) is the library's. accessLogLevel is the policy: ~15s
 	// Prometheus scrape lines stay at DEBUG while 4xx/5xx are raised.
-	// metrics.RecordHTTP is the sink: webhttp.WithRecordRouteMetric derives
+	// obs.RecordHTTP is the sink: webhttp.WithRecordRouteMetric derives
 	// the bounded (method, path) label pair for
 	// registrystats_http_requests_total in the LIBRARY and hands it in, so
 	// this app has no derivation of its own left to get wrong — the reason to
@@ -120,7 +120,7 @@ func New(d Deps) *http.Server {
 		webhttp.Logging(
 			webhttp.WithLogger(logger),
 			webhttp.WithLogLevel(accessLogLevel),
-			webhttp.WithRecordRouteMetric(metrics.RecordHTTP),
+			webhttp.WithRecordRouteMetric(obs.RecordHTTP),
 		),
 		webhttp.Recoverer(webhttp.WithRecoverLogger(logger)),
 		webhttp.SecurityHeaders(),

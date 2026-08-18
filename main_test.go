@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/api"
+	"github.com/cplieger/registry-stats/v2/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
 // TestLogConfig smoke-tests logConfig on a populated *Config: it emits the
@@ -33,25 +33,24 @@ import (
 // "no repos configured" ERROR branch is covered by TestLogConfig_noReposLogsError.
 func TestLogConfig(t *testing.T) {
 	cfg := &configpkg.Config{
-		DockerHubRepos: []model.RepoRef{{Owner: "a", Repo: "b"}},
-		GHCRRepos:      []model.RepoRef{{Owner: "c", Repo: "d"}},
+		DockerHubRepos: []registry.RepoRef{{Owner: "a", Repo: "b"}},
+		GHCRRepos:      []registry.RepoRef{{Owner: "c", Repo: "d"}},
 		PollInterval:   time.Hour,
 	}
 	logConfig(cfg)
 }
 
-// mainFakeSource is a canned api.RegistrySource for driving runCollect in
+// mainFakeSource is a canned collect.Source for driving runCollect in
 // isolation from any HTTP path.
 type mainFakeSource struct {
-	src     model.RegistrySource
-	entries []model.RegistryEntry
+	src     registry.ID
+	entries []registry.Entry
 	healthy bool
 }
 
-func (f *mainFakeSource) Name() string                 { return f.src.String() }
-func (f *mainFakeSource) Source() model.RegistrySource { return f.src }
+func (f *mainFakeSource) Source() registry.ID { return f.src }
 
-func (f *mainFakeSource) Collect(_ context.Context, _ []model.RepoRef) ([]model.RegistryEntry, int, bool) {
+func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, bool) {
 	return f.entries, len(f.entries), f.healthy
 }
 
@@ -63,16 +62,16 @@ func (f *mainFakeSource) Collect(_ context.Context, _ []model.RepoRef) ([]model.
 // Mutates process-global metrics, so no t.Parallel.
 func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	dh := &mainFakeSource{
-		src:     model.SourceDockerHub,
-		entries: []model.RegistryEntry{{Owner: "o", Repo: "app", Pulls: 1}},
+		src:     registry.DockerHub,
+		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 1}},
 		healthy: true,
 	}
-	gh := &mainFakeSource{src: model.SourceGHCR, healthy: false} // no entries, unhealthy
+	gh := &mainFakeSource{src: registry.GHCR, healthy: false} // no entries, unhealthy
 	cfg := &configpkg.Config{
-		DockerHubRepos: []model.RepoRef{{Owner: "o", Repo: "app"}},
-		GHCRRepos:      []model.RepoRef{{Owner: "o", Repo: "pkg"}},
+		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
+		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
-	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh, gh}); !got {
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}); !got {
 		t.Error("runCollect() = false, want true (DockerHub produced data; partial success stays healthy)")
 	}
 }
@@ -81,9 +80,9 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 // no registry produces an entry, runCollect returns false so the marker flips
 // unhealthy. Mutates process-global metrics, so no t.Parallel.
 func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
-	dh := &mainFakeSource{src: model.SourceDockerHub, healthy: false}
-	cfg := &configpkg.Config{DockerHubRepos: []model.RepoRef{{Owner: "o", Repo: "app"}}}
-	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh}); got {
+	dh := &mainFakeSource{src: registry.DockerHub, healthy: false}
+	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh}); got {
 		t.Error("runCollect() = true, want false (no repo collected)")
 	}
 }
@@ -96,27 +95,27 @@ func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
 // process-global metrics, so no t.Parallel.
 func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	dh := &mainFakeSource{
-		src:     model.SourceDockerHub,
-		entries: []model.RegistryEntry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: 2}},
+		src:     registry.DockerHub,
+		entries: []registry.Entry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: 2}},
 		healthy: true,
 	}
 	gh := &mainFakeSource{
-		src:     model.SourceGHCR,
-		entries: []model.RegistryEntry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
+		src:     registry.GHCR,
+		entries: []registry.Entry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
 		healthy: true,
 	}
 	cfg := &configpkg.Config{
-		DockerHubRepos: []model.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
-		GHCRRepos:      []model.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
+		DockerHubRepos: []registry.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
+		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
 		EnableMetrics:  true,
 	}
-	if got := runCollect(t.Context(), cfg, []api.RegistrySource{dh, gh}); !got {
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}); !got {
 		t.Fatal("runCollect() = false, want true")
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
-	metrics.Handler()(w, r)
+	obs.Handler()(w, r)
 	body := w.Body.String()
 
 	want := []string{
@@ -131,7 +130,7 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	}
 }
 
-// mainFakeMarker is a minimal api.HealthSignal for asserting the health flag
+// mainFakeMarker is a minimal healthSignal for asserting the health flag
 // recoverAndMarkUnhealthy sets.
 type mainFakeMarker struct{ healthy bool }
 

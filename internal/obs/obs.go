@@ -1,9 +1,11 @@
-// Package metrics is a thin wrapper around github.com/cplieger/metrics/v3
-// holding the registry-stats-specific metric instances and the SetImageMetrics
+// Package obs holds registry-stats' observability surface: the app-specific
+// metric instances built on github.com/cplieger/metrics/v4 and the SetImage
 // adapter (which converts a per-cycle slice of ImageMetric records into the
 // equivalent labeled-gauge state). The registry prefix ("registrystats") is
-// applied to every metric name by the library.
-package metrics
+// applied to every metric name by the library. Named obs, not metrics: the
+// library owns that name, and the old collision forced a two-letter cm
+// alias at every meeting point.
+package obs
 
 import (
 	"net/http"
@@ -11,53 +13,53 @@ import (
 	"sync"
 	"time"
 
-	cm "github.com/cplieger/metrics/v3"
+	"github.com/cplieger/metrics/v4"
 )
 
-// registry holds every metric this package exposes. The "registrystats" prefix
+// reg holds every metric this package exposes. The "registrystats" prefix
 // is prepended to each registered name by the library.
-var registry = cm.NewRegistry("registrystats")
+var reg = metrics.NewRegistry("registrystats")
 
 // Exported metric instances (names auto-prefixed with "registrystats_").
 var (
-	HTTPRequests = cm.NewLabeledCounter(
+	HTTPRequests = metrics.NewLabeledCounter(
 		"http_requests_total",
 		"Total HTTP requests",
 		[]string{"method", "path", "status"},
 	)
-	CollectsTotal = cm.NewLabeledCounter(
+	CollectsTotal = metrics.NewLabeledCounter(
 		"collects_total",
 		"Total collection runs by source",
 		[]string{"source"},
 	)
-	CollectErrors = cm.NewLabeledCounter(
+	CollectErrors = metrics.NewLabeledCounter(
 		"collect_errors_total",
 		"Total collection errors by source",
 		[]string{"source"},
 	)
-	HTTPDuration = cm.NewHistogram(
+	HTTPDuration = metrics.NewHistogram(
 		"http_request_duration_seconds",
 		"HTTP request latency",
 	)
 	// CollectDuration uses APIBuckets (coarse, to 30s): a full Docker Hub +
 	// GHCR collect cycle routinely exceeds 1s, which DefaultBuckets (max 1.0s)
 	// would dump entirely into +Inf.
-	CollectDuration = cm.NewHistogram(
+	CollectDuration = metrics.NewHistogram(
 		"collect_duration_seconds",
 		"Collection cycle duration",
-		cm.WithBuckets(cm.APIBuckets()),
+		metrics.WithBuckets(metrics.APIBuckets()),
 	)
 
-	// Per-image gauges populated by SetImageMetrics. Two parallel labeled
+	// Per-image gauges populated by SetImage. Two parallel labeled
 	// gauges (pulls + tags) keyed on (registry, owner, repo). Updated via
 	// Set-then-delete-stale on each cycle so deleted images disappear
 	// without the gauges ever being observably empty mid-update.
-	imagePulls = cm.NewLabeledGauge(
+	imagePulls = metrics.NewLabeledGauge(
 		"image_pulls_total",
 		"Total pull count per image",
 		[]string{"registry", "owner", "repo"},
 	)
-	imageTags = cm.NewLabeledGauge(
+	imageTags = metrics.NewLabeledGauge(
 		"image_tags",
 		"Number of tags per image",
 		[]string{"registry", "owner", "repo"},
@@ -65,13 +67,19 @@ var (
 )
 
 func init() {
-	registry.RegisterLabeledCounter(HTTPRequests)
-	registry.RegisterLabeledCounter(CollectsTotal)
-	registry.RegisterLabeledCounter(CollectErrors)
-	registry.RegisterLabeledGauge(imagePulls)
-	registry.RegisterLabeledGauge(imageTags)
-	registry.RegisterHistogram(HTTPDuration)
-	registry.RegisterHistogram(CollectDuration)
+	// MustRegister surfaces construction-time validation (metrics v4 captures
+	// a malformed name or bucket layout into the metric value, client_golang
+	// style) at process start: a bad definition fails the first test run and
+	// the container boot, never the scrape path.
+	reg.MustRegister(
+		HTTPRequests,
+		CollectsTotal,
+		CollectErrors,
+		imagePulls,
+		imageTags,
+		HTTPDuration,
+		CollectDuration,
+	)
 }
 
 // ImageMetric holds per-image gauge data set after each collect cycle.
@@ -85,17 +93,17 @@ type ImageMetric struct {
 	Tags     int
 }
 
-// setMu serializes SetImageMetrics passes: the initial and the first
+// setMu serializes SetImage passes: the initial and the first
 // scheduled collect can overlap (see main.go), and each pass reads and
 // replaces the previous cycle's label sets below.
 var setMu sync.Mutex
 
-// prevPulls and prevTags hold the label sets the previous SetImageMetrics
+// prevPulls and prevTags hold the label sets the previous SetImage
 // pass emitted, so the next pass can delete exactly the series that
 // disappeared instead of resetting the whole gauge. Guarded by setMu.
 var prevPulls, prevTags map[[3]string]bool
 
-// SetImageMetrics replaces the current image gauge data for one collect
+// SetImage replaces the current image gauge data for one collect
 // cycle. Current values are Set in place first, then series absent from
 // this cycle are Deleted (diffed against the previous pass), so images
 // that disappear stop emitting. Unlike a Reset+Set pass, the gauges are
@@ -105,7 +113,7 @@ var prevPulls, prevTags map[[3]string]bool
 // cannot fake a pull-count regression to downstream alerting. (A scrape
 // may still straddle the per-series updates themselves — some series
 // fresh, some one cycle stale — which is benign for cumulative counts.)
-func SetImageMetrics(images []ImageMetric) {
+func SetImage(images []ImageMetric) {
 	setMu.Lock()
 	defer setMu.Unlock()
 	pulls := make(map[[3]string]bool, len(images))
@@ -138,10 +146,10 @@ func SetImageMetrics(images []ImageMetric) {
 // RecordHTTP records one HTTP request into the package HTTP metrics via the
 // library helper (caller-owned {method,path,status} label set).
 func RecordHTTP(method, path string, status int, d time.Duration) {
-	cm.RecordHTTP(HTTPRequests, HTTPDuration, d, method, path, strconv.Itoa(status))
+	metrics.RecordHTTP(HTTPRequests, HTTPDuration, d, method, path, strconv.Itoa(status))
 }
 
 // Handler returns an HTTP handler serving Prometheus text format.
 func Handler() http.HandlerFunc {
-	return registry.Handler()
+	return reg.Handler()
 }

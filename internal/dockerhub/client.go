@@ -1,4 +1,4 @@
-// Package dockerhub is the Docker Hub RegistrySource implementation. It
+// Package dockerhub is the Docker Hub collect.Source implementation. It
 // collects per-repo pull counts and total tag counts via the
 // unauthenticated Docker Hub /v2/ API, handling wildcard owner
 // expansion and severe-degradation detection.
@@ -17,7 +17,7 @@
 //     on truncation still see the same key set.
 //
 // The package exposes a *Client (for composition-root wiring via
-// api.RegistrySource) plus the exported Degraded predicate (a pure
+// collect.Source) plus the exported Degraded predicate (a pure
 // function retained because its input-shape is what the legacy
 // TestDockerHubDegraded matrix asserts against). All collection
 // behavior is reached through *Client methods; there are no
@@ -32,9 +32,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/registry-stats/v2/internal/api"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
@@ -47,41 +46,49 @@ const (
 	PageSize      = 100
 )
 
-// Client implements api.RegistrySource for Docker Hub. Construct via
-// NewClient; the zero value is not usable.
+// Client is the Docker Hub source (it satisfies collect.Source at the wiring
+// site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {
 	http      *http.Client
 	logger    *slog.Logger
 	retryOpts []httpx.GetOption
-	pageCap   int // overrides MaxOwnerPages when non-zero; 0 = use the default
+	// pageCap overrides MaxOwnerPages when non-zero; 0 = the default. It is
+	// set only by the in-package test that exercises the pagination bound —
+	// a test-only PARAMETER on the production constructor is forbidden by
+	// go.md, and an unexported field the test package can reach needs no
+	// production surface at all.
+	pageCap int
+}
+
+// Options configures NewClient beyond the required HTTP client: the
+// per-request retry options and the logger, each with a meaningful zero
+// (httpx defaults; slog.Default).
+type Options struct {
+	// Logger receives the client's warnings; nil falls back to slog.Default.
+	Logger *slog.Logger
+	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
+	// defaults.
+	RetryOpts []httpx.GetOption
 }
 
 // NewClient returns a Client that uses the provided *http.Client for all
-// outbound requests, applying retryOpts to each call via httpx.GetBytes. A
-// nil logger falls back to slog.Default. pageCap of 0 means "use the
-// package-default owner-listing cap"; any non-zero value overrides it
-// (used by tests to force the cap).
-func NewClient(client *http.Client, retryOpts []httpx.GetOption, pageCap int, logger *slog.Logger) *Client {
+// outbound requests, configured by opts.
+func NewClient(client *http.Client, opts Options) *Client {
+	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Client{
 		http:      client,
-		retryOpts: retryOpts,
-		pageCap:   pageCap,
+		retryOpts: opts.RetryOpts,
 		logger:    logger,
 	}
 }
 
-// Name identifies this source in logs and in the per-source health ratio.
-// Matches the "dockerhub" const used on the HTTP API surface.
-func (c *Client) Name() string { return c.Source().String() }
-
-// Source returns the typed model.RegistrySource the orchestrator uses
-// to route entries without a string compare.
-// model.SourceDockerHub.String() must stay equal to Name() — both
-// read as "dockerhub" on the wire.
-func (c *Client) Source() model.RegistrySource { return model.SourceDockerHub }
+// Source returns the typed registry.ID the orchestrator uses to route
+// entries without a string compare and to derive the "dockerhub" log label
+// (registry.DockerHub.String()).
+func (c *Client) Source() registry.ID { return registry.DockerHub }
 
 // Collect gathers pull counts and total tag counts for every ref in
 // refs. Returns the per-repo entries plus the attempted count (including
@@ -98,19 +105,16 @@ func (c *Client) Source() model.RegistrySource { return model.SourceDockerHub }
 // rule the GHCR source applies to failed scrapes.
 func (c *Client) Collect(
 	ctx context.Context,
-	refs []model.RepoRef,
-) (entries []model.RegistryEntry, attempted int, healthy bool) {
+	refs []registry.RepoRef,
+) (entries []registry.Entry, attempted int, healthy bool) {
 	entries, attempted, listingFailed := collect(ctx, c, refs)
 	return entries, attempted, !Degraded(entries, attempted) && !listingFailed
 }
 
-// Compile-time assertion: *Client satisfies api.RegistrySource.
-var _ api.RegistrySource = (*Client)(nil)
-
 // collect is the shared implementation behind Client.Collect. listingFailed
 // propagates the wildcard wholesale-listing-failure signal (see
 // collectWildcards) up to Collect so it can factor into the healthy verdict.
-func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RegistryEntry, attempted int, listingFailed bool) {
+func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results []registry.Entry, attempted int, listingFailed bool) {
 	wildcardResults, wildcardAttempted, seen, listingFailed := collectWildcards(ctx, c, refs)
 	explicitResults, explicitAttempted := collectExplicit(ctx, c, refs, seen)
 	return append(wildcardResults, explicitResults...), wildcardAttempted + explicitAttempted, listingFailed
@@ -128,7 +132,7 @@ func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []mo
 // from a legitimately empty owner (nil error, zero repos) — only the
 // wholesale outage flags listingFailed, so a total Docker Hub listing
 // outage surfaces as unhealthy instead of an empty-but-healthy result.
-func collectWildcards(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RegistryEntry, attempted int, seen map[string]bool, listingFailed bool) {
+func collectWildcards(ctx context.Context, c *Client, refs []registry.RepoRef) (results []registry.Entry, attempted int, seen map[string]bool, listingFailed bool) {
 	seen = make(map[string]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {
@@ -157,7 +161,7 @@ func collectWildcards(ctx context.Context, c *Client, refs []model.RepoRef) (res
 // unhealthy. A partial failure (error alongside real repos) and a
 // legitimately empty owner (nil error, zero repos) both return
 // listingFailed=false, leaving the health verdict to the degradation path.
-func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[string]bool) (results []model.RegistryEntry, attempted int, listingFailed bool) {
+func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[string]bool) (results []registry.Entry, attempted int, listingFailed bool) {
 	repos, err := listRepos(ctx, c, owner)
 	if err != nil {
 		if len(repos) == 0 {
@@ -187,7 +191,7 @@ func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[s
 
 // collectExplicit fetches each non-wildcard ref unless it was already
 // collected via a wildcard expansion (tracked in seen).
-func collectExplicit(ctx context.Context, c *Client, refs []model.RepoRef, seen map[string]bool) (results []model.RegistryEntry, attempted int) {
+func collectExplicit(ctx context.Context, c *Client, refs []registry.RepoRef, seen map[string]bool) (results []registry.Entry, attempted int) {
 	for _, ref := range refs {
 		if ref.Repo == "*" {
 			continue
@@ -216,7 +220,7 @@ func collectExplicit(ctx context.Context, c *Client, refs []model.RepoRef, seen 
 		}
 
 		tags := tagCount(ctx, c, ref.Owner, ref.Repo)
-		results = append(results, model.RegistryEntry{
+		results = append(results, registry.Entry{
 			Owner:    ref.Owner,
 			Repo:     ref.Repo,
 			Pulls:    pullCount,
@@ -230,8 +234,8 @@ func collectExplicit(ctx context.Context, c *Client, refs []model.RepoRef, seen 
 // listRepos paginates the Docker Hub owner listing endpoint. Returns
 // entries with Owner/Repo/Pulls populated; TagCount is left 0 for the
 // caller to fill separately.
-func listRepos(ctx context.Context, c *Client, owner string) ([]model.RegistryEntry, error) {
-	var repos []model.RegistryEntry
+func listRepos(ctx context.Context, c *Client, owner string) ([]registry.Entry, error) {
+	var repos []registry.Entry
 	hitCap := true
 	maxPages := c.ownerPageCap()
 
@@ -291,7 +295,7 @@ func tagCount(ctx context.Context, c *Client, owner, repo string) int {
 // of attempts failed. Kept as an exported free function because its
 // pure-input shape is what the legacy TestDockerHubDegraded case
 // matrix asserts against.
-func Degraded(results []model.RegistryEntry, attempted int) bool {
+func Degraded(results []registry.Entry, attempted int) bool {
 	if attempted == 0 {
 		return false
 	}
@@ -320,7 +324,7 @@ func ParseRepoMeta(data []byte) (pullCount int64, err error) {
 // Owner set to the requested owner and Repo to the listed name
 // (TagCount left 0 for the caller to fill). Pure parse core behind
 // listRepos, exported for parse-only tests and fuzzing.
-func ParseRepoListPage(data []byte, owner string) (next string, repos []model.RegistryEntry, err error) {
+func ParseRepoListPage(data []byte, owner string) (string, []registry.Entry, error) {
 	var resp struct {
 		Next    string `json:"next"`
 		Results []struct {
@@ -331,7 +335,7 @@ func ParseRepoListPage(data []byte, owner string) (next string, repos []model.Re
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return "", nil, err
 	}
-	repos = make([]model.RegistryEntry, 0, len(resp.Results))
+	repos := make([]registry.Entry, 0, len(resp.Results))
 	for _, r := range resp.Results {
 		// Repo name comes from the Docker Hub listing JSON (registry data,
 		// not env config) and flows into the tags URL via tagCount. Route
@@ -344,7 +348,7 @@ func ParseRepoListPage(data []byte, owner string) (next string, repos []model.Re
 			slog.Debug("skipping docker hub repo with unsafe name", "owner", owner, "name", r.Name)
 			continue
 		}
-		repos = append(repos, model.RegistryEntry{
+		repos = append(repos, registry.Entry{
 			Owner: owner,
 			Repo:  r.Name,
 			Pulls: r.PullCount,

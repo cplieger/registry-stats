@@ -18,24 +18,28 @@ health marker → `webapi` server, then runs the signal-driven lifecycle. It
 contains no business logic, globals, or type aliases; everything testable
 lives under `internal/`.
 
-`internal/api/interfaces.go` is the composition spine. The small interfaces
-there (`RegistrySource`, `HealthSignal`) are what every other package depends
-on, and what test fakes implement. Concrete types live in their own packages:
+Interfaces live at their consumers (there is no hub package): `collect.Source`
+is declared in `internal/collect`, the one seam its orchestrator drives, and
+`main.go` holds the unexported one-method `healthSignal` it wires the marker
+into. Test fakes implement those. Concrete types live in their own packages:
 
-- `internal/config`: env-var loading and validation (`LoadConfig`).
-- `internal/dockerhub`, `internal/ghcr`: the two `RegistrySource`
+- `internal/config`: env-var loading and validation (`Load`). Never logs —
+  parse problems come back as `Warning` values `main` emits once.
+- `internal/dockerhub`, `internal/ghcr`: the two `collect.Source`
   implementations. Docker Hub uses the unauthenticated API; GHCR **scrapes
   public package HTML** (there is no official download-count API).
 - `internal/collect`: orchestrates a single collect cycle across sources.
 - `internal/webapi`: HTTP server: `/metrics` (Prometheus exposition) and
   `/api/health`.
-- `internal/metrics`: thin wrapper around `github.com/cplieger/metrics`
-  holding the `registrystats_*` instances and `SetImageMetrics`.
-- `internal/model`, `internal/urlsafe`, `internal/testsupport`: domain
-  types, URL-segment validation, and shared test helpers.
+- `internal/obs`: the observability surface built on
+  `github.com/cplieger/metrics` — the `registrystats_*` instances and
+  `SetImage`.
+- `internal/registry`, `internal/urlsafe`, `internal/testsupport`: the
+  container-registry domain types (`Entry`, `RepoRef`, `ID`), URL-segment
+  validation, and shared test helpers.
 
-Dependencies flow one direction: concrete packages depend on `internal/api`,
-and `main.go` is the only place that imports concrete packages together.
+Dependencies flow one direction: `main.go` is the only place that imports
+concrete packages together.
 
 ## Local development
 
@@ -91,11 +95,12 @@ here.
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
   to the `cplieger` shared libs (`httpx`, `metrics`, `health`, `webhttp`,
-  `slogx`) and `pgregory.net/rapid` (test-only). Prefer the standard library
+  `slogx`, `envx`, `keyenc`) and `pgregory.net/rapid` (test-only). Prefer the standard library
   before reaching for a new dependency.
-- **`RegistrySource.Name()` must equal `Source().String()`.** Both surface the
-  same lowercase registry label: one in log k/v pairs, the other for typed
-  routing. They must never drift.
+- **The lowercase registry label comes from `Source().String()` alone.** The
+  old interface carried a second method (`Name()`) with a prose must-equal
+  invariant; deriving the label from the one authoritative method deleted
+  that drift surface.
 - **Validate any URL path segment** built from registry data through
   `internal/urlsafe`, which guards against traversal and injection.
 - **Health is a file marker** (`/tmp/.healthy`), checked by the

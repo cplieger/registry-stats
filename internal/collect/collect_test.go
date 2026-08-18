@@ -8,48 +8,45 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/api"
 	"github.com/cplieger/registry-stats/v2/internal/collect"
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
-// fakeSource is a canned-response api.RegistrySource used to exercise
+// fakeSource is a canned-response Source used to exercise
 // the orchestrator in isolation from any real HTTP path.
 type fakeSource struct {
-	name string
 	// lastRefs captures the refs Collect saw so tests can assert the
-	// orchestrator plumbs RefsFor(name) through correctly.
-	entries   []model.RegistryEntry
-	lastRefs  []model.RepoRef
+	// orchestrator plumbs RefsFor(Source().String()) through correctly.
+	entries   []registry.Entry
+	lastRefs  []registry.RepoRef
 	attempted int
-	source    model.RegistrySource
+	source    registry.ID
 	healthy   bool
 }
 
-// Compile-time assertion: *fakeSource satisfies api.RegistrySource.
-var _ api.RegistrySource = (*fakeSource)(nil)
+// Compile-time assertion: *fakeSource satisfies Source.
+var _ collect.Source = (*fakeSource)(nil)
 
-func (f *fakeSource) Name() string                 { return f.name }
-func (f *fakeSource) Source() model.RegistrySource { return f.source }
+func (f *fakeSource) Source() registry.ID { return f.source }
 
 func (f *fakeSource) Collect(
 	_ context.Context,
-	refs []model.RepoRef,
-) ([]model.RegistryEntry, int, bool) {
+	refs []registry.RepoRef,
+) ([]registry.Entry, int, bool) {
 	f.lastRefs = refs
 	return f.entries, f.attempted, f.healthy
 }
 
-// newFakeDockerHub and newFakeGHCR build fakeSources whose Name()
-// and Source() stay in sync with the real dockerhub/ghcr clients.
+// newFakeDockerHub and newFakeGHCR build fakeSources whose Source() matches
+// the real dockerhub/ghcr clients, so the orchestrator routes them the same way.
 func newFakeDockerHub() *fakeSource {
-	return &fakeSource{name: model.SourceDockerHub.String(), source: model.SourceDockerHub}
+	return &fakeSource{source: registry.DockerHub}
 }
 
 func newFakeGHCR() *fakeSource {
-	return &fakeSource{name: model.SourceGHCR.String(), source: model.SourceGHCR}
+	return &fakeSource{source: registry.GHCR}
 }
 
 // fixedTime returns a clock that always returns the same instant.
@@ -58,29 +55,29 @@ func fixedTime(t time.Time) func() time.Time { return func() time.Time { return 
 func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{
+	dh.entries = []registry.Entry{
 		{Owner: "owner", Repo: "app", Pulls: 42, TagCount: 2},
 	}
 	dh.attempted = 1
 	dh.healthy = true
 
 	gh := newFakeGHCR()
-	gh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "pkg", Pulls: 500}}
+	gh.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 500}}
 	gh.attempted = 1
 	gh.healthy = true
 
 	fixed := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
 
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh, gh},
+		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		Now:     fixedTime(fixed),
-		RefsFor: func(name string) []model.RepoRef {
+		RefsFor: func(name string) []registry.RepoRef {
 			switch name {
-			case model.SourceDockerHub.String():
-				return []model.RepoRef{{Owner: "owner", Repo: "app"}}
-			case model.SourceGHCR.String():
-				return []model.RepoRef{{Owner: "owner", Repo: "pkg"}}
+			case registry.DockerHub.String():
+				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+			case registry.GHCR.String():
+				return []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}
 			}
 			return nil
 		},
@@ -88,7 +85,7 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	if !healthy {
 		t.Error("Run() healthy = false, want true")
 	}
-	want := []metrics.ImageMetric{
+	want := []obs.ImageMetric{
 		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42, Tags: 2},
 		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500, Tags: 0},
 	}
@@ -113,19 +110,19 @@ func TestRun_skips_empty_refs(t *testing.T) {
 	ctx := t.Context()
 	// GHCR has no refs - should be skipped entirely, not invoked.
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
 	gh := newFakeGHCR() // would fail if invoked (healthy stays false)
 
 	_, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh, gh},
+		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
 		Now:     time.Now,
-		RefsFor: func(name string) []model.RepoRef {
-			if name == model.SourceDockerHub.String() {
-				return []model.RepoRef{{Owner: "owner", Repo: "app"}}
+		RefsFor: func(name string) []registry.RepoRef {
+			if name == registry.DockerHub.String() {
+				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
 			}
 			return nil
 		},
@@ -141,7 +138,7 @@ func TestRun_skips_empty_refs(t *testing.T) {
 func TestRun_no_sources_configured_returns_unhealthy(t *testing.T) {
 	ctx := t.Context()
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{},
+		Sources: []collect.Source{},
 		Logger:  testsupport.QuietLogger(),
 	})
 	if healthy {
@@ -160,10 +157,10 @@ func TestRun_all_sources_empty_entries_returns_unhealthy(t *testing.T) {
 	gh.attempted = 2
 
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh, gh},
+		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []model.RepoRef {
-			return []model.RepoRef{{Owner: "x", Repo: "y"}}
+		RefsFor: func(name string) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "x", Repo: "y"}}
 		},
 	})
 	if healthy {
@@ -177,7 +174,7 @@ func TestRun_all_sources_empty_entries_returns_unhealthy(t *testing.T) {
 func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
@@ -187,10 +184,10 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	gh.attempted = 2
 
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh, gh},
+		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []model.RepoRef {
-			return []model.RepoRef{{Owner: "o", Repo: "r"}}
+		RefsFor: func(name string) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "o", Repo: "r"}}
 		},
 	})
 	if healthy {
@@ -204,20 +201,19 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 func TestRun_unknown_source_drops_entries_and_keeps_health(t *testing.T) {
 	ctx := t.Context()
 	unknown := &fakeSource{
-		name:      "mystery",
-		source:    model.SourceUnknown,
-		entries:   []model.RegistryEntry{{Owner: "x", Repo: "y", Pulls: 1}},
+		source:    registry.Unknown,
+		entries:   []registry.Entry{{Owner: "x", Repo: "y", Pulls: 1}},
 		attempted: 1, healthy: true,
 	}
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Owner: "o", Repo: "a", Pulls: 2}}
+	dh.entries = []registry.Entry{{Owner: "o", Repo: "a", Pulls: 2}}
 	dh.attempted = 1
 	dh.healthy = true
 
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{unknown, dh},
+		Sources: []collect.Source{unknown, dh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
+		RefsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
 	if !healthy {
 		t.Error("Run() healthy = false, want true (dockerhub was fine)")
@@ -232,7 +228,7 @@ func TestRun_unknown_source_drops_entries_and_keeps_health(t *testing.T) {
 func TestRun_entries_with_empty_repo_are_dropped(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{
+	dh.entries = []registry.Entry{
 		{Owner: "o", Repo: "", Pulls: 9}, // dropped
 		{Owner: "o", Repo: "good", Pulls: 1},
 	}
@@ -240,7 +236,7 @@ func TestRun_entries_with_empty_repo_are_dropped(t *testing.T) {
 	dh.healthy = true
 
 	gh := newFakeGHCR()
-	gh.entries = []model.RegistryEntry{
+	gh.entries = []registry.Entry{
 		{Owner: "o", Repo: "", Pulls: 7}, // dropped
 		{Owner: "o", Repo: "p", Pulls: 3},
 	}
@@ -248,9 +244,9 @@ func TestRun_entries_with_empty_repo_are_dropped(t *testing.T) {
 	gh.healthy = true
 
 	images, _ := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh, gh},
+		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "x"}} },
+		RefsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "x"}} },
 	})
 	if len(images) != 2 {
 		t.Fatalf("images = %+v, want 2 records (empty-repo entries dropped)", images)
@@ -264,7 +260,7 @@ func TestRun_nil_refsfor_skips_all_sources(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub() // healthy stays false
 	_, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh},
+		Sources: []collect.Source{dh},
 		Logger:  testsupport.QuietLogger(),
 		// RefsFor: nil
 	})
@@ -281,13 +277,13 @@ func TestRun_defaults_logger_and_now(t *testing.T) {
 	// should fall back to slog.Default() and time.Now respectively.
 	ctx := t.Context()
 	dh := newFakeDockerHub()
-	dh.entries = []model.RegistryEntry{{Owner: "o", Repo: "a", Pulls: 1}}
+	dh.entries = []registry.Entry{{Owner: "o", Repo: "a", Pulls: 1}}
 	dh.attempted = 1
 	dh.healthy = true
 
 	images, healthy := collect.Run(ctx, collect.Options{
-		Sources: []api.RegistrySource{dh},
-		RefsFor: func(string) []model.RepoRef { return []model.RepoRef{{Owner: "o", Repo: "a"}} },
+		Sources: []collect.Source{dh},
+		RefsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
 	if !healthy || len(images) != 1 {
 		t.Fatalf("Run() = (%+v, %v), want one record and healthy", images, healthy)
@@ -310,24 +306,23 @@ func captureLogs() (*slog.Logger, *bytes.Buffer) {
 // silent even when unhealthy.
 func TestRun_severe_degradation_warn_condition(t *testing.T) {
 	const degradedMsg = "docker hub collection severely degraded"
-	dhEntries := []model.RegistryEntry{{Owner: "owner", Repo: "app", Pulls: 1}}
-	ghEntries := []model.RegistryEntry{{Owner: "owner", Repo: "pkg", Pulls: 1}}
+	dhEntries := []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	ghEntries := []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 1}}
 
 	tests := []struct {
 		name     string
-		entries  []model.RegistryEntry
-		source   model.RegistrySource
+		entries  []registry.Entry
+		source   registry.ID
 		wantWarn bool
 	}{
-		{name: "dockerhub_unhealthy_with_entries_warns", source: model.SourceDockerHub, entries: dhEntries, wantWarn: true},
-		{name: "dockerhub_unhealthy_zero_entries_silent", source: model.SourceDockerHub, entries: nil, wantWarn: false},
-		{name: "ghcr_unhealthy_with_entries_silent", source: model.SourceGHCR, entries: ghEntries, wantWarn: false},
+		{name: "dockerhub_unhealthy_with_entries_warns", source: registry.DockerHub, entries: dhEntries, wantWarn: true},
+		{name: "dockerhub_unhealthy_zero_entries_silent", source: registry.DockerHub, entries: nil, wantWarn: false},
+		{name: "ghcr_unhealthy_with_entries_silent", source: registry.GHCR, entries: ghEntries, wantWarn: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := &fakeSource{
-				name:      tt.source.String(),
 				source:    tt.source,
 				entries:   tt.entries,
 				attempted: len(tt.entries),
@@ -336,10 +331,10 @@ func TestRun_severe_degradation_warn_condition(t *testing.T) {
 			logger, buf := captureLogs()
 
 			collect.Run(t.Context(), collect.Options{
-				Sources: []api.RegistrySource{src},
+				Sources: []collect.Source{src},
 				Logger:  logger,
-				RefsFor: func(string) []model.RepoRef {
-					return []model.RepoRef{{Owner: "owner", Repo: "x"}}
+				RefsFor: func(string) []registry.RepoRef {
+					return []registry.RepoRef{{Owner: "owner", Repo: "x"}}
 				},
 			})
 

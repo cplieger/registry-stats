@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/registry-stats/v2/internal/metrics"
+	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/webhttp/v2"
 )
 
 // TestNew_readinessEndpoint pins the wiring of GET /api/health onto webhttp's
@@ -162,7 +162,7 @@ func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
 // registrystats_http_requests_total through New's REAL route table and
 // middleware chain — which is where the bound now lives. The labels are
 // derived by webhttp's WithRecordRouteMetric and handed to
-// metrics.RecordHTTP; this app has no derivation of its own, so the property
+// obs.RecordHTTP; this app has no derivation of its own, so the property
 // under test is the WIRING: that New reaches for the hook whose labels are
 // bounded by construction rather than the request-aware one.
 //
@@ -200,7 +200,7 @@ func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	metrics.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	obs.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 
 	present := map[string]string{

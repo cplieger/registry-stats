@@ -8,9 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/registry-stats/v2/internal/api"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
 // Options configures GHCR-specific scraper policy. Its zero value
@@ -18,6 +17,13 @@ import (
 // so main.go can pass ghcr.Options{} and preserve the pre-c3 2-5s
 // per-package pacing byte-for-byte.
 type Options struct {
+	// Logger receives the client's warnings; nil falls back to slog.Default.
+	Logger *slog.Logger
+	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
+	// defaults.
+	RetryOpts []httpx.GetOption
+	// MinPacing and PacingJitter space out consecutive GHCR scrape requests;
+	// zero selects DefaultMinPacing / DefaultPacingJitter.
 	MinPacing    time.Duration
 	PacingJitter time.Duration
 }
@@ -31,8 +37,8 @@ const (
 	DefaultPacingJitter = 3 * time.Second
 )
 
-// Client implements api.RegistrySource for the GitHub Container
-// Registry. Construct via NewClient; the zero value is not usable.
+// Client is the GitHub Container Registry source (it satisfies
+// collect.Source at the wiring site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {
 	http      *http.Client
 	logger    *slog.Logger
@@ -40,32 +46,26 @@ type Client struct {
 	opts      Options
 }
 
-// NewClient returns a Client that uses the provided *http.Client for
-// all outbound requests, applying retryOpts to each call via
-// httpx.GetBytes. opts configures GHCR-specific pacing; its zero value
-// selects DefaultMinPacing + DefaultPacingJitter. A nil logger falls
-// back to slog.Default.
-func NewClient(client *http.Client, retryOpts []httpx.GetOption, opts Options, logger *slog.Logger) *Client {
-	if logger == nil {
-		logger = slog.Default()
+// NewClient returns a Client that uses the provided *http.Client for all
+// outbound requests, configured by opts. The old signature carried an
+// Options struct AND three positional optionals; one mechanism now carries
+// every optional, so a call site cannot mix the two.
+func NewClient(client *http.Client, opts Options) *Client {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
 	}
 	return &Client{
 		http:      client,
-		retryOpts: retryOpts,
-		logger:    logger,
+		retryOpts: opts.RetryOpts,
+		logger:    opts.Logger,
 		opts:      opts,
 	}
 }
 
-// Name identifies this source in logs and in the per-source health
-// ratio. Matches the "ghcr" const used on the HTTP API surface.
-func (c *Client) Name() string { return c.Source().String() }
-
-// Source returns the typed model.RegistrySource the orchestrator
-// uses to route entries into snap.GHCR without a string compare.
-// model.SourceGHCR.String() must stay equal to Name() — both read
-// as "ghcr" on the wire.
-func (c *Client) Source() model.RegistrySource { return model.SourceGHCR }
+// Source returns the typed registry.ID the orchestrator uses to route
+// entries without a string compare and to derive the "ghcr" log label
+// (registry.GHCR.String()).
+func (c *Client) Source() registry.ID { return registry.GHCR }
 
 // Collect gathers download counts for every ref in refs. Wildcard refs
 // are expanded via buildPackageList before scraping; explicit refs are
@@ -82,19 +82,16 @@ func (c *Client) Source() model.RegistrySource { return model.SourceGHCR }
 // of the attempts (a minority or a tie); see pkgHealthy.
 func (c *Client) Collect(
 	ctx context.Context,
-	refs []model.RepoRef,
-) (entries []model.RegistryEntry, attempted int, healthy bool) {
+	refs []registry.RepoRef,
+) (entries []registry.Entry, attempted int, healthy bool) {
 	return collect(ctx, c, refs)
 }
-
-// Compile-time assertion: *Client satisfies api.RegistrySource.
-var _ api.RegistrySource = (*Client)(nil)
 
 // collect is the shared implementation behind Client.Collect. Returns
 // the pre-refactor result shape plus attempted count (total scrapes
 // across successes and failures) so the caller can decide its return
 // values.
-func collect(ctx context.Context, c *Client, refs []model.RepoRef) (results []model.RegistryEntry, attempted int, healthy bool) {
+func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results []registry.Entry, attempted int, healthy bool) {
 	failures := 0
 	pkgParseFailures := 0
 	total := 0
@@ -184,7 +181,7 @@ func (c *Client) pacingDelay() time.Duration {
 // when ok is true; parseFailed marks an ErrHTMLFormatChanged so the
 // caller can tally format drift separately from transport failures.
 type scrapeResult struct {
-	stat        model.RegistryEntry
+	stat        registry.Entry
 	ok          bool
 	parseFailed bool
 }
@@ -195,7 +192,7 @@ type scrapeResult struct {
 // is false so the caller leaves the package out of results — a transient
 // error must not inject a false zero into the exposed gauge (the per-day
 // delta is computed downstream by Prometheus/Mimir, not here).
-func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeResult {
+func (c *Client) scrapePackage(ctx context.Context, ref registry.RepoRef) scrapeResult {
 	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -213,7 +210,7 @@ func (c *Client) scrapePackage(ctx context.Context, ref model.RepoRef) scrapeRes
 	}
 	c.logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
 	return scrapeResult{
-		stat: model.RegistryEntry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads},
+		stat: registry.Entry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads},
 		ok:   true,
 	}
 }

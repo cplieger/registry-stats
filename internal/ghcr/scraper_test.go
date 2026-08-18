@@ -3,23 +3,18 @@ package ghcr
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/registry-stats/v2/internal/api"
-	"github.com/cplieger/registry-stats/v2/internal/model"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 	"pgregory.net/rapid"
 )
-
-// Compile-time assertion kept here so a change that narrows
-// api.RegistrySource past what *Client satisfies trips the build in
-// the test binary before reaching any other consumer.
-var _ api.RegistrySource = (*Client)(nil)
 
 func mockClient(srv *httptest.Server) *http.Client {
 	return testsupport.MockClient(srv)
@@ -36,10 +31,12 @@ func shortRetry() []httpx.GetOption {
 // baked into DefaultMinPacing / DefaultPacingJitter. Non-mock tests
 // that intentionally exercise default pacing should keep passing
 // Options{} (zero value falls back to the DefaultPacing* constants).
-func fastPacing() Options {
+func fastPacing(retry []httpx.GetOption, logger *slog.Logger) Options {
 	return Options{
 		MinPacing:    time.Microsecond,
 		PacingJitter: time.Microsecond,
+		RetryOpts:    retry,
+		Logger:       logger,
 	}
 }
 
@@ -50,8 +47,8 @@ func downloadsHTML(count string) string {
 }
 
 func TestClient_Name(t *testing.T) {
-	c := NewClient(http.DefaultClient, shortRetry(), Options{}, testsupport.QuietLogger())
-	if got := c.Name(); got != "ghcr" {
+	c := NewClient(http.DefaultClient, Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	if got := c.Source().String(); got != "ghcr" {
 		t.Errorf("Name() = %q, want ghcr", got)
 	}
 }
@@ -251,7 +248,7 @@ func TestScrapeDownloads_FetchError(t *testing.T) {
 }
 
 func TestBuildPackageList_Explicit(t *testing.T) {
-	refs := []model.RepoRef{
+	refs := []registry.RepoRef{
 		{Owner: "o", Repo: "a"},
 		{Owner: "o", Repo: "b"},
 	}
@@ -278,7 +275,7 @@ func TestBuildPackageList_WildcardDedup(t *testing.T) {
 	defer srv.Close()
 	client := mockClient(srv)
 
-	refs := []model.RepoRef{
+	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"}, // duplicate of wildcard result
 		{Owner: "owner", Repo: "app3"}, // genuinely new
@@ -312,7 +309,7 @@ func TestBuildPackageList_WildcardListingError(t *testing.T) {
 	defer srv.Close()
 	client := mockClient(srv)
 
-	refs := []model.RepoRef{
+	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "explicit"},
 	}
@@ -448,8 +445,8 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	defer srv.Close()
 
 	client := mockClient(srv)
-	c := NewClient(client, shortRetry(), fastPacing(), testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "mypkg"}}
+	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "mypkg"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
 
 	if !healthy {
@@ -495,8 +492,8 @@ func TestCollect_WildcardMock(t *testing.T) {
 	defer cancel()
 
 	client := mockClient(srv)
-	c := NewClient(client, shortRetry(), fastPacing(), testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "*"}}
+	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	entries, _, healthy := c.Collect(ctx, refs)
 
 	if !healthy {
@@ -520,8 +517,8 @@ func TestCollect_AllFailUnhealthy(t *testing.T) {
 	defer srv.Close()
 
 	client := mockClient(srv)
-	c := NewClient(client, shortRetry(), fastPacing(), testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "pkg1"}}
+	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
 
 	if healthy {
@@ -545,8 +542,8 @@ func TestCollect_AllParseFailures(t *testing.T) {
 	defer srv.Close()
 
 	client := mockClient(srv)
-	c := NewClient(client, shortRetry(), fastPacing(), testsupport.QuietLogger())
-	refs := []model.RepoRef{{Owner: "owner", Repo: "pkg1"}}
+	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
 
 	if healthy {
@@ -758,7 +755,7 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	refs := []model.RepoRef{
+	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"}, // already found by the wildcard
 		{Owner: "owner", Repo: "app2"}, // already found by the wildcard
@@ -770,7 +767,7 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 		t.Fatalf("listing failures: listFail=%d parseFail=%d", listFail, parseFail)
 	}
 
-	counts := make(map[model.RepoRef]int, len(packages))
+	counts := make(map[registry.RepoRef]int, len(packages))
 	for _, p := range packages {
 		counts[p]++
 	}

@@ -21,7 +21,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 ### Why this design
 
 - **Stateless**: no on-disk persistence required. The app exposes current counts; time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, and `slogx` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, and UTC logging. Small, auditable supply chain.
+- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `slogx`, `envx`, and `keyenc` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, UTC logging, environment parsing, and the shared dedupe-key encoder. Small, auditable supply chain.
 - **Distroless, rootless container**: runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
 - **Public repos only**: avoids credential management entirely.
 
