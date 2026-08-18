@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -31,6 +30,7 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/webapi"
+	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/webhttp/v2"
 )
@@ -129,34 +129,47 @@ func run() error {
 	// Loki dashboards key on in their per-source panels.
 	sources := []collectpkg.Source{dh, gh}
 
-	// Mark liveness healthy as soon as the HTTP API is bound. The first
-	// collect runs in the background so slow registries (GHCR per-package
-	// delays, Docker Hub pagination) can't push us past the Docker
-	// healthcheck grace window and trigger a restart loop. Subsequent
-	// collects still flip the marker based on their real outcome.
+	// Mark liveness healthy as soon as the HTTP API is bound. The collect loop
+	// runs in the background so slow registries (GHCR per-package delays, Docker
+	// Hub pagination) can't push the first cycle past the Docker healthcheck
+	// grace window and trigger a restart loop. Every cycle then flips the marker
+	// to its own real outcome, the first one included.
 	marker.Set(true)
-	slog.Info("http api ready, starting initial collection in background")
 
-	// bg tracks the background collect goroutines (initial + scheduled) so
-	// the shutdown teardown can wait for them within the grace budget.
-	var bg sync.WaitGroup
-	bg.Go(func() {
-		defer recoverAndMarkUnhealthy(marker, "initial collect")
+	// collect is one cycle plus its own panic net. The recover has to live
+	// INSIDE the job: scheduler.RunLoop deliberately does not recover, so a
+	// recover wrapped around the loop instead would let one panicking cycle
+	// take the whole schedule down with it.
+	collect := func(ctx context.Context) {
+		defer recoverAndMarkUnhealthy(marker)
 		markCollect(ctx, &cfg, sources, marker, &ready)
-	})
+	}
 
+	// bg tracks the single background collect goroutine so the shutdown
+	// teardown can wait for it within the grace budget. Both modes run exactly
+	// one goroutine: RunLoop is sequential and fires the startup cycle as its
+	// own first iteration, so no cycle can ever overlap another.
+	var bg sync.WaitGroup
 	if cfg.PollInterval == 0 {
-		// One-shot mode: the background initial collect above is the ONLY
-		// collect. If it collects nothing the marker stays false and
-		// /api/health serves 503 until the container is restarted -- there is
-		// no re-poll to recover on (the README Healthcheck section documents
-		// this caveat). No scheduled loop is started; webhttp.Run (below)
-		// keeps serving the single collected data set until a signal or
-		// serve error arrives.
-		slog.Info("one-shot mode, serving collected data", "addr", ln.Addr().String())
+		// One-shot mode: this is the ONLY collect. If it collects nothing the
+		// marker stays false and /api/health serves 503 until the container is
+		// restarted — there is no re-poll to recover on (the README Healthcheck
+		// section documents this caveat). webhttp.Run (below) keeps serving the
+		// single collected data set until a signal or serve error arrives.
+		slog.Info("one-shot mode, collecting once then serving", "addr", ln.Addr().String())
+		bg.Go(func() { collect(ctx) })
 	} else {
-		slog.Info("scheduled mode", "interval", cfg.PollInterval, "jitter", "±10%")
-		bg.Go(func() { runScheduled(ctx, &cfg, marker, &ready, sources) })
+		slog.Info("scheduled mode", "interval", cfg.PollInterval)
+		bg.Go(func() {
+			// No Jitter: jitter exists to keep MANY instances off a shared
+			// upstream's doorstep at the same moment, and this exporter runs one
+			// instance per deployment whose phase is already set by whenever its
+			// container booted. FireOnStart makes the startup cycle iteration 1.
+			scheduler.RunLoop(ctx, collect, scheduler.LoopOptions{
+				Interval:    cfg.PollInterval,
+				FireOnStart: true,
+			})
+		})
 	}
 
 	// onShutdown runs once ctx is cancelled and in-flight requests have
@@ -242,39 +255,6 @@ func markCollect(
 	}
 }
 
-// runScheduled runs collection on each tick of a PollInterval-sized
-// timer with ±10% jitter, until ctx is cancelled. It runs in its own
-// goroutine; a dead HTTP server is handled by webhttp.Run returning in
-// the foreground, so the loop only needs to watch ctx.
-func runScheduled(
-	ctx context.Context,
-	cfg *configpkg.Config,
-	marker healthSignal,
-	ready *webhttp.Ready,
-	sources []collectpkg.Source,
-) {
-	for {
-		// Add ±10% jitter to avoid predictable access patterns. Guard
-		// against a sub-nanosecond /5 rounding to 0 so rand.IntN never
-		// sees a non-positive argument.
-		jitterMax := max(1, int(cfg.PollInterval/5))
-		jitter := time.Duration(rand.IntN(jitterMax)) //nolint:gosec // G404: scheduling jitter
-		delay := cfg.PollInterval - cfg.PollInterval/10 + jitter
-		timer := time.NewTimer(delay)
-
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-			func() {
-				defer recoverAndMarkUnhealthy(marker, "scheduled collect")
-				markCollect(ctx, cfg, sources, marker, ready)
-			}()
-		}
-	}
-}
-
 // healthSignal is the write-only file-marker liveness seam this composition
 // root drives — declared here at its consumer per the interface-placement
 // rule (the old internal/api hub held it). *health.Marker satisfies it. The
@@ -287,15 +267,15 @@ type healthSignal interface {
 	Set(healthy bool)
 }
 
-// recoverAndMarkUnhealthy is a deferred panic recoverer for the
-// collection goroutines. On panic it logs at ERROR (preserving the
-// legacy "<phase> panicked" key+panic value used by Loki alerts) and
-// flips the health marker so the orchestrator observes the failure.
-// phase is the short name of the calling context ("initial collect"
-// or "scheduled collect").
-func recoverAndMarkUnhealthy(marker healthSignal, phase string) {
+// recoverAndMarkUnhealthy is the deferred panic recoverer for the collect
+// goroutine. On panic it logs at ERROR (preserving the "collect panicked"
+// key+panic value) and flips the health marker so the orchestrator observes
+// the failure. It is deferred inside the job rather than around the schedule,
+// because scheduler.RunLoop does not recover and a panic that escaped the job
+// would end the loop.
+func recoverAndMarkUnhealthy(marker healthSignal) {
 	if r := recover(); r != nil {
-		slog.Error(phase+" panicked", "panic", r)
+		slog.Error("collect panicked", "panic", r)
 		marker.Set(false)
 	}
 }

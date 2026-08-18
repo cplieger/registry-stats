@@ -18,3 +18,5 @@ require github.com/cplieger/metrics/v4 v4.0.0
 require github.com/cplieger/httpx/v5 v5.0.0
 
 require github.com/cplieger/keyenc v1.0.4
+
+require github.com/cplieger/scheduler/v4 v4.0.0

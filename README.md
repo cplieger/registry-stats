@@ -163,8 +163,8 @@ five timeouts, and `Retry-After` headers on 429/503 responses are honoured
 up to the configured retry backoff ceiling.
 
 One accepted scanner finding: semgrep flags the use of `math/rand/v2`, which
-is correct here because it generates scheduling jitter, not cryptographic
-material.
+is correct here because it spaces out successive registry requests within a
+cycle, and generates no cryptographic material.
 
 ### Hardened deployment
 
