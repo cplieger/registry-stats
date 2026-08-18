@@ -93,9 +93,12 @@ type ImageMetric struct {
 	Tags     int
 }
 
-// setMu serializes SetImage passes: the initial and the first
-// scheduled collect can overlap (see main.go), and each pass reads and
-// replaces the previous cycle's label sets below.
+// setMu serializes SetImage passes, because each pass reads and replaces the
+// previous cycle's label sets below. The collect loop is sequential
+// (scheduler.RunLoop runs one cycle at a time and fires the startup cycle as
+// its own first iteration), so there is exactly one caller today and the lock
+// is uncontended; it is kept so this exported function is safe on its own terms
+// rather than only while its caller happens to be single-threaded.
 var setMu sync.Mutex
 
 // prevPulls and prevTags hold the label sets the previous SetImage

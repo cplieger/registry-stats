@@ -139,8 +139,8 @@ func (m *mainFakeMarker) Healthy() bool { return m.healthy }
 
 // TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs pins the
 // collect-goroutine panic safety net: a recovered panic must flip the marker
-// unhealthy AND emit the "<phase> panicked" ERROR line Loki alerts key on (per
-// the function docstring). Swaps slog.Default to capture, so no t.Parallel.
+// unhealthy AND emit the "collect panicked" ERROR line (per the function
+// docstring). Swaps slog.Default to capture, so no t.Parallel.
 func TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs(t *testing.T) {
 	buf := &bytes.Buffer{}
 	orig := slog.Default()
@@ -149,15 +149,15 @@ func TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs(t *testing.T) {
 
 	m := &mainFakeMarker{healthy: true}
 	func() {
-		defer recoverAndMarkUnhealthy(m, "scheduled collect")
+		defer recoverAndMarkUnhealthy(m)
 		panic("boom")
 	}()
 
 	if m.Healthy() {
 		t.Error("recoverAndMarkUnhealthy did not flip marker to unhealthy after a recovered panic")
 	}
-	if !strings.Contains(buf.String(), "scheduled collect panicked") {
-		t.Errorf("missing Loki-alert log line %q; logs:\n%s", "scheduled collect panicked", buf.String())
+	if !strings.Contains(buf.String(), "collect panicked") {
+		t.Errorf("missing alert log line %q; logs:\n%s", "collect panicked", buf.String())
 	}
 }
 
@@ -166,7 +166,7 @@ func TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs(t *testing.T) {
 func TestRecoverAndMarkUnhealthy_noPanicLeavesMarker(t *testing.T) {
 	m := &mainFakeMarker{healthy: true}
 	func() {
-		defer recoverAndMarkUnhealthy(m, "initial collect")
+		defer recoverAndMarkUnhealthy(m)
 	}()
 	if !m.Healthy() {
 		t.Error("recoverAndMarkUnhealthy flipped marker with no panic")

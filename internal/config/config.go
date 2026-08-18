@@ -93,9 +93,11 @@ func PollInterval() (time.Duration, []Warning) {
 		pollIntervalHours = 1
 	}
 	// Clamp to a sensible upper bound: multiplying a huge int by time.Hour
-	// overflows time.Duration (int64 ns, max ~292 years) into a negative
-	// duration, and the jitter calc in main would then panic rand.IntN with
-	// a negative argument. 1 year is already nonsense for a stats poller.
+	// overflows time.Duration (int64 ns, max ~292 years) into a NEGATIVE
+	// duration, and scheduler.RunLoop returns immediately on a non-positive
+	// Interval — so the overflow would silently disable the collect loop
+	// rather than fail loudly, while the container still reported healthy off
+	// the boot marker. 1 year is already nonsense for a stats poller.
 	const maxPollHours = 24 * 365
 	if pollIntervalHours > maxPollHours {
 		warns = append(warns, Warning{
