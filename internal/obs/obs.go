@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/cplieger/metrics/v4"
+	"github.com/cplieger/webhttp/v2"
 )
 
 // reg holds every metric this package exposes. The "registrystats" prefix
@@ -144,9 +144,11 @@ func SetImage(images []ImageMetric) {
 }
 
 // RecordHTTP records one HTTP request into the package HTTP metrics via the
-// library helper (caller-owned {method,path,status} label set).
-func RecordHTTP(method, path string, status int, d time.Duration) {
-	metrics.RecordHTTP(HTTPRequests, HTTPDuration, d, method, path, strconv.Itoa(status))
+// library helper (caller-owned {method,path,status} label set). It takes
+// webhttp's RequestMetric, so the two string labels arrive named rather than
+// positional and this sink cannot transpose them.
+func RecordHTTP(m webhttp.RequestMetric) {
+	metrics.RecordHTTP(HTTPRequests, HTTPDuration, m.Latency, m.Method, m.Path, strconv.Itoa(m.Status))
 }
 
 // Handler returns an HTTP handler serving Prometheus text format.
