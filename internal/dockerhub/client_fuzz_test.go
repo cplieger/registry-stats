@@ -8,9 +8,12 @@ import (
 
 // FuzzDockerHubRepoUnmarshal drives the production single-repo metadata
 // parser with arbitrary bytes. The Docker Hub response is untrusted
-// input, so the invariant is panic-safety: ParseRepoMeta must always
-// return (a parse error is a valid outcome) rather than crash. The seed
-// corpus pins the real response shape plus malformed inputs.
+// input feeding the cumulative image_pulls_total gauge, so the invariant
+// is: a nil error implies a non-negative pull count (a response without a
+// usable pull_count — malformed JSON, absent field, null, negative,
+// duplicated member — must error so it can never reach the gauge as a
+// bogus 0). The seed corpus pins the real response shape plus malformed
+// inputs.
 func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":5000,"last_updated":"2026-03-06T12:00:00Z"}`))
 	f.Add([]byte(`{"pull_count":0}`))
@@ -18,18 +21,29 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`not json`))
 	f.Add([]byte(``))
 	f.Add([]byte(`{"pull_count":9999999999}`))
+	f.Add([]byte(`{"pull_count":null}`))
+	f.Add([]byte(`{"pull_count":-1}`))
+	f.Add([]byte(`{"pull_count":1,"pull_count":2}`))
 
-	f.Fuzz(func(_ *testing.T, data []byte) {
-		_, _ = dockerhub.ParseRepoMeta(data)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		n, err := dockerhub.ParseRepoMeta(data)
+		if err != nil {
+			return
+		}
+		if n < 0 {
+			t.Errorf("ParseRepoMeta(%q) = %d with nil error, want errors on negative counts", data, n)
+		}
 	})
 }
 
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
 // parser. Invariant: every entry it returns carries exactly the
-// requested owner and a non-empty repo name (the urlsafe guard drops
-// unsafe and empty names), so a crafted listing response can neither
-// smuggle a foreign owner into the label set downstream code trusts nor
-// inject an empty/unsafe path segment into the tags URL built from it.
+// requested owner, a non-empty repo name (the urlsafe guard drops
+// unsafe and empty names) and a non-negative pull count, so a crafted
+// listing response can neither smuggle a foreign owner into the label set
+// downstream code trusts, nor inject an empty/unsafe path segment into
+// the tags URL built from it, nor land a negative value in a cumulative
+// counter.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
@@ -37,6 +51,8 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`not json`))
 	f.Add([]byte(``))
 	f.Add([]byte(`{"results":[{"name":""},{"name":"../evil"},{"name":"ok"}]}`))
+	f.Add([]byte(`{"results":[{"name":"a","pull_count":1},{"name":"b"}]}`))
+	f.Add([]byte(`{"results":[{"name":"a","pull_count":-5}]}`))
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -50,6 +66,9 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 			}
 			if r.Repo == "" {
 				t.Errorf("ParseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
+			}
+			if r.Pulls < 0 {
+				t.Errorf("ParseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
 			}
 		}
 	})
