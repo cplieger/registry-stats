@@ -55,10 +55,10 @@ func TestMetricsHandler(t *testing.T) {
 	}
 }
 
-// TestSetImageMetrics_replacesSeriesSet pins the per-cycle replacement
+// TestSetImage_replacesSeriesSet pins the per-cycle replacement
 // contract: images absent from the new cycle disappear from the output,
 // and images present in both cycles carry the new values.
-func TestSetImageMetrics_replacesSeriesSet(t *testing.T) {
+func TestSetImage_replacesSeriesSet(t *testing.T) {
 	// First call sets two images.
 	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 1, Tags: 1},
@@ -81,12 +81,12 @@ func TestSetImageMetrics_replacesSeriesSet(t *testing.T) {
 	}
 }
 
-// TestSetImageMetrics_tagsDroppingToZeroRemovesSeries pins the
+// TestSetImage_tagsDroppingToZeroRemovesSeries pins the
 // stale-series diff on the tags gauge specifically: an image whose tag
 // count goes from positive to 0 (count fetch failed, or the repo now has
 // no tags) keeps its pulls series with the fresh value but loses its
 // image_tags series — a stale count must not linger from the prior cycle.
-func TestSetImageMetrics_tagsDroppingToZeroRemovesSeries(t *testing.T) {
+func TestSetImage_tagsDroppingToZeroRemovesSeries(t *testing.T) {
 	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 10, Tags: 4},
 	})
@@ -104,10 +104,10 @@ func TestSetImageMetrics_tagsDroppingToZeroRemovesSeries(t *testing.T) {
 	}
 }
 
-// TestSetImageMetrics_emptyCycleClearsAll pins the all-failed edge: an
+// TestSetImage_emptyCycleClearsAll pins the all-failed edge: an
 // empty update removes every previously-emitted image series (matching
 // the old Reset semantics for a cycle that collected nothing).
-func TestSetImageMetrics_emptyCycleClearsAll(t *testing.T) {
+func TestSetImage_emptyCycleClearsAll(t *testing.T) {
 	SetImage([]ImageMetric{
 		{Registry: "dockerhub", Owner: "a", Repo: "gone", Pulls: 5, Tags: 1},
 	})

@@ -46,7 +46,7 @@ func TestParseRepoRefsWildcard(t *testing.T) {
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
+func TestLoad(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "owner1/app1,owner2/app2")
 	t.Setenv("GHCR_REPOS", "gh1/pkg1,gh2/pkg2,gh3/pkg3")
 	t.Setenv("POLL_INTERVAL_HOURS", "12")
@@ -75,7 +75,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaults(t *testing.T) {
+func TestLoadDefaults(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
 	}
@@ -92,7 +92,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadConfigInvalidNumbers(t *testing.T) {
+func TestLoadInvalidNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
 	cfg, _ := Load()
 
@@ -101,7 +101,7 @@ func TestLoadConfigInvalidNumbers(t *testing.T) {
 	}
 }
 
-func TestLoadConfigNegativeNumbers(t *testing.T) {
+func TestLoadNegativeNumbers(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "-5")
 	cfg, _ := Load()
 
@@ -110,7 +110,7 @@ func TestLoadConfigNegativeNumbers(t *testing.T) {
 	}
 }
 
-func TestLoadConfigWildcard(t *testing.T) {
+func TestLoadWildcard(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "cplieger/*")
 	t.Setenv("GHCR_REPOS", "cplieger/*,cplieger/fclones")
 	t.Setenv("POLL_INTERVAL_HOURS", "1")
@@ -125,9 +125,9 @@ func TestLoadConfigWildcard(t *testing.T) {
 	}
 }
 
-// TestLoadConfigZeroValues verifies that POLL_INTERVAL_HOURS=0 is a valid
+// TestLoadZeroValues verifies that POLL_INTERVAL_HOURS=0 is a valid
 // value (one-shot mode), not coerced to the positive fallback.
-func TestLoadConfigZeroValues(t *testing.T) {
+func TestLoadZeroValues(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "0")
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
@@ -139,7 +139,7 @@ func TestLoadConfigZeroValues(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_poll_interval_clamped_to_max(t *testing.T) {
+func TestLoad_poll_interval_clamped_to_max(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "99999")
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
@@ -183,7 +183,7 @@ func TestParseRepoRefs_output_always_safe(t *testing.T) {
 }
 
 // clampMaxPollHours mirrors the maxPollHours clamp threshold inside
-// LoadConfig (24 * 365). Referenced by the clamp-boundary tests below so
+// Load (24 * 365). Referenced by the clamp-boundary tests below so
 // they assert against the exact threshold.
 const clampMaxPollHours = 24 * 365
 
@@ -232,13 +232,13 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_clamp_boundary_silent_at_exact_max verifies that a
+// TestLoad_clamp_boundary_silent_at_exact_max verifies that a
 // POLL_INTERVAL_HOURS value exactly equal to the clamp threshold is
 // accepted as-is, with NO clamp warning. At the boundary the clamped and
 // unclamped durations are identical, so the only observable difference
 // between "clamp" and "don't clamp" is the warning: it must stay silent
 // when the input equals the maximum.
-func TestLoadConfig_clamp_boundary_silent_at_exact_max(t *testing.T) {
+func TestLoad_clamp_boundary_silent_at_exact_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours))
@@ -256,11 +256,11 @@ func TestLoadConfig_clamp_boundary_silent_at_exact_max(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_clamp_warns_one_above_max confirms the clamp branch (and
+// TestLoad_clamp_warns_one_above_max confirms the clamp branch (and
 // the log-capture mechanism) actually fire one hour above the threshold,
 // so the boundary test's "no warning" assertion is a genuine signal
 // rather than a silently-broken capture.
-func TestLoadConfig_clamp_warns_one_above_max(t *testing.T) {
+func TestLoad_clamp_warns_one_above_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
@@ -277,7 +277,7 @@ func TestLoadConfig_clamp_warns_one_above_max(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_EnableMetrics(t *testing.T) {
+func TestLoad_EnableMetrics(t *testing.T) {
 	tests := []struct {
 		env  string
 		want bool
@@ -296,13 +296,13 @@ func TestLoadConfig_EnableMetrics(t *testing.T) {
 			t.Setenv("ENABLE_METRICS", tt.env)
 			cfg, _ := Load()
 			if cfg.EnableMetrics != tt.want {
-				t.Errorf("LoadConfig(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
+				t.Errorf("Load(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
 			}
 		})
 	}
 }
 
-func TestLoadConfig_LogLevel(t *testing.T) {
+func TestLoad_LogLevel(t *testing.T) {
 	tests := []struct {
 		env  string
 		want slog.Level
@@ -321,17 +321,17 @@ func TestLoadConfig_LogLevel(t *testing.T) {
 			t.Setenv("LOG_LEVEL", tt.env)
 			cfg, _ := Load()
 			if cfg.LogLevel != tt.want {
-				t.Errorf("LoadConfig(LOG_LEVEL=%q).LogLevel = %v, want %v", tt.env, cfg.LogLevel, tt.want)
+				t.Errorf("Load(LOG_LEVEL=%q).LogLevel = %v, want %v", tt.env, cfg.LogLevel, tt.want)
 			}
 		})
 	}
 }
 
-// TestLoadConfig_invalidLogLevel_warns verifies an unrecognized LOG_LEVEL is
+// TestLoad_invalidLogLevel_warns verifies an unrecognized LOG_LEVEL is
 // surfaced with a warning (not silently swallowed) while still falling back to
 // Info — matching the app's own warn-and-default handling of a malformed
 // POLL_INTERVAL_HOURS. Reuses captureClampLog to observe the warning.
-func TestLoadConfig_invalidLogLevel_warns(t *testing.T) {
+func TestLoad_invalidLogLevel_warns(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("LOG_LEVEL", "bogus")
@@ -346,9 +346,9 @@ func TestLoadConfig_invalidLogLevel_warns(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_validLogLevel_silent confirms the warn fires only on invalid
+// TestLoad_validLogLevel_silent confirms the warn fires only on invalid
 // input: a valid LOG_LEVEL parses without emitting the invalid-level warning.
-func TestLoadConfig_validLogLevel_silent(t *testing.T) {
+func TestLoad_validLogLevel_silent(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("LOG_LEVEL", "warn")

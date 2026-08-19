@@ -40,10 +40,11 @@ const (
 // Client is the GitHub Container Registry source (it satisfies
 // collect.Source at the wiring site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {
-	http      *http.Client
-	logger    *slog.Logger
-	retryOpts []httpx.GetOption
-	opts      Options
+	http *http.Client
+	// opts is the ONE place an optional lives. Its Logger is resolved by
+	// NewClient, so reads need no nil check; do not mirror a field out of it
+	// (that was the old shape, and it left two reachable paths to one value).
+	opts Options
 }
 
 // NewClient returns a Client that uses the provided *http.Client for all
@@ -54,12 +55,7 @@ func NewClient(client *http.Client, opts Options) *Client {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Client{
-		http:      client,
-		retryOpts: opts.RetryOpts,
-		logger:    opts.Logger,
-		opts:      opts,
-	}
+	return &Client{http: client, opts: opts}
 }
 
 // Source returns the typed registry.ID the orchestrator uses to route
@@ -95,7 +91,7 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 	failures := 0
 	pkgParseFailures := 0
 	total := 0
-	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, c.logger, refs, c.retryOpts)
+	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, c.opts.Logger, refs, c.opts.RetryOpts)
 	failures += listingFailures
 
 	for _, ref := range packages {
@@ -108,7 +104,7 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			c.logger.Warn("ghcr collection interrupted by context cancellation",
+			c.opts.Logger.Warn("ghcr collection interrupted by context cancellation",
 				"collected", len(results), "remaining", len(packages)-total,
 				"error", ctx.Err())
 			return results, total, pkgHealthy(failures, listingFailures, total)
@@ -137,7 +133,7 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 	// which is false when the listing itself failed, so listing format
 	// changes need their own signal.
 	if listingParseFailures > 0 {
-		c.logger.Error("ghcr package listing HTML format may have changed",
+		c.opts.Logger.Error("ghcr package listing HTML format may have changed",
 			"listing_parse_failures", listingParseFailures,
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
@@ -150,7 +146,7 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 	// dedicated ERROR above and are not counted in total. Mirrors pkgHealthy,
 	// which already subtracts listingFailures from its ratio.
 	if total > 0 && pkgParseFailures*2 > total {
-		c.logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
+		c.opts.Logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
 			"total", total, "parse_failures", pkgParseFailures,
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
@@ -193,22 +189,22 @@ type scrapeResult struct {
 // error must not inject a false zero into the exposed gauge (the per-day
 // delta is computed downstream by Prometheus/Mimir, not here).
 func (c *Client) scrapePackage(ctx context.Context, ref registry.RepoRef) scrapeResult {
-	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.retryOpts)
+	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.opts.RetryOpts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// In-flight scrape cancelled by shutdown/deadline; expected, log at Debug not
 			// WARN (mirrors the expandWildcard listing site). Failure classification unchanged.
-			c.logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo, "error", err)
+			c.opts.Logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo, "error", err)
 			return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
 		}
-		c.logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
+		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
 		if errors.Is(err, httpx.ErrRateLimited) {
-			c.logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
+			c.opts.Logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
 				"hint", "consider increasing pacing delay or reducing package count")
 		}
 		return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
 	}
-	c.logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
+	c.opts.Logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
 	return scrapeResult{
 		stat: registry.Entry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads},
 		ok:   true,

@@ -70,7 +70,7 @@ const ghcrBodyCap = 2 << 20
 // unconditionally and the body was capped at ghcrBodyCap.
 func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []httpx.GetOption) (string, error) {
 	// Build a fresh slice so the caller's opts (reused across every
-	// scrape via c.retryOpts) is never mutated by the append.
+	// scrape via c.opts.RetryOpts) is never mutated by the append.
 	htmlOpts := make([]httpx.GetOption, 0, len(opts)+2)
 	htmlOpts = append(htmlOpts, opts...)
 	htmlOpts = append(htmlOpts,
