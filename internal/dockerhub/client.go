@@ -309,7 +309,7 @@ func Degraded(results []registry.Entry, attempted int) bool {
 // returning the pull count. It is the pure parse core behind Collect's
 // explicit-ref path, exported so parse-only tests and fuzzing can drive
 // it without standing up an HTTP server.
-func ParseRepoMeta(data []byte) (pullCount int64, err error) {
+func ParseRepoMeta(data []byte) (int64, error) {
 	var resp struct {
 		PullCount int64 `json:"pull_count"`
 	}
