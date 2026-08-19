@@ -101,6 +101,17 @@ here.
   old interface carried a second method (`Name()`) with a prose must-equal
   invariant; deriving the label from the one authoritative method deleted
   that drift surface.
+- **The Docker Hub parse core treats a shape change as a signal, never as a
+  value.** `internal/dockerhub` decodes with `encoding/json/v2`, which
+  rejects duplicate object members and matches field names exactly, and
+  `pull_count` / `count` are required (`*int64` / `*int`): absent, null or
+  negative is an error. That is deliberate and load-bearing —
+  `image_pulls_total` is cumulative, so a silently-substituted 0 reads
+  downstream as a pull-count regression rather than as missing data. A
+  missing `pull_count` on an owner-listing result fails the whole page, which
+  surfaces as "listing wholly failed" plus an unhealthy cycle; dropping the
+  entry instead would return zero repos with a nil error and look like an
+  empty owner.
 - **Validate any URL path segment** built from registry data through
   `internal/urlsafe`, which guards against traversal and injection.
 - **Health is a file marker** (`/tmp/.healthy`), checked by the

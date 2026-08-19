@@ -15,6 +15,11 @@
 //   - The owner-listing page cap (10 pages, 100 items per page) and the
 //     "hit cap → warn log" signal are preserved so dashboards that alert
 //     on truncation still see the same key set.
+//   - Responses are decoded with encoding/json/v2, and the numeric fields
+//     that feed a gauge (pull_count, count) are REQUIRED. Duplicate object
+//     members, a renamed or re-cased field, and a negative value are all
+//     errors, so a reshaped response reaches the log as a format signal
+//     instead of the metric surface as a bogus 0.
 //
 // The package exposes a *Client (for composition-root wiring via
 // collect.Source) plus the exported Degraded predicate (a pure
@@ -26,7 +31,7 @@ package dockerhub
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -309,14 +314,23 @@ func Degraded(results []registry.Entry, attempted int) bool {
 // returning the pull count. It is the pure parse core behind Collect's
 // explicit-ref path, exported so parse-only tests and fuzzing can drive
 // it without standing up an HTTP server.
+//
+// pull_count is REQUIRED: absent, null or negative is an error, never a
+// value, because 0 is a legitimate pull count and image_pulls_total is
+// cumulative — silently exporting 0 for a repo that has pulls would look
+// like a regression to every downstream alert. Same skip-don't-zero rule
+// ParseTagCount applies to the tag count.
 func ParseRepoMeta(data []byte) (int64, error) {
 	var resp struct {
-		PullCount int64 `json:"pull_count"`
+		PullCount *int64 `json:"pull_count"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return 0, err
 	}
-	return resp.PullCount, nil
+	if resp.PullCount == nil || *resp.PullCount < 0 {
+		return 0, errPullCountInvalid
+	}
+	return *resp.PullCount, nil
 }
 
 // ParseRepoListPage parses one page of the Docker Hub owner-listing
@@ -324,12 +338,22 @@ func ParseRepoMeta(data []byte) (int64, error) {
 // Owner set to the requested owner and Repo to the listed name
 // (TagCount left 0 for the caller to fill). Pure parse core behind
 // listRepos, exported for parse-only tests and fuzzing.
+//
+// A result carrying no usable pull_count fails the whole PAGE rather than
+// dropping that entry: an absent required field is a schema change, and
+// listRepos' caller already turns a listing error into the "wholly/partially
+// failed" WARN plus an unhealthy verdict. Dropping instead would return zero
+// repos with a nil error, which collectWildcardRef reads as a legitimately
+// empty owner — a total data loss reported as healthy. Contrast the
+// unsafe-name guard, which drops one hostile entry from an otherwise
+// well-formed page; it runs FIRST, so an entry this parser was going to
+// discard anyway gets no vote on whether the page is well-formed.
 func ParseRepoListPage(data []byte, owner string) (string, []registry.Entry, error) {
 	var resp struct {
 		Next    string `json:"next"`
 		Results []struct {
+			PullCount *int64 `json:"pull_count"`
 			Name      string `json:"name"`
-			PullCount int64  `json:"pull_count"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -348,14 +372,22 @@ func ParseRepoListPage(data []byte, owner string) (string, []registry.Entry, err
 			slog.Debug("skipping docker hub repo with unsafe name", "owner", owner, "name", r.Name)
 			continue
 		}
+		if r.PullCount == nil || *r.PullCount < 0 {
+			return "", nil, fmt.Errorf("repo %q: %w", r.Name, errPullCountInvalid)
+		}
 		repos = append(repos, registry.Entry{
 			Owner: owner,
 			Repo:  r.Name,
-			Pulls: r.PullCount,
+			Pulls: *r.PullCount,
 		})
 	}
 	return resp.Next, repos, nil
 }
+
+// errPullCountInvalid is returned when a Docker Hub response decodes as
+// JSON but carries no usable cumulative pull count ("pull_count" absent,
+// null or negative) — a format-change signal, distinct from malformed JSON.
+var errPullCountInvalid = errors.New("pull count missing or negative")
 
 // errTagCountInvalid is returned by ParseTagCount when the response
 // decodes as JSON but carries no usable total ("count" absent or

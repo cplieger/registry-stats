@@ -16,10 +16,6 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
-func mockClient(srv *httptest.Server) *http.Client {
-	return testsupport.MockClient(srv)
-}
-
 // shortRetry returns httpx options with a 1 ms base delay so retry tests
 // don't wait a full second between attempts.
 func shortRetry() []httpx.GetOption {
@@ -56,10 +52,9 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 		tagRequests++
 		tagCountHandler(164)(w, r)
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -95,10 +90,9 @@ func TestClient_Collect_TagCountFailureKeepsEntry(t *testing.T) {
 	mux.HandleFunc("GET /v2/repositories/owner/myapp/tags/", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	entries, attempted, healthy := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
 	if attempted != 1 || !healthy {
@@ -125,10 +119,9 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 	})
 	mux.HandleFunc("GET /v2/repositories/owner/app1/tags/", tagCountHandler(3))
 	mux.HandleFunc("GET /v2/repositories/owner/app2/tags/", tagCountHandler(5))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -157,10 +150,9 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("GET /v2/repositories/owner/app1/tags/", tagCountHandler(0))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"},
@@ -176,12 +168,11 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 }
 
 func TestClient_Collect_DegradedOnAllFailures(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -205,10 +196,9 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"pull_count": 42})
 	})
 	mux.HandleFunc("GET /v2/repositories/good/a/tags/", tagCountHandler(1))
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "a"}}
 	entries, _, _ := c.Collect(t.Context(), refs)
 
@@ -231,12 +221,11 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 
 	t.Run("wholesale_failure_is_unhealthy", func(t *testing.T) {
 		// Owner listing 404s on page 1 → zero usable repos → wholesale outage.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
-		defer srv.Close()
 
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if healthy {
@@ -256,10 +245,9 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
 		})
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		srv := httptest.NewTestServer(t, mux)
 
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, _, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
@@ -287,10 +275,9 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 			}
 		})
 		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(2))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		srv := httptest.NewTestServer(t, mux)
 
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
 
 		if !healthy {
@@ -332,12 +319,11 @@ func TestDegraded(t *testing.T) {
 }
 
 func TestClient_Collect_ExplicitRefParseError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("not json"))
 	}))
-	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, _ := c.Collect(t.Context(), refs)
 
@@ -350,12 +336,11 @@ func TestClient_Collect_ExplicitRefParseError(t *testing.T) {
 }
 
 func TestClient_Collect_ExplicitRefFetchError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer srv.Close()
 
-	c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -392,13 +377,12 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 	wildcard := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 
 	t.Run("wholesale_error_logs_wholly", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
-		defer srv.Close()
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), whollyMsg) {
@@ -423,11 +407,10 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 			}
 		})
 		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(1))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		srv := httptest.NewTestServer(t, mux)
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if !strings.Contains(buf.String(), partiallyMsg) {
@@ -443,17 +426,89 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
 		})
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		srv := httptest.NewTestServer(t, mux)
 
 		logger, buf := captureLogger()
-		c := dockerhub.NewClient(mockClient(srv), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 		c.Collect(t.Context(), wildcard)
 
 		if strings.Contains(buf.String(), whollyMsg) || strings.Contains(buf.String(), partiallyMsg) {
 			t.Errorf("Collect with a successful wildcard listing logged a failure warn, want silence; logs:\n%s", buf.String())
 		}
 	})
+}
+
+// TestParseRepoMeta pins the required-field contract on the cumulative pull
+// count: a present, non-negative pull_count is returned, and absent, null or
+// negative is an ERROR rather than 0. The distinction matters because 0 is a
+// legitimate pull count and image_pulls_total is cumulative — a silent 0 for a
+// repo that has pulls reads downstream as a regression, not as missing data.
+//
+// The duplicate-key row is the witness for the encoding/json/v2 adoption: v1
+// silently kept the LAST value for a repeated member, so a reshaped or
+// tampered response could pick which number reached the gauge. v2 rejects it,
+// which routes it into the existing "docker hub parse failed" ERROR and skips
+// the repo for the cycle.
+func TestParseRepoMeta(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		want    int64
+		wantErr bool
+	}{
+		{"real shape", `{"pull_count":5000,"last_updated":"2026-03-06T12:00:00Z"}`, 5000, false},
+		{"zero pulls is a real value", `{"pull_count":0}`, 0, false},
+		{"large count", `{"pull_count":9999999999}`, 9999999999, false},
+		{"missing pull_count", `{}`, 0, true},
+		{"null pull_count", `{"pull_count":null}`, 0, true},
+		{"negative pull_count", `{"pull_count":-1}`, 0, true},
+		{"duplicate pull_count", `{"pull_count":1,"pull_count":2}`, 0, true},
+		{"malformed json", `not json`, 0, true},
+		{"empty input", ``, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := dockerhub.ParseRepoMeta([]byte(tt.data))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseRepoMeta(%q) error = %v, wantErr %v", tt.data, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("ParseRepoMeta(%q) = %d, want %d", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseRepoListPage_requiresPullCount pins that a listing result with no
+// usable pull_count fails the whole PAGE instead of being dropped. Dropping
+// would hand listRepos zero repos with a nil error, which collectWildcardRef
+// reads as a legitimately empty owner — so a Docker Hub schema change would
+// wipe every wildcard series while the cycle still reported healthy. An error
+// routes it into the "listing wholly failed" WARN and an unhealthy verdict.
+func TestParseRepoListPage_requiresPullCount(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr bool
+	}{
+		{"every result carries a count", `{"next":"","results":[{"name":"a","pull_count":1},{"name":"b","pull_count":0}]}`, false},
+		{"empty page is fine", `{"next":"","results":[]}`, false},
+		{"one result missing the count fails the page", `{"next":"","results":[{"name":"a","pull_count":1},{"name":"b"}]}`, true},
+		{"null count fails the page", `{"results":[{"name":"a","pull_count":null}]}`, true},
+		{"negative count fails the page", `{"results":[{"name":"a","pull_count":-5}]}`, true},
+		{"an unsafe name is dropped before its count is required", `{"results":[{"name":"bad/traversal"},{"name":"a","pull_count":1}]}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, repos, err := dockerhub.ParseRepoListPage([]byte(tt.data), "owner")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseRepoListPage(%q) error = %v, wantErr %v", tt.data, err, tt.wantErr)
+			}
+			if tt.wantErr && len(repos) != 0 {
+				t.Errorf("ParseRepoListPage(%q) returned %d repos alongside an error, want none", tt.data, len(repos))
+			}
+		})
+	}
 }
 
 // TestParseRepoListPage_dropsUnsafeName asserts the ParseRepoListPage
