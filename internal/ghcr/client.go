@@ -158,7 +158,7 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 // configured minimum (DefaultMinPacing when unset) plus uniform jitter
 // in [0, jitter) (DefaultPacingJitter when unset). Because both defaults
 // are positive and replace any non-positive configured value, the jitter
-// bound is always positive, so rand.Int64N always receives a positive
+// bound is always positive, so rand.N always receives a positive
 // argument.
 func (c *Client) pacingDelay() time.Duration {
 	pacingMin := c.opts.MinPacing
@@ -169,7 +169,7 @@ func (c *Client) pacingDelay() time.Duration {
 	if pacingJitter <= 0 {
 		pacingJitter = DefaultPacingJitter
 	}
-	jitter := time.Duration(rand.Int64N(int64(pacingJitter))) //nolint:gosec // G404: jitter, not crypto
+	jitter := rand.N(pacingJitter) //nolint:gosec // G404: jitter, not crypto
 	return pacingMin + jitter
 }
 

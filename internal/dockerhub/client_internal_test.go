@@ -12,14 +12,6 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
-// mockClient wires an *http.Client whose transport redirects all requests
-// to the test server. Defined here (package dockerhub) so the white-box
-// tests below can build a Client without reaching into the external
-// dockerhub_test package, where the black-box suite keeps its own copy.
-func mockClient(srv *httptest.Server) *http.Client {
-	return testsupport.MockClient(srv)
-}
-
 // shortRetry returns httpx options with a 1 ms base delay so retry tests
 // don't wait a full second between attempts.
 func shortRetry() []httpx.GetOption {
@@ -49,10 +41,9 @@ func TestClient_ListRepos_PaginatesOwner(t *testing.T) {
 			})
 		}
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	repos, err := listRepos(t.Context(), c, "testowner")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
@@ -69,12 +60,11 @@ func TestClient_ListRepos_PaginatesOwner(t *testing.T) {
 }
 
 func TestClient_ListRepos_ParseError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("not json"))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	_, err := listRepos(t.Context(), c, "testowner")
 	if err == nil {
 		t.Error("expected parse error for invalid JSON")
@@ -98,10 +88,9 @@ func TestClient_TagCount_ReadsCountField(t *testing.T) {
 			"results": []map[string]any{{"name": "latest"}},
 		})
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	got := tagCount(t.Context(), c, "owner", "app")
 	if got != 164 {
 		t.Errorf("tagCount = %d, want 164 (the count field, not len(results))", got)
@@ -112,36 +101,33 @@ func TestClient_TagCount_ReadsCountField(t *testing.T) {
 }
 
 func TestClient_TagCount_FetchErrorReturnsZero(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on fetch error", got)
 	}
 }
 
 func TestClient_TagCount_ParseErrorReturnsZero(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("not json"))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 on parse error", got)
 	}
 }
 
 func TestClient_TagCount_MissingCountReturnsZero(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"next":"","results":[{"name":"latest"}]}`))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := tagCount(t.Context(), c, "owner", "app"); got != 0 {
 		t.Errorf("tagCount = %d, want 0 when the response carries no count field", got)
 	}
@@ -200,10 +186,9 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 			})
 		}
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	repos, err := listRepos(t.Context(), c, "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
@@ -227,12 +212,11 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 // nil-panic. tagCount against a failing server hits the warn log path,
 // so a missing fallback would crash here.
 func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry()})
 	if got := tagCount(t.Context(), c, "o", "a"); got != 0 {
 		t.Errorf("tagCount on a failing server = %d, want 0", got)
 	}
@@ -273,10 +257,9 @@ func TestClient_PageCap_TruncatesOwnerListing(t *testing.T) {
 		// wildcard expansion's tag-count fetch for "a" succeeds quietly.
 		tagCountHandler(1)(w, r)
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	c.pageCap = 1 // in-package: the cap needs no production setter
 	refs := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 	_, attempted, _ := c.Collect(t.Context(), refs)

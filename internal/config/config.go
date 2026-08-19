@@ -73,9 +73,8 @@ func PollInterval() (time.Duration, []Warning) {
 	pollIntervalHours, ok, err := envx.IntStrict("POLL_INTERVAL_HOURS")
 	switch {
 	case err != nil:
-		var perr *envx.ParseError
 		raw := ""
-		if errors.As(err, &perr) {
+		if perr, isParseErr := errors.AsType[*envx.ParseError](err); isParseErr {
 			raw = perr.Value
 		}
 		warns = append(warns, Warning{

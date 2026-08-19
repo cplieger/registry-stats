@@ -16,9 +16,12 @@ import (
 	"pgregory.net/rapid"
 )
 
-func mockClient(srv *httptest.Server) *http.Client {
-	return testsupport.MockClient(srv)
-}
+// packagePageURL is a representative production GHCR package-page URL for
+// the fetchHTML tests. httptest.NewTestServer's in-memory client routes
+// every request to the handler regardless of scheme, host or address — and
+// leaves Server.URL empty — so these tests pass the URL production would
+// build instead of a loopback address, which is closer to the real call.
+const packagePageURL = "https://github.com/users/owner/packages/container/package/pkg"
 
 // shortRetry returns httpx options with a 1 ms base delay so retry
 // tests don't wait a full second between attempts.
@@ -171,12 +174,11 @@ func TestParsePackageList_Empty(t *testing.T) {
 }
 
 func TestFetchHTML_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("<html>test</html>"))
 	}))
-	defer srv.Close()
 
-	html, err := fetchHTML(t.Context(), srv.Client(), srv.URL, shortRetry())
+	html, err := fetchHTML(t.Context(), srv.Client(), packagePageURL, shortRetry())
 	if err != nil {
 		t.Fatalf("fetchHTML: %v", err)
 	}
@@ -186,12 +188,11 @@ func TestFetchHTML_Success(t *testing.T) {
 }
 
 func TestFetchHTML_NonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 	}))
-	defer srv.Close()
 
-	_, err := fetchHTML(t.Context(), srv.Client(), srv.URL, shortRetry())
+	_, err := fetchHTML(t.Context(), srv.Client(), packagePageURL, shortRetry())
 	if err == nil {
 		t.Error("expected error for 403 response")
 	}
@@ -214,11 +215,10 @@ func TestFetchHTML_ContextCancelled(t *testing.T) {
 }
 
 func TestScrapeDownloads_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(downloadsHTML("98765")))
 	}))
-	defer srv.Close()
-	client := mockClient(srv)
+	client := srv.Client()
 
 	got, err := scrapeDownloads(t.Context(), client, "owner", "mypkg", shortRetry())
 	if err != nil {
@@ -264,7 +264,7 @@ func TestBuildPackageList_Explicit(t *testing.T) {
 func TestBuildPackageList_WildcardDedup(t *testing.T) {
 	// ParsePackageList + dedup: an explicit ref that matches an
 	// already-expanded wildcard entry should not duplicate.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/users/owner/packages") && !strings.Contains(r.URL.Path, "/container/") {
 			w.Write([]byte(`<a href="/users/owner/packages/container/package/app1">app1</a>
 <a href="/users/owner/packages/container/package/app2">app2</a>`))
@@ -272,8 +272,7 @@ func TestBuildPackageList_WildcardDedup(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer srv.Close()
-	client := mockClient(srv)
+	client := srv.Client()
 
 	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
@@ -303,11 +302,10 @@ func TestBuildPackageList_WildcardDedup(t *testing.T) {
 func TestBuildPackageList_WildcardListingError(t *testing.T) {
 	// A wildcard listing that fails to fetch should bump listFail but
 	// leave explicit refs flowing through.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
-	client := mockClient(srv)
+	client := srv.Client()
 
 	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
@@ -361,7 +359,7 @@ func TestErrHTMLFormatChanged_Sentinel(t *testing.T) {
 // TestFetchGitHubHTMLSuccess which asserted the same headers against
 // main.go's fetchGitHubHTML forwarder.
 func TestFetchHTML_SendsBrowserHeaders(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") == "" {
 			t.Error("expected User-Agent header")
 		}
@@ -373,9 +371,8 @@ func TestFetchHTML_SendsBrowserHeaders(t *testing.T) {
 		}
 		w.Write([]byte("<html>test</html>"))
 	}))
-	defer srv.Close()
 
-	html, err := fetchHTML(t.Context(), srv.Client(), srv.URL, shortRetry())
+	html, err := fetchHTML(t.Context(), srv.Client(), packagePageURL, shortRetry())
 	if err != nil {
 		t.Fatalf("fetchHTML: %v", err)
 	}
@@ -441,10 +438,9 @@ func TestCollect_ExplicitMock(t *testing.T) {
 		w.Write([]byte(`<html><span>Total downloads</span>
 <h3 title="4567">4.6K</h3></html>`))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	client := mockClient(srv)
+	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "mypkg"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
@@ -485,13 +481,12 @@ func TestCollect_WildcardMock(t *testing.T) {
 		w.Write([]byte(`<html><span>Total downloads</span>
 <h3 title="200">200</h3></html>`))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	client := mockClient(srv)
+	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	entries, _, healthy := c.Collect(ctx, refs)
@@ -511,12 +506,11 @@ func TestCollect_WildcardMock(t *testing.T) {
 // computed downstream by Prometheus/Mimir). Migrated from
 // TestCollectGHCRAllFailUnhealthy.
 func TestCollect_AllFailUnhealthy(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
-	client := mockClient(srv)
+	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
@@ -535,13 +529,12 @@ func TestCollect_AllFailUnhealthy(t *testing.T) {
 // TestCollectGHCRAllParseFailures; also pins the "majority parse
 // failures" format-drift warning path.
 func TestCollect_AllParseFailures(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte(`<html><div>no download info here</div></html>`))
 	}))
-	defer srv.Close()
 
-	client := mockClient(srv)
+	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
@@ -561,18 +554,16 @@ func TestCollect_AllParseFailures(t *testing.T) {
 // overflow (v1 silently truncated).
 func TestFetchHTML_OverCap_IsFormatChanged(t *testing.T) {
 	oversize := strings.Repeat("x", ghcrBodyCap+1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(oversize))
 	}))
-	defer srv.Close()
 
-	_, err := fetchHTML(t.Context(), srv.Client(), srv.URL, shortRetry())
+	_, err := fetchHTML(t.Context(), srv.Client(), packagePageURL, shortRetry())
 	if !errors.Is(err, ErrHTMLFormatChanged) {
 		t.Fatalf("fetchHTML over-cap error = %v, want ErrHTMLFormatChanged", err)
 	}
 	// The typed httpx error stays unwrappable for callers that want the limit.
-	var tooLarge *httpx.ResponseTooLargeError
-	if !errors.As(err, &tooLarge) {
+	if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); !ok {
 		t.Errorf("error = %v, want it to wrap *httpx.ResponseTooLargeError", err)
 	}
 }
@@ -745,7 +736,7 @@ func TestPackageKeySeparatorCannotForgeAnotherPair(t *testing.T) {
 // a duplicate; this test counts occurrences, which is the part that fails if
 // the two encodings ever drift apart.
 func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/users/owner/packages") && !strings.Contains(r.URL.Path, "/container/") {
 			_, _ = w.Write([]byte(`<a href="/users/owner/packages/container/package/app1">app1</a>
 <a href="/users/owner/packages/container/package/app2">app2</a>`))
@@ -753,7 +744,6 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer srv.Close()
 
 	refs := []registry.RepoRef{
 		{Owner: "owner", Repo: "*"},
@@ -761,8 +751,7 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 		{Owner: "owner", Repo: "app2"}, // already found by the wildcard
 		{Owner: "owner", Repo: "app3"}, // genuinely new
 	}
-	packages, listFail, parseFail := buildPackageList(
-		t.Context(), mockClient(srv), testsupport.QuietLogger(), refs, shortRetry())
+	packages, listFail, parseFail := buildPackageList(t.Context(), srv.Client(), testsupport.QuietLogger(), refs, shortRetry())
 	if listFail != 0 || parseFail != 0 {
 		t.Fatalf("listing failures: listFail=%d parseFail=%d", listFail, parseFail)
 	}

@@ -101,6 +101,17 @@ here.
   old interface carried a second method (`Name()`) with a prose must-equal
   invariant; deriving the label from the one authoritative method deleted
   that drift surface.
+- **Registry tests run on an in-memory network, not a port.** Every
+  Docker Hub / GHCR test stands its fake registry up with
+  `httptest.NewTestServer(t, handler)` and drives it with `srv.Client()`,
+  whose transport routes _every_ request to the handler regardless of scheme
+  or host — so production code keeps building its real
+  `https://hub.docker.com/...` and `https://github.com/users/...` URLs and
+  the handler dispatches on the real path. There is no URL-rewriting
+  transport to wire up and no `defer srv.Close()` (the server registers its
+  own `t.Cleanup`). The tradeoff to know: the in-memory `Server` leaves
+  `Server.URL` and `Server.Listener` unset, so a test that needs a URL string
+  passes a representative production one (see `packagePageURL`).
 - **The Docker Hub parse core treats a shape change as a signal, never as a
   value.** `internal/dockerhub` decodes with `encoding/json/v2`, which
   rejects duplicate object members and matches field names exactly, and
@@ -112,6 +123,12 @@ here.
   surfaces as "listing wholly failed" plus an unhealthy cycle; dropping the
   entry instead would return zero repos with a nil error and look like an
   empty owner.
+- **The GHCR pacing defaults are tested at full speed.** Production paces
+  scrapes 2-5 s apart, and
+  `TestClient_Collect_pacesAtProductionDefaults` asserts that end to end
+  inside a `testing/synctest` bubble, so the real delays elapse on the
+  synthetic clock in microseconds. Keep new pacing assertions in the bubble
+  rather than shrinking `Options.MinPacing` to dodge the wait.
 - **Validate any URL path segment** built from registry data through
   `internal/urlsafe`, which guards against traversal and injection.
 - **Health is a file marker** (`/tmp/.healthy`), checked by the

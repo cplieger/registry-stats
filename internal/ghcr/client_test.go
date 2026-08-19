@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/registry"
@@ -25,10 +26,9 @@ func capturingLogger(buf *bytes.Buffer) *slog.Logger {
 // failure) for any package scrape.
 func noMarkerServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html><div>no marker here</div></html>`))
 	}))
-	t.Cleanup(srv.Close)
 	return srv
 }
 
@@ -37,12 +37,11 @@ func noMarkerServer(t *testing.T) *httptest.Server {
 // nil-panic. A failing scrape logs at WARN, exercising that path, and
 // the cycle reports unhealthy.
 func TestNewClient_nilLogger_doesNotPanicOnErrorPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), nil))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), nil))
 	_, _, healthy := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 	if healthy {
 		t.Error("Collect with an all-failing scrape = healthy true, want false")
@@ -53,13 +52,12 @@ func TestNewClient_nilLogger_doesNotPanicOnErrorPath(t *testing.T) {
 // actually used: a failing scrape's WARN must land in the supplied
 // logger's buffer (a fallback-to-default would leave it empty).
 func TestNewClient_customLogger_isUsed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer srv.Close()
 
 	var buf bytes.Buffer
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	_, _, _ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
 	if !strings.Contains(buf.String(), "ghcr scrape failed") {
@@ -67,22 +65,56 @@ func TestNewClient_customLogger_isUsed(t *testing.T) {
 	}
 }
 
-// TestClient_pacingDelay_appliesDefaults verifies the zero-value pacing
-// fields fall back to the package defaults. The jitter default is
-// load-bearing: without it rand.Int64N(0) would panic. Testing the
-// extracted pacingDelay directly avoids sleeping the real 2s delay.
-func TestClient_pacingDelay_appliesDefaults(t *testing.T) {
-	t.Run("zero_min_uses_default", func(t *testing.T) {
-		c := NewClient(http.DefaultClient,
-			Options{MinPacing: 0, PacingJitter: time.Nanosecond, RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		if d := c.pacingDelay(); d < DefaultMinPacing {
-			t.Errorf("pacingDelay(MinPacing=0) = %v, want >= DefaultMinPacing %v", d, DefaultMinPacing)
+// TestClient_Collect_pacesAtProductionDefaults drives Collect with the
+// zero-value pacing fields against an in-memory test server inside a
+// synctest bubble, so the real DefaultMinPacing / DefaultPacingJitter path
+// runs on the synthetic clock instead of costing 2-5 s of wall time per
+// package. It pins three things the old pacingDelay unit test could not
+// reach, because it called the helper instead of letting a request pace:
+// both zero-value fallbacks are applied (a zero jitter would panic
+// rand.N(0), a zero minimum would collapse the gap), the delay leads the
+// FIRST scrape as the collect comment claims, and every interval lands in
+// [DefaultMinPacing, DefaultMinPacing+DefaultPacingJitter).
+//
+// httptest.NewTestServer is what makes this possible: its in-memory network
+// is synctest-compatible and routes every request to the handler regardless
+// of host, so the production github.com URLs reach it unrewritten.
+func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var stamps []time.Time
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			stamps = append(stamps, time.Now())
+			_, _ = w.Write([]byte(downloadsHTML("11")))
+		}))
+
+		// Pacing fields left at zero on purpose: they are the subject.
+		c := NewClient(srv.Client(), Options{Logger: testsupport.QuietLogger()})
+		refs := []registry.RepoRef{
+			{Owner: "owner", Repo: "pkg1"},
+			{Owner: "owner", Repo: "pkg2"},
+			{Owner: "owner", Repo: "pkg3"},
 		}
-	})
-	t.Run("zero_jitter_no_panic", func(t *testing.T) {
-		c := NewClient(http.DefaultClient, Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		if d := c.pacingDelay(); d < DefaultMinPacing {
-			t.Errorf("pacingDelay(Options{}) = %v, want >= DefaultMinPacing %v", d, DefaultMinPacing)
+
+		start := time.Now()
+		entries, attempted, healthy := c.Collect(t.Context(), refs)
+		if attempted != len(refs) || !healthy || len(entries) != len(refs) {
+			t.Fatalf("Collect = (%d entries, attempted %d, healthy %v), want (%d, %d, true)",
+				len(entries), attempted, healthy, len(refs), len(refs))
+		}
+		if len(stamps) != len(refs) {
+			t.Fatalf("handler saw %d requests, want %d", len(stamps), len(refs))
+		}
+
+		// Interval 0 is the leading delay before the first scrape; the rest
+		// are the gaps between consecutive scrapes.
+		const maxPacing = DefaultMinPacing + DefaultPacingJitter
+		prev := start
+		for i, at := range stamps {
+			gap := at.Sub(prev)
+			if gap < DefaultMinPacing || gap >= maxPacing {
+				t.Errorf("pacing interval %d = %v, want [%v, %v)", i, gap, DefaultMinPacing, maxPacing)
+			}
+			prev = at
 		}
 	})
 }
@@ -97,10 +129,9 @@ func TestCollect_attemptedCountsScrapes(t *testing.T) {
 	mux.HandleFunc("GET /users/owner/packages/container/package/pkg2", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("20")))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 	_, attempted, _ := c.Collect(t.Context(), refs)
 
@@ -114,7 +145,7 @@ func TestCollect_attemptedCountsScrapes(t *testing.T) {
 // trips the majority-format-drift ERROR, since 1*2 > 1.
 func TestCollect_singleParseFailure_logsMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
-	c := NewClient(mockClient(noMarkerServer(t)), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(noMarkerServer(t).Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	_, _, _ = c.Collect(t.Context(), refs)
 
@@ -128,12 +159,11 @@ func TestCollect_singleParseFailure_logsMajorityDrift(t *testing.T) {
 // stays 0, so the listing-format log must not fire.
 func TestCollect_noListingFailure_silent(t *testing.T) {
 	var buf bytes.Buffer
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("7")))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	_, _, _ = c.Collect(t.Context(), refs)
 
@@ -147,12 +177,11 @@ func TestCollect_noListingFailure_silent(t *testing.T) {
 // listing-format-drift ERROR.
 func TestCollect_listingParseFailure_logsDrift(t *testing.T) {
 	var buf bytes.Buffer
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>no package links here</html>`))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	_, _, _ = c.Collect(t.Context(), refs)
 
@@ -167,12 +196,11 @@ func TestCollect_listingParseFailure_logsDrift(t *testing.T) {
 // total>0 guard is false, so only the listing-format ERROR fires.
 func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>no package links</html>`))
 	}))
-	defer srv.Close()
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	_, attempted, _ := c.Collect(t.Context(), refs)
 
@@ -189,7 +217,7 @@ func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 // and report unhealthy.
 func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
-	c := NewClient(mockClient(noMarkerServer(t)), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(noMarkerServer(t).Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 	_, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -216,10 +244,9 @@ func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 	mux.HandleFunc("GET /users/owner/packages/container/package/bad", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>no marker</html>`))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "good"}, {Owner: "owner", Repo: "bad"}}
 	_, attempted, _ := c.Collect(t.Context(), refs)
 
@@ -243,10 +270,9 @@ func TestCollect_listingFailuresExcludedFromHealth(t *testing.T) {
 	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("99")))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
 
@@ -269,10 +295,9 @@ func TestCollect_minorityPackageFailures_healthy(t *testing.T) {
 	mux.HandleFunc("GET /users/owner/packages/container/package/fail", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "ok"}, {Owner: "owner", Repo: "fail"}}
 	_, attempted, healthy := c.Collect(t.Context(), refs)
 
@@ -300,10 +325,9 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("99")))
 	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(mockClient(srv), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
 	entries, attempted, healthy := c.Collect(t.Context(), refs)
 
