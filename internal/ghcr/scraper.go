@@ -89,8 +89,7 @@ func fetchHTML(ctx context.Context, client *http.Client, pageURL string, opts []
 		// caller's majority-format-drift escalation catches it, while keeping
 		// the typed *ResponseTooLargeError unwrappable. (v1 silently truncated
 		// the body; httpx v2 returns the typed error.)
-		var tooLarge *httpx.ResponseTooLargeError
-		if errors.As(err, &tooLarge) {
+		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
 			return "", fmt.Errorf("%w: %w", ErrHTMLFormatChanged, err)
 		}
 		return "", err
