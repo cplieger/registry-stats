@@ -23,7 +23,7 @@ is declared in `internal/collect`, the one seam its orchestrator drives, and
 `main.go` holds the unexported one-method `healthSignal` it wires the marker
 into. Test fakes implement those. Concrete types live in their own packages:
 
-- `internal/config`: env-var loading and validation (`Load`). Never logs —
+- `internal/config`: env-var loading and validation (`Load`). Never logs;
   parse problems come back as `Warning` values `main` emits once.
 - `internal/dockerhub`, `internal/ghcr`: the two `collect.Source`
   implementations. Docker Hub uses the unauthenticated API; GHCR **scrapes
@@ -32,7 +32,7 @@ into. Test fakes implement those. Concrete types live in their own packages:
 - `internal/webapi`: HTTP server: `/metrics` (Prometheus exposition) and
   `/api/health`.
 - `internal/obs`: the observability surface built on
-  `github.com/cplieger/metrics` — the `registrystats_*` instances and
+  `github.com/cplieger/metrics`; the `registrystats_*` instances and
   `SetImage`.
 - `internal/registry`, `internal/urlsafe`, `internal/testsupport`: the
   container-registry domain types (`Entry`, `RepoRef`, `ID`), URL-segment
@@ -95,7 +95,7 @@ here.
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
   to the `cplieger` shared libs (`httpx`, `metrics`, `health`, `webhttp`,
-  `slogx`, `envx`, `keyenc`) and `pgregory.net/rapid` (test-only). Prefer the standard library
+  `scheduler`, `slogx`, `envx`, `keyenc`) and `pgregory.net/rapid` (test-only). Prefer the standard library
   before reaching for a new dependency.
 - **The lowercase registry label comes from `Source().String()` alone.** The
   old interface carried a second method (`Name()`) with a prose must-equal
@@ -105,7 +105,7 @@ here.
   Docker Hub / GHCR test stands its fake registry up with
   `httptest.NewTestServer(t, handler)` and drives it with `srv.Client()`,
   whose transport routes _every_ request to the handler regardless of scheme
-  or host — so production code keeps building its real
+  or host, so production code keeps building its real
   `https://hub.docker.com/...` and `https://github.com/users/...` URLs and
   the handler dispatches on the real path. There is no URL-rewriting
   transport to wire up and no `defer srv.Close()` (the server registers its
@@ -116,7 +116,7 @@ here.
   value.** `internal/dockerhub` decodes with `encoding/json/v2`, which
   rejects duplicate object members and matches field names exactly, and
   `pull_count` / `count` are required (`*int64` / `*int`): absent, null or
-  negative is an error. That is deliberate and load-bearing —
+  negative is an error. That is deliberate and load-bearing:
   `image_pulls_total` is cumulative, so a silently-substituted 0 reads
   downstream as a pull-count regression rather than as missing data. A
   missing `pull_count` on an owner-listing result fails the whole page, which

@@ -21,7 +21,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 ### Why this design
 
 - **Stateless**: no on-disk persistence required. The app exposes current counts; time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `slogx`, `envx`, and `keyenc` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, UTC logging, environment parsing, and the shared dedupe-key encoder. Small, auditable supply chain.
+- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `scheduler`, `slogx`, `envx`, and `keyenc` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, the poll loop, UTC logging, environment parsing, and the shared dedupe-key encoder. Small, auditable supply chain.
 - **Distroless, rootless container**: runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
 - **Public repos only**: avoids credential management entirely.
 
@@ -63,19 +63,19 @@ services:
 
 ### Environment variables
 
-| Variable              | Description                                                                                                                                                                                              | Default        | Required |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | -------- |
-| `DOCKERHUB_REPOS`     | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (e.g. `myuser/*,otheruser/specific-app`)       | ``             | No       |
-| `GHCR_REPOS`          | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (e.g. `myuser/*,otheruser/specific-app`) | ``             | No       |
-| `LOG_LEVEL`           | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info`                                                                                                          | `info`         | No       |
-| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images                   | `1`            | No       |
-| `ENABLE_METRICS`      | Enable Prometheus metrics endpoint                                                                                                                                                                       | `true`         | No       |
-| `LISTEN_ADDR`         | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port                                                                                             | `:9100`        | No       |
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (for example `myuser/*,otheruser/specific-app`) | _(unset)_ | No |
+| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (for example `myuser/*,otheruser/specific-app`) | _(unset)_ | No |
+| `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
+| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
+| `ENABLE_METRICS` | Serve the Prometheus metrics endpoint; `false` or `0` disables it | `true` | No |
+| `LISTEN_ADDR` | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port | `:9100` | No |
 
 ### Ports
 
-| Port   | Description                                        |
-| ------ | -------------------------------------------------- |
+| Port | Description |
+| --- | --- |
 | `9100` | HTTP server (Prometheus metrics + health endpoint) |
 
 ## API reference
@@ -159,7 +159,7 @@ blob stores). URL path segments built from registry data are validated
 against an `[A-Za-z0-9._-]` allowlist. Response bodies are capped at 10 MB
 for JSON and 2 MB for HTML; a GHCR page that exceeds the HTML cap is treated
 as a format-change signal, not silently truncated. The HTTP server sets all
-five timeouts, and `Retry-After` headers on 429/503 responses are honoured
+four timeouts, and `Retry-After` headers on 429/503 responses are honoured
 up to the configured retry backoff ceiling.
 
 One accepted scanner finding: semgrep flags the use of `math/rand/v2`, which
@@ -189,11 +189,11 @@ thing registry-stats writes to disk.
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency         | Source                                                           |
-| ------------------ | ---------------------------------------------------------------- |
-| golang             | [Go](https://hub.docker.com/_/golang)                            |
-| Distroless static  | [Distroless](https://github.com/GoogleContainerTools/distroless) |
-| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid)              |
+| Dependency | Source |
+| --- | --- |
+| golang | [Go](https://hub.docker.com/_/golang) |
+| Distroless static | [Distroless](https://github.com/GoogleContainerTools/distroless) |
+| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
 
 ## Credits
 
