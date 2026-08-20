@@ -1,6 +1,6 @@
 # punused findings adjudicated as false positives. One literal substring per
 # line, matched against punused's output line; full-line `#` comments carry the
-# reason. Invalid-by-construction classes: `.kiro/steering/tools.md`.
+# reason.
 #
 # registry.Unknown is `ID = iota`, i.e. the zero value: any unset ID IS
 # Unknown, so it is produced without any textual reference. It is read
