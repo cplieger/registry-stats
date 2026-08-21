@@ -3,7 +3,7 @@ module github.com/cplieger/registry-stats/v2
 go 1.27.0
 
 require (
-	github.com/cplieger/envx/v2 v2.0.0
+	github.com/cplieger/envx/v2 v2.0.1
 	github.com/cplieger/health v1.6.0
 	github.com/cplieger/httpx/v5 v5.0.0
 	github.com/cplieger/keyenc v1.0.5
