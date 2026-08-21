@@ -414,3 +414,48 @@ func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 		t.Error("Collect healthy = false, want true (no package failures recorded before cancellation)")
 	}
 }
+
+// TestCollect_cancelledMidCycle_logsUnscrapedRemainder pins the count the
+// interrupted-collection log reports for the packages a shutdown skipped:
+// the packages never reached, not the whole list. It is what tells an
+// operator how much of the cycle a SIGTERM cost, so it has to shrink as
+// the cycle progresses rather than restate the list length.
+//
+// The handler cancels the context during the first package's scrape, so
+// the second iteration's pacing select takes the ctx.Done branch with one
+// of the two packages already attempted and one still unreached.
+//
+// synctest keeps it deterministic and free: the hour-long pacing costs no
+// wall time on the synthetic clock, and the second select cannot race its
+// timer, because an already-closed Done channel is the only ready case.
+func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		ctx, cancel := context.WithCancel(t.Context())
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			cancel()
+			_, _ = w.Write([]byte(downloadsHTML("5")))
+		}))
+
+		c := NewClient(srv.Client(), Options{
+			MinPacing:    time.Hour,
+			PacingJitter: time.Nanosecond,
+			RetryOpts:    shortRetry(),
+			Logger:       capturingLogger(&buf),
+		})
+		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
+
+		_, attempted, _ := c.Collect(ctx, refs)
+
+		if attempted != 1 {
+			t.Fatalf("Collect(2 refs, cancelled during the first scrape) attempted = %d, want 1", attempted)
+		}
+		logs := buf.String()
+		if !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
+			t.Fatalf("Collect(2 refs, cancelled during the first scrape) logged no interruption; logs:\n%s", logs)
+		}
+		if !strings.Contains(logs, "remaining=1") {
+			t.Errorf("Collect(2 refs, 1 attempted) interruption log = %q, want it to carry remaining=1", logs)
+		}
+	})
+}
