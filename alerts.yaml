@@ -8,6 +8,17 @@
 groups:
   - name: registry-stats
     rules:
+      # Two arms, because neither covers the other. `up == 0` catches a target
+      # that is configured and failing, and keeps its labels so the alert names
+      # which instance. `absent(up{...})` catches a target that stopped EXISTING
+      # — a dropped scrape target, a removed scrape config, a deleted Kubernetes
+      # pod or ServiceMonitor — where `up` has no series and `up == 0` can never
+      # match.
+      #
+      # Use an EXACT job matcher, not a regex. A regex form
+      # (absent(up{job=~".*x.*"} == 1)) asks whether ANY matching target is up,
+      # so one healthy replica masks every failed one, and its synthetic result
+      # carries no job label to route or group on.
       - alert: RegistryStatsTargetDown
         expr: up{job="registry-stats"} == 0
         for: 15m
@@ -16,10 +27,24 @@ groups:
         annotations:
           summary: "registry-stats exporter down"
           description: >
-            The registry-stats exporter (Docker Hub / GHCR pull-count tracker)
-            has been unscrapable for 15m; image-pull dashboards will go stale.
+            No successful scrape of registry-stats for 15m, so image-pull
+            dashboards go stale and every other rule here is blind. Either the
+            scrape is failing (container down, wrong port, network) or the
+            target is gone from service discovery entirely.
             Check `docker logs registry-stats` and your Alloy or Prometheus
             scrape. The `job` label is whatever you set in your scrape config.
+      - alert: RegistryStatsTargetAbsent
+        expr: absent(up{job="registry-stats"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats has no scrape target at all"
+          description: >
+            There is no up{job="registry-stats"} series, so registry-stats is not merely
+            failing to scrape but is no longer a configured target: a dropped
+            scrape target, a removed scrape config, or a deleted Kubernetes pod
+            or ServiceMonitor. Every other rule in this group is blind.
       - alert: RegistryStatsCollectStalled
         expr: sum(increase(registrystats_collects_total[3h])) == 0
         for: 30m
