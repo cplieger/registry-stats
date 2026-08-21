@@ -32,7 +32,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"

@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/api"
 	collectpkg "github.com/cplieger/registry-stats/v2/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
@@ -33,7 +33,7 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/model"
 	"github.com/cplieger/registry-stats/v2/internal/webapi"
 	"github.com/cplieger/slogx"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/webhttp/v2"
 )
 
 func main() {

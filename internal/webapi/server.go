@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/metrics"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/webhttp/v2"
 )
 
 // Default HTTP server timeouts. Chosen for a LAN-only setup:

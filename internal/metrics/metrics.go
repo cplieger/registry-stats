@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	cm "github.com/cplieger/metrics/v3"
+	cm "github.com/cplieger/metrics/v4"
 )
 
 // registry holds every metric this package exposes. The "registrystats" prefix
