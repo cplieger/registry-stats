@@ -13,9 +13,11 @@
 constant Unknown
 #
 # internal/testsupport is the shared fixture package for the ghcr, dockerhub,
-# collect and webapi test suites: MockClient pairs RedirectTransport with the
-# 5s timeout across 3 call sites, QuietLogger is the single point of truth for
-# slog.DiscardHandler across 46. EU1001 is the correct terminal state for a
-# fixture builder.
-function MockClient
+# collect and webapi test suites: QuietLogger is the single point of truth for
+# slog.DiscardHandler across 46 call sites in 6 files. EU1001 is the correct
+# terminal state for a fixture builder.
+#
+# MockClient is gone rather than adjudicated: the in-memory-network rewrite
+# (60ded59) retired it along with the RedirectTransport it paired with a 5s
+# timeout, and QuietLogger is the package's only export now.
 function QuietLogger
