@@ -2,10 +2,10 @@ github.com/cplieger/envx/v2 v2.0.1 h1:s++DgE8adtWOElrNFRaHield1FNSLJzJqRWLHgRPWL
 github.com/cplieger/envx/v2 v2.0.1/go.mod h1:kKvTj6k8bxlYS2CtuF/7Go9zIe7qJYpMzckZNk8ucJc=
 github.com/cplieger/health v1.6.0 h1:qgzslmEVq8asgMkEZ25arRZPazJRWsN7E8XJ6KgxMpg=
 github.com/cplieger/health v1.6.0/go.mod h1:fGHTssNQpl2EjqRLxgs3n7bbj94gD5HDgi1KEk8cN0Q=
-github.com/cplieger/httpx/v5 v5.0.0 h1:S7jCBzPfOHHXZuFEsaN35UthMZpvlN/aYywP5nb1itI=
-github.com/cplieger/httpx/v5 v5.0.0/go.mod h1:3ap2CAq592k7smKhe3lWrwklthtmJ6L4cIWMTMM8O10=
-github.com/cplieger/keyenc v1.0.5 h1:FLyjGqdfki+3VyOJGdKmeY3VQAiu93Fsg+cJZ6H7xEc=
-github.com/cplieger/keyenc v1.0.5/go.mod h1:9l4QSTuwTtYp2KYeYkvp2PXop12G5MqXeReqCqDlHWY=
+github.com/cplieger/httpx/v5 v5.0.1 h1:MAqJPMJ/esh877C5Y2yVFqm08Xpjxnt67qIZn/fL3Fk=
+github.com/cplieger/httpx/v5 v5.0.1/go.mod h1:3ap2CAq592k7smKhe3lWrwklthtmJ6L4cIWMTMM8O10=
+github.com/cplieger/keyenc v1.0.6 h1:Ac/EoEY8Lgy4ZyTi9I4G4s00RBWGoOlI3RdsjGwHLRo=
+github.com/cplieger/keyenc v1.0.6/go.mod h1:9l4QSTuwTtYp2KYeYkvp2PXop12G5MqXeReqCqDlHWY=
 github.com/cplieger/metrics/v4 v4.0.0 h1:Ps4p3iDwEK9FsxNs94KfPeLBJrpN0xDaQi7hmahVq8I=
 github.com/cplieger/metrics/v4 v4.0.0/go.mod h1:UHgCGvnEbvrx5YCUKxUZcOQEkASPzkIuzi7gJS5jNNI=
 github.com/cplieger/pathinside/v2 v2.0.0 h1:UZxSiu3UBCCs+Xe0+Of+oTLyzL+4wchKO2tShGxK8b8=
