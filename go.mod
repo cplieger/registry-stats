@@ -10,7 +10,7 @@ require (
 	github.com/cplieger/metrics/v4 v4.0.0
 	github.com/cplieger/scheduler/v4 v4.0.0
 	github.com/cplieger/slogx v1.6.3
-	github.com/cplieger/webhttp/v2 v2.0.0
+	github.com/cplieger/webhttp/v2 v2.0.1
 	pgregory.net/rapid v1.3.0
 )
 
