@@ -190,3 +190,40 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 		t.Errorf("logConfig with no repos did not emit the expected ERROR; logs:\n%s", buf.String())
 	}
 }
+
+// TestConfiguredSources_preMintsConfiguredSourcesOnly pins the cold-start
+// contract the shipped RegistryStatsSourceDegraded rule reads: both per-source
+// collect counters carry a zero sample on /metrics before any collect has run,
+// so increase() has an earlier sample and a source's FIRST failure fires the
+// rule. A source with no configured refs gets no series, because a series would
+// claim registry-stats polls that registry. Resets the process-global counters
+// so the assertion does not depend on test order, hence no t.Parallel.
+func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
+	obs.CollectsTotal.Reset()
+	obs.CollectErrors.Reset()
+
+	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
+	sources := []collect.Source{
+		&mainFakeSource{src: registry.DockerHub},
+		&mainFakeSource{src: registry.GHCR},
+	}
+
+	obs.MintCollectSources(configuredSources(cfg, sources))
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	obs.Handler()(w, r)
+	body := w.Body.String()
+
+	for _, line := range []string{
+		`registrystats_collects_total{source="dockerhub"} 0`,
+		`registrystats_collect_errors_total{source="dockerhub"} 0`,
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("pre-mint missing %q\n got:\n%s", line, body)
+		}
+	}
+	if strings.Contains(body, `source="ghcr"`) {
+		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
+	}
+}

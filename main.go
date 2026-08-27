@@ -129,6 +129,11 @@ func run() error {
 	// Loki dashboards key on in their per-source panels.
 	sources := []collectpkg.Source{dh, gh}
 
+	// Pre-mint the per-source collect counters at zero before anything serves,
+	// so a windowed alert on collect_errors_total has an earlier sample and can
+	// see a source's FIRST failure (see obs.MintCollectSources).
+	obs.MintCollectSources(configuredSources(&cfg, sources))
+
 	// Mark liveness healthy as soon as the HTTP API is bound. The collect loop
 	// runs in the background so slow registries (GHCR per-package delays, Docker
 	// Hub pagination) can't push the first cycle past the Docker healthcheck
@@ -209,15 +214,7 @@ func runCollect(
 		Sources: sources,
 		Logger:  slog.Default(),
 		Now:     time.Now,
-		RefsFor: func(name string) []registry.RepoRef {
-			switch name {
-			case registry.DockerHub.String():
-				return cfg.DockerHubRepos
-			case registry.GHCR.String():
-				return cfg.GHCRRepos
-			}
-			return nil
-		},
+		RefsFor: func(name string) []registry.RepoRef { return refsFor(cfg, name) },
 	})
 	// Record cycle duration. Per-source collect counters are incremented in
 	// collect.collectSource so they count only invoked sources (those with
@@ -232,6 +229,35 @@ func runCollect(
 	// intentionally NOT collect.Run's healthy verdict (!degraded), which is stricter and would flip
 	// the marker unhealthy on any partial failure. Run's verdict drives only its partial-failure WARN.
 	return len(images) > 0
+}
+
+// refsFor resolves the refs configured for a source's on-wire name
+// (registry.ID.String()). It is the one answer to "is this source configured":
+// collect.Run skips a source with no refs, so a source absent here never
+// touches the per-source collect counters.
+func refsFor(cfg *configpkg.Config, name string) []registry.RepoRef {
+	switch name {
+	case registry.DockerHub.String():
+		return cfg.DockerHubRepos
+	case registry.GHCR.String():
+		return cfg.GHCRRepos
+	}
+	return nil
+}
+
+// configuredSources returns the on-wire names of the sources with at least one
+// configured ref, which is exactly the set collect.Run invokes and so exactly
+// the set whose per-source counters can move. It drives the cold-start pre-mint.
+func configuredSources(cfg *configpkg.Config, sources []collectpkg.Source) []string {
+	names := make([]string, 0, len(sources))
+	for _, src := range sources {
+		name := src.Source().String()
+		if len(refsFor(cfg, name)) == 0 {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // markCollect runs one collection cycle and reflects the outcome onto the

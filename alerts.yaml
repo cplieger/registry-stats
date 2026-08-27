@@ -105,18 +105,13 @@ groups:
       # does not move this counter, which is what
       # RegistryStatsCollectionIncomplete covers.
       #
-      # The second leg is load-bearing, not belt-and-braces. This counter is
-      # not pre-minted at zero: its series for a source appears only when that
-      # source first fails, arriving at 1 with no earlier 0 sample to subtract
-      # from. increase() therefore reads 0 across the FIRST failure and the
-      # single-failure case, the one worth knowing about, would never fire.
-      # `unless ... offset 3h` fires while the series itself is younger than
-      # the window, and stops once the series has existed through it.
+      # Both per-source counters are pre-minted at zero for every configured
+      # source at process start, so increase() has an earlier sample to
+      # subtract from and the single-failure case, the one worth knowing about,
+      # fires. A source with no configured refs has no series at all, so this
+      # cannot fire for a registry the deployment never polls.
       - alert: RegistryStatsSourceDegraded
-        expr: |
-          increase(registrystats_collect_errors_total[3h]) > 0
-          or (registrystats_collect_errors_total > 0
-              unless registrystats_collect_errors_total offset 3h)
+        expr: increase(registrystats_collect_errors_total[3h]) > 0
         for: 0m
         labels:
           severity: warning
