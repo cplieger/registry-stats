@@ -158,12 +158,6 @@ listing takes images off `/metrics` without moving
 `registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info` default for
 that rule and for `RegistryStatsConfigRejected`: both key on `WARN` lines.
 
-`RegistryStatsSourceDegraded` carries two `or` legs on purpose.
-`registrystats_collect_errors_total` has no series for a source until that source
-first fails, so it arrives at 1 with no earlier 0 sample and `increase()` reads
-0 across the first failure. The second leg fires while the series is younger than
-the window, which is what covers a registry that failed exactly once.
-
 Thresholds and the `for:` windows are starting points. The scrape `job` label is
 yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
 (matching the setup step above), so adjust it to your scrape config. Adjust the

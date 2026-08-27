@@ -82,6 +82,17 @@ func init() {
 	)
 }
 
+// MintCollectSources pre-mints the two per-source collect counters at zero for
+// every source in sources, so increase() has an earlier sample to subtract from
+// and the FIRST failure of a source fires a windowed alert. Pass only sources
+// the process will poll: a series for an unpolled source claims it is polled.
+func MintCollectSources(sources []string) {
+	for _, source := range sources {
+		CollectsTotal.Add(0, source)
+		CollectErrors.Add(0, source)
+	}
+}
+
 // ImageMetric holds per-image gauge data set after each collect cycle.
 // Image metrics are registry-stats-local (the library deliberately does not
 // expose an image-metrics feature); this is layered on labeled gauges.
