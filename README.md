@@ -124,21 +124,52 @@ overview, and tracked package count.
 
 ## Alerting
 
-registry-stats exposes Prometheus metrics at `/metrics`; scrape it (see
-[Grafana integration](#grafana-integration)) and evaluate the rules in
-[`alerts.yaml`](alerts.yaml) with Prometheus or the Mimir ruler. Firing alerts
-deliver through your Alertmanager. They cover:
+registry-stats reports its state in two places, so the group in
+[`alerts.yaml`](alerts.yaml) is mixed. Five rules are PromQL, evaluated with
+Prometheus or the Mimir ruler over the `/metrics` endpoint you already scrape
+(see [Grafana integration](#grafana-integration)). Three are LogQL, evaluated
+with Loki's ruler over the container log, because their conditions leave no
+series to read: a repo ref rejected at parse time is never polled, and a cycle
+that loses a minority of its repos still reports healthy, so the exported counts
+go quietly incomplete while no metric moves.
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `RegistryStatsTargetDown` | the exporter is unscrapable for 15m (`up == 0`) | warning |
-| `RegistryStatsCollectStalled` | no collect cycle has completed in 3h (exporter up but not polling) | warning |
-| `RegistryStatsPullCountRegressed` | a tracked image's pull count drops below its 2-day max (a silent wrong scrape) | warning |
+| `RegistryStatsTargetDown` | `up{job="registry-stats"} == 0` for 15m: the exporter is not being scraped | warning |
+| `RegistryStatsTargetAbsent` | `absent(up{job="registry-stats"})` for 15m: the exporter is not a configured scrape target at all | warning |
+| `RegistryStatsCollectStalled` | no collect cycle has completed in 3h, while the exporter is up and serving its last values | warning |
+| `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
+| `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
+| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, or no entry was usable at all | warning |
+| `RegistryStatsCollectFailed` | the container logged an `ERROR`: a fetch or parse failure, a changed GHCR page, or a recovered panic | warning |
+| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing or a rate limit | warning |
 
-Thresholds and the `for:` windows are starting points. The scrape `job` label
-is yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
-(matching the setup step above), so adjust it to your scrape config. Route by
-whatever labels your Alertmanager uses.
+`RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,
+rather than absence over 3h directly. A counter that has just started carries
+two samples at the same value, which the direct form reads as a stall, so it
+fires about 30m after every container start. Set the `for:` window to about
+three `POLL_INTERVAL_HOURS`, and drop the rule in one-shot mode
+(`POLL_INTERVAL_HOURS=0`), where a single cycle is the point.
+
+`RegistryStatsCollectionIncomplete` is the counterpart to
+`RegistryStatsSourceDegraded` on the axis the counters cannot reach. A cycle
+counts as healthy while most repos succeed, so a rate limit or a truncated owner
+listing takes images off `/metrics` without moving
+`registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info` default for
+that rule and for `RegistryStatsConfigRejected`: both key on `WARN` lines.
+
+`RegistryStatsSourceDegraded` carries two `or` legs on purpose.
+`registrystats_collect_errors_total` has no series for a source until that source
+first fails, so it arrives at 1 with no earlier 0 sample and `increase()` reads
+0 across the first failure. The second leg fires while the series is younger than
+the window, which is what covers a registry that failed exactly once.
+
+Thresholds and the `for:` windows are starting points. The scrape `job` label is
+yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
+(matching the setup step above), so adjust it to your scrape config. Adjust the
+`container` selector on the LogQL rules the same way, or to `job` / `service`,
+depending on your log collector. Route by whatever labels your Alertmanager
+uses.
 
 ## Healthcheck
 
