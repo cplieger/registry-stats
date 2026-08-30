@@ -10,8 +10,8 @@ github.com/cplieger/metrics/v4 v4.0.0 h1:Ps4p3iDwEK9FsxNs94KfPeLBJrpN0xDaQi7hmah
 github.com/cplieger/metrics/v4 v4.0.0/go.mod h1:UHgCGvnEbvrx5YCUKxUZcOQEkASPzkIuzi7gJS5jNNI=
 github.com/cplieger/pathinside/v2 v2.0.0 h1:UZxSiu3UBCCs+Xe0+Of+oTLyzL+4wchKO2tShGxK8b8=
 github.com/cplieger/pathinside/v2 v2.0.0/go.mod h1:XuMYE6rO3te8Yf6Zcy35PLMgDcWaIz3RglJatWPhHnU=
-github.com/cplieger/scheduler/v4 v4.0.0 h1:Td1pHPkHCtIR4Cczi0/0yAeJgba0ZmXCnfxU0jSPfAI=
-github.com/cplieger/scheduler/v4 v4.0.0/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
+github.com/cplieger/scheduler/v4 v4.0.1 h1:Jr5SA+EPEAYuYqFEPLXq1AMZ7GLRoIwNREL+BhBpkeQ=
+github.com/cplieger/scheduler/v4 v4.0.1/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
 github.com/cplieger/slogx v1.6.3 h1:1W8DxUwovnfbL1wjthdELHhw2gFH1FXaUcG34KjefIw=
 github.com/cplieger/slogx v1.6.3/go.mod h1:KW/UCGyMK3grILRvcU4Zloawb27C13cLN5HQ7ZLNS5Q=
 github.com/cplieger/webhttp/v2 v2.0.2 h1:55fv7cuiF7GAjQAC1UZv7Jvi6cFCYvpUlKABlf4QKDU=
