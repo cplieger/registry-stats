@@ -20,25 +20,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/collect"
 	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/webhttp/v2"
 )
-
-// TestLogConfig smoke-tests logConfig on a populated *Config: it emits the
-// per-repo and config-summary INFO lines and must not panic. The
-// "no repos configured" ERROR branch is covered by TestLogConfig_noReposLogsError.
-func TestLogConfig(t *testing.T) {
-	cfg := &configpkg.Config{
-		DockerHubRepos: []registry.RepoRef{{Owner: "a", Repo: "b"}},
-		GHCRRepos:      []registry.RepoRef{{Owner: "c", Repo: "d"}},
-		PollInterval:   time.Hour,
-	}
-	logConfig(cfg)
-}
 
 // mainFakeSource is a canned collect.Source for driving runCollect in
 // isolation from any HTTP path.
@@ -55,10 +43,9 @@ func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]reg
 }
 
 // TestRunCollect_partialSuccessStaysHealthy pins the health-marker contract
-// runCollect owns and that diverges from collect.Run's verdict: when one
-// registry produces data and the other fails, Run reports the cycle degraded
-// (healthy=false) but runCollect must still return true so the marker stays
-// healthy ("partial failures stay healthy as long as one repo succeeds").
+// runCollect owns: when one registry produces data and the other fails, the
+// cycle is degraded per-source but runCollect still returns true so the marker
+// stays healthy ("partial failures stay healthy as long as one repo succeeds").
 // Mutates process-global metrics, so no t.Parallel.
 func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	dh := &mainFakeSource{
@@ -84,6 +71,44 @@ func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
 	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
 	if got := runCollect(t.Context(), cfg, []collect.Source{dh}); got {
 		t.Error("runCollect() = true, want false (no repo collected)")
+	}
+}
+
+func TestMarkCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
+	source := &mainFakeSource{
+		src:     registry.DockerHub,
+		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7, TagCount: 2}},
+		healthy: true,
+	}
+	cfg := &configpkg.Config{
+		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
+		EnableMetrics:  true,
+	}
+	marker := &mainFakeMarker{}
+	ready := &webhttp.Ready{}
+
+	markCollect(t.Context(), cfg, []collect.Source{source}, marker, ready)
+	if !marker.Healthy() {
+		t.Error("markCollect first cycle left marker unhealthy, want healthy")
+	}
+	if !ready.Ready() {
+		t.Error("markCollect first cycle left readiness false, want true")
+	}
+
+	source.entries = nil
+	source.healthy = false
+	markCollect(t.Context(), cfg, []collect.Source{source}, marker, ready)
+
+	if marker.Healthy() {
+		t.Error("markCollect failed cycle left marker healthy, want unhealthy")
+	}
+	if !ready.Ready() {
+		t.Error("markCollect failed cycle cleared latched readiness")
+	}
+	rec := httptest.NewRecorder()
+	obs.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rec.Body.String(); strings.Contains(body, `owner="o",registry="dockerhub",repo="app"`) {
+		t.Errorf("markCollect failed cycle left prior image series in metrics:\n%s", body)
 	}
 }
 
@@ -173,9 +198,8 @@ func TestRecoverAndMarkUnhealthy_noPanicLeavesMarker(t *testing.T) {
 	}
 }
 
-// TestLogConfig_noReposLogsError drives the no-repos ERROR branch that
-// TestLogConfig's comment claims to cover but does not (it passes a populated
-// *Config). With zero repos configured, logConfig must emit the operator-facing
+// TestLogConfig_noReposLogsError drives logConfig's no-repos ERROR
+// branch. With zero repos configured, logConfig must emit the operator-facing
 // "no repos configured" ERROR that warns the healthcheck will fail after the
 // first collect. Swaps slog.Default to capture, so no t.Parallel.
 func TestLogConfig_noReposLogsError(t *testing.T) {

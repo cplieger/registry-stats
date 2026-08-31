@@ -36,13 +36,14 @@ import (
 )
 
 func main() {
-	// CLI health probe for Docker healthcheck (distroless has no curl/wget).
-	// Checks for a marker file instead of making an HTTP request — no port
-	// needed. Polling mode arms a freshness deadline: the collect loop
-	// refreshes the marker each cycle, so a marker older than 3 intervals
-	// means a wedged loop and a restart fixes it. One-shot mode
-	// (POLL_INTERVAL_HOURS=0) disables the deadline (WithMaxAge(0) is a
-	// no-op): after the single collect the marker is deliberately static.
+	// CLI health probe for the Docker healthcheck: a marker file, so no port
+	// and no curl in the distroless image. The marker is UPDATED when a cycle
+	// completes — refreshed when it produced at least one image, removed when
+	// it produced none — so polling mode arms a freshness deadline that reports
+	// unhealthy when no data-producing cycle has completed within 3 intervals
+	// (a wedged loop is the case it exists to catch). One-shot mode
+	// (POLL_INTERVAL_HOURS=0) disables the deadline (WithMaxAge(0) is a no-op):
+	// after the single collect the marker is deliberately static.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
 		// Warnings discarded: the probe runs many times an hour against the
 		// same environment, and the serving process already reports a
@@ -107,6 +108,11 @@ func run() error {
 	// synchronously here rather than late inside a serve goroutine.
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.ListenAddr)
 	if err != nil {
+		if webhttp.CausedByCancellation(ctx, err) {
+			// A signal during address resolution is a clean stop; a genuine
+			// bind failure remains an error.
+			return nil
+		}
 		return fmt.Errorf("http server bind on %s: %w", cfg.ListenAddr, err)
 	}
 	slog.Info("http server starting", "addr", ln.Addr().String())
@@ -177,43 +183,62 @@ func run() error {
 		})
 	}
 
-	// onShutdown runs once ctx is cancelled and in-flight requests have
-	// drained: flip both signals unhealthy so nothing new is routed, then
-	// bound the wait for the background collects. It shares webhttp.Run's
-	// shutdown-grace deadline.
-	onShutdown := func(shutdownCtx context.Context) {
+	// preDrain runs once ctx is cancelled and strictly BEFORE the HTTP
+	// drain, so both signals report the stopping state for the whole
+	// drain rather than after it: GET /api/health is read over the
+	// listener that is still open here, and the marker file is read
+	// out-of-process by `registry-stats health`.
+	preDrain := func(context.Context) {
 		slog.Info("shutting down", "cause", context.Cause(ctx))
 		ready.Set(false)
 		marker.Set(false)
-		waitWithTimeout(shutdownCtx, &bg)
+	}
+
+	// bgDone closes once every background collect goroutine has returned.
+	// It is started HERE rather than in the teardown because
+	// webhttp.AwaitDone's post-expiry recheck can only see a channel a
+	// scheduled waiter has already closed; a waiter spawned at teardown time
+	// has not run, and an already-expired teardown context is a normal
+	// shutdown state. The waiter exits when bg reaches zero: RunLoop returns
+	// on cancellation, one-shot returns after its cycle.
+	bgDone := make(chan struct{})
+	go func() {
+		bg.Wait()
+		close(bgDone)
+	}()
+
+	// onShutdown runs after the drain. Both signals are already unhealthy
+	// and an interrupted cycle publishes nothing (see markCollect), so all
+	// that remains is bounding the wait for the background collect. It
+	// shares webhttp.Run's shutdown-grace deadline.
+	onShutdown := func(shutdownCtx context.Context) {
+		if !webhttp.AwaitDone(shutdownCtx, bgDone) {
+			slog.Warn("collect goroutines did not finish before shutdown deadline")
+		}
 	}
 
 	// Run serves in the foreground until ctx is cancelled (SIGINT/SIGTERM)
 	// or Serve fails. A serve error is returned as non-nil (which main turns
 	// into a non-zero exit); a clean signal-driven shutdown returns nil.
-	return webhttp.Run(ctx, srv, ln, onShutdown, webhttp.WithShutdownGrace(10*time.Second))
+	return webhttp.Run(ctx, srv, ln, onShutdown,
+		webhttp.WithShutdownGrace(10*time.Second),
+		webhttp.WithPreDrain(preDrain))
 }
 
 // runCollect executes a single collection cycle against the shared
-// composition-root dependencies and returns the boolean healthcheck
-// signal: true iff collect.Run produced a non-empty image set.
-//
-// Return semantics:
-//
-//	true  — data collected successfully (fully healthy or partial-
-//	        success with at least one registry's data).
-//	false — nothing collected: empty-cycle guard fired or all
-//	        collections failed.
+// composition-root dependencies and returns the healthcheck signal:
+// true iff collect.Run produced a non-empty image set, so an
+// empty-cycle guard and an all-registries-failed cycle both read
+// false.
 func runCollect(
 	ctx context.Context,
 	cfg *configpkg.Config,
 	sources []collectpkg.Source,
 ) bool {
 	start := time.Now()
-	images, _ := collectpkg.Run(ctx, collectpkg.Options{
+	images := collectpkg.Run(ctx, collectpkg.Options{
 		Sources: sources,
 		Logger:  slog.Default(),
-		Now:     time.Now,
 		RefsFor: func(name string) []registry.RepoRef { return refsFor(cfg, name) },
 	})
 	// Record cycle duration. Per-source collect counters are incremented in
@@ -221,13 +246,16 @@ func runCollect(
 	// configured refs), keeping collects_total and collect_errors_total over
 	// the same denominator.
 	obs.CollectDuration.Observe(time.Since(start).Seconds())
-	if cfg.EnableMetrics {
+	// SetImage diffs against the previous pass and deletes every label key
+	// absent from this one, so a cancelled cycle — which has no complete pass
+	// to diff against — would delete the missing sources' series while
+	// webhttp is still inside its grace window and a scrape can still land.
+	// The gauges keep their last good values until the process exits.
+	if ctx.Err() == nil {
 		obs.SetImage(images)
 	}
 	// Health marker = "at least one repo collected this cycle", per the documented contract that
-	// partial failures stay healthy as long as one repo succeeds (README/CONTRIBUTING). This is
-	// intentionally NOT collect.Run's healthy verdict (!degraded), which is stricter and would flip
-	// the marker unhealthy on any partial failure. Run's verdict drives only its partial-failure WARN.
+	// partial failures stay healthy as long as one repo succeeds (README/CONTRIBUTING).
 	return len(images) > 0
 }
 
@@ -261,12 +289,12 @@ func configuredSources(cfg *configpkg.Config, sources []collectpkg.Source) []str
 }
 
 // markCollect runs one collection cycle and reflects the outcome onto the
-// two health signals. The liveness marker tracks each cycle's result (a
-// cycle collecting at least one repo keeps it healthy; an all-fail cycle
-// clears it). The readiness flag only ever latches true — set once the
-// first cycle produces data, so GET /api/health advertises serving-
-// readiness once data exists — and is cleared solely on shutdown, never by
-// a later transient collect failure.
+// two health signals. The liveness marker tracks each cycle's result: a
+// cycle that collected at least one repo keeps it healthy, one that
+// collected nothing clears it. The readiness flag only ever latches true —
+// set once the first cycle produces data — and is cleared solely on
+// shutdown. Once ctx is done nothing is published: the shutdown teardown
+// has already set both signals and must be their last writer.
 func markCollect(
 	ctx context.Context,
 	cfg *configpkg.Config,
@@ -275,6 +303,9 @@ func markCollect(
 	ready *webhttp.Ready,
 ) {
 	ok := runCollect(ctx, cfg, sources)
+	if ctx.Err() != nil {
+		return
+	}
 	marker.Set(ok)
 	if ok {
 		ready.Set(true)
@@ -306,29 +337,6 @@ func recoverAndMarkUnhealthy(marker healthSignal) {
 	}
 }
 
-// waitWithTimeout blocks until wg's goroutines finish or ctx is done,
-// whichever comes first. Used in the shutdown teardown to bound how long
-// a wedged collect goroutine can hold the server past the grace deadline.
-//
-// webhttp.AwaitDone owns the wait, including the recheck the bare two-case
-// select got wrong: webhttp.Run derives the teardown context from the SAME
-// deadline srv.Shutdown just spent, so a drain that used the whole grace hands
-// this function an ALREADY-EXPIRED context, and a select with both cases ready
-// picks pseudo-randomly — reporting collect goroutines that DID finish as
-// wedged, roughly half the time. AwaitDone re-checks completion after ctx
-// fires, so completion wins. The policy stays here: whether to warn, and in
-// whose words.
-func waitWithTimeout(ctx context.Context, wg *sync.WaitGroup) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	if !webhttp.AwaitDone(ctx, done) {
-		slog.Warn("collect goroutines did not finish before shutdown deadline")
-	}
-}
-
 // logConfig logs the active configuration at startup (no secrets to redact).
 func logConfig(cfg *configpkg.Config) {
 	for _, r := range cfg.DockerHubRepos {
@@ -340,6 +348,7 @@ func logConfig(cfg *configpkg.Config) {
 	slog.Info("configuration loaded",
 		"docker_hub_refs", len(cfg.DockerHubRepos),
 		"ghcr_refs", len(cfg.GHCRRepos),
+		"enable_metrics", cfg.EnableMetrics,
 		"poll_interval", cfg.PollInterval)
 	if len(cfg.DockerHubRepos) == 0 && len(cfg.GHCRRepos) == 0 {
 		slog.Error("no repos configured; healthcheck will fail after first collect",

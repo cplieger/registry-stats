@@ -12,26 +12,24 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Options configures GHCR-specific scraper policy. Its zero value
-// selects production defaults (DefaultMinPacing + DefaultPacingJitter)
-// so main.go can pass ghcr.Options{} and preserve the pre-c3 2-5s
-// per-package pacing byte-for-byte.
+// Options configures GHCR-specific scraper policy. Its zero value selects
+// production defaults (DefaultMinPacing + DefaultPacingJitter).
 type Options struct {
 	// Logger receives the client's warnings; nil falls back to slog.Default.
 	Logger *slog.Logger
 	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
 	// defaults.
 	RetryOpts []httpx.GetOption
-	// MinPacing and PacingJitter space out consecutive GHCR scrape requests;
+	// MinPacing and PacingJitter space out consecutive GHCR requests;
 	// zero selects DefaultMinPacing / DefaultPacingJitter.
 	MinPacing    time.Duration
 	PacingJitter time.Duration
 }
 
 // DefaultMinPacing and DefaultPacingJitter are the production pacing
-// values applied when an Options field is zero. collect() adds a
-// uniformly distributed jitter in [0, DefaultPacingJitter) to
-// DefaultMinPacing to space out consecutive GHCR scrape requests.
+// values applied when an Options field is zero. Each request waits
+// DefaultMinPacing plus a uniformly distributed jitter in
+// [0, DefaultPacingJitter).
 const (
 	DefaultMinPacing    = 2 * time.Second
 	DefaultPacingJitter = 3 * time.Second
@@ -42,15 +40,15 @@ const (
 type Client struct {
 	http *http.Client
 	// opts is the ONE place an optional lives. Its Logger is resolved by
-	// NewClient, so reads need no nil check; do not mirror a field out of it
-	// (that was the old shape, and it left two reachable paths to one value).
+	// NewClient, so reads need no nil check.
 	opts Options
+	// pageCap overrides maxListingPages when non-zero; 0 = the default.
+	// Written only by the in-package test that exercises the listing bound.
+	pageCap int
 }
 
 // NewClient returns a Client that uses the provided *http.Client for all
-// outbound requests, configured by opts. The old signature carried an
-// Options struct AND three positional optionals; one mechanism now carries
-// every optional, so a call site cannot mix the two.
+// outbound requests, configured by opts.
 func NewClient(client *http.Client, opts Options) *Client {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -63,58 +61,38 @@ func NewClient(client *http.Client, opts Options) *Client {
 // (registry.GHCR.String()).
 func (c *Client) Source() registry.ID { return registry.GHCR }
 
-// Collect gathers download counts for every ref in refs. Wildcard refs
-// are expanded via buildPackageList before scraping; explicit refs are
-// scraped as-is. Packages whose scrape fails are NOT appended so a
-// transient error cannot inject a false zero into the exposed gauge
-// (the per-day delta is computed downstream by Prometheus/Mimir, not here).
-//
-// entries carry the GHCR-relevant fields (Owner, Repo, and the scraped
-// download count in Pulls); TagCount stays 0 — GHCR exposes no tag
-// count, so no image_tags series is emitted for its packages. attempted
-// counts per-package scrape attempts (listing failures do not contribute
-// to the per-package health ratio). healthy is true when there were no
-// per-package scrape failures, or package failures were at most half
-// of the attempts (a minority or a tie); see pkgHealthy.
+// Collect gathers download counts for every ref in refs. Wildcard refs are
+// expanded through the owner's packages listing before scraping; explicit
+// refs are scraped as-is. A package whose scrape fails is NOT appended, so
+// a transient error cannot inject a false zero into the exposed gauge, and
+// TagCount stays 0 (GHCR exposes no tag count). attempted counts
+// per-package scrape attempts; a package a shutdown interrupted counts as
+// neither attempt nor failure. healthy is false when a wildcard listing
+// wholly failed, or per-package failures were a majority (see cycleHealthy).
 func (c *Client) Collect(
 	ctx context.Context,
 	refs []registry.RepoRef,
 ) (entries []registry.Entry, attempted int, healthy bool) {
-	return collect(ctx, c, refs)
-}
-
-// collect is the shared implementation behind Client.Collect. Returns
-// the pre-refactor result shape plus attempted count (total scrapes
-// across successes and failures) so the caller can decide its return
-// values.
-func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results []registry.Entry, attempted int, healthy bool) {
-	failures := 0
+	pkgFailures := 0
 	pkgParseFailures := 0
-	total := 0
-	packages, listingFailures, listingParseFailures := buildPackageList(ctx, c.http, c.opts.Logger, refs, c.opts.RetryOpts)
-	failures += listingFailures
+	packages, listingWhollyFailed, listingParseFailures := c.buildPackageList(ctx, refs)
 
 	for _, ref := range packages {
-		// Space out every request (including the first) with randomized
-		// delay to avoid rate limits. The Docker Hub pagination that
-		// usually runs just before GHCR can queue many consecutive
-		// requests, so leading pacing smooths the transition between
-		// registries.
-		timer := time.NewTimer(c.pacingDelay())
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			c.opts.Logger.Warn("ghcr collection interrupted by context cancellation",
-				"collected", len(results), "remaining", len(packages)-total,
-				"error", ctx.Err())
-			return results, total, pkgHealthy(failures, listingFailures, total)
-		case <-timer.C:
+		if ctx.Err() != nil {
+			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
+			return entries, attempted, cycleHealthy(pkgFailures, attempted, listingWhollyFailed)
+		}
+		res := c.scrapePackage(ctx, ref)
+		if res.cancelled {
+			// The stop landed inside this scrape (its pacing wait or the
+			// request itself), so it is not an attempt that failed.
+			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
+			return entries, attempted, cycleHealthy(pkgFailures, attempted, listingWhollyFailed)
 		}
 
-		total++
-		res := c.scrapePackage(ctx, ref)
+		attempted++
 		if !res.ok {
-			failures++
+			pkgFailures++
 			if res.parseFailed {
 				pkgParseFailures++
 			}
@@ -125,36 +103,37 @@ func collect(ctx context.Context, c *Client, refs []registry.RepoRef) (results [
 			// negative daily delta.
 			continue
 		}
-		results = append(results, res.stat)
+		entries = append(entries, res.stat)
 	}
 
-	// Surface listing-page format changes even when no packages were
-	// scraped. The per-package majority check below requires total > 0,
-	// which is false when the listing itself failed, so listing format
-	// changes need their own signal.
+	// Surface listing-page format changes even when no package was scraped:
+	// the per-package majority check below counts scrapes only, so it cannot
+	// fire when none was attempted.
 	if listingParseFailures > 0 {
-		c.opts.Logger.Error("ghcr package listing HTML format may have changed",
+		c.opts.Logger.Error("ghcr owner listing yielded no packages: owner has none, or the listing markup changed",
 			"listing_parse_failures", listingParseFailures,
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
-	// Surface a format-change ERROR as soon as a majority of scrapes
-	// hit format errors, not only when all of them do. Log-based
-	// alerting can then trigger proactively before the registry goes
-	// fully dark.
-	// Per-package parse failures only: listing parse failures have their own
-	// dedicated ERROR above and are not counted in total. Mirrors pkgHealthy,
-	// which already subtracts listingFailures from its ratio.
-	if total > 0 && pkgParseFailures*2 > total {
+	// A MAJORITY rather than all, so log-based alerting can trigger before
+	// the registry goes fully dark. Listing drift has its own ERROR above.
+	if pkgParseFailures*2 > attempted {
 		c.opts.Logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
-			"total", total, "parse_failures", pkgParseFailures,
+			"total", attempted, "parse_failures", pkgParseFailures,
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
-	return results, total, pkgHealthy(failures, listingFailures, total)
+	return entries, attempted, cycleHealthy(pkgFailures, attempted, listingWhollyFailed)
 }
 
-// pacingDelay returns the inter-request delay for GHCR scrapes: the
+// logInterrupted records what a cancelled cycle cost: the packages already
+// collected, and the ones it never reached.
+func (c *Client) logInterrupted(collected, remaining int, err error) {
+	c.opts.Logger.Warn("ghcr collection interrupted by context cancellation",
+		"collected", collected, "remaining", remaining, "error", err)
+}
+
+// pacingDelay returns the inter-request delay for GHCR requests: the
 // configured minimum (DefaultMinPacing when unset) plus uniform jitter
 // in [0, jitter) (DefaultPacingJitter when unset). Because both defaults
 // are positive and replace any non-positive configured value, the jitter
@@ -173,13 +152,23 @@ func (c *Client) pacingDelay() time.Duration {
 	return pacingMin + jitter
 }
 
+// listingPageCap resolves c.pageCap against the default listing bound.
+func (c *Client) listingPageCap() int {
+	if c.pageCap > 0 {
+		return c.pageCap
+	}
+	return maxListingPages
+}
+
 // scrapeResult is the outcome of one package scrape: stat is valid only
-// when ok is true; parseFailed marks an ErrHTMLFormatChanged so the
-// caller can tally format drift separately from transport failures.
+// when ok is true; parseFailed marks an errHTMLFormatChanged so the caller
+// can tally format drift separately from transport failures, and cancelled
+// marks a shutdown, which is neither an attempt nor a failure.
 type scrapeResult struct {
 	stat        registry.Entry
 	ok          bool
 	parseFailed bool
+	cancelled   bool
 }
 
 // scrapePackage scrapes a single package's download count and classifies
@@ -189,20 +178,21 @@ type scrapeResult struct {
 // error must not inject a false zero into the exposed gauge (the per-day
 // delta is computed downstream by Prometheus/Mimir, not here).
 func (c *Client) scrapePackage(ctx context.Context, ref registry.RepoRef) scrapeResult {
-	downloads, err := scrapeDownloads(ctx, c.http, ref.Owner, ref.Repo, c.opts.RetryOpts)
+	downloads, err := c.scrapeDownloads(ctx, ref.Owner, ref.Repo)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// In-flight scrape cancelled by shutdown/deadline; expected, log at Debug not
-			// WARN (mirrors the expandWildcard listing site). Failure classification unchanged.
+			// Cancelled by shutdown/deadline, either waiting to be paced or in
+			// flight; expected, so it is recorded at Debug and the caller ends
+			// the cycle rather than counting a failure.
 			c.opts.Logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo, "error", err)
-			return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
+			return scrapeResult{cancelled: true}
 		}
 		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
 		if errors.Is(err, httpx.ErrRateLimited) {
 			c.opts.Logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
 				"hint", "consider increasing pacing delay or reducing package count")
 		}
-		return scrapeResult{parseFailed: errors.Is(err, ErrHTMLFormatChanged)}
+		return scrapeResult{parseFailed: errors.Is(err, errHTMLFormatChanged)}
 	}
 	c.opts.Logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
 	return scrapeResult{
@@ -211,21 +201,11 @@ func (c *Client) scrapePackage(ctx context.Context, ref registry.RepoRef) scrape
 	}
 }
 
-// pkgHealthy reports the per-package health verdict. Listing failures are
-// excluded from the ratio (they are folded into failures, then subtracted
-// here): when no packages could be listed there is no per-package data to
-// judge by, so the verdict defaults to healthy and the empty-snapshot
-// logic handles the listing-failure case separately. Otherwise a cycle is
-// healthy when there were no package failures, or they were a minority.
-func pkgHealthy(failures, listingFailures, total int) bool {
-	pkgFailures := failures - listingFailures
-	// Healthy when package failures are not a majority (at most half),
-	// matching the sibling dockerhub.Degraded boundary (healthy when
-	// len(results)*2 >= attempted, i.e. failures are at most half) and the
-	// in-file per-package parse-majority check (pkgParseFailures*2 > total),
-	// both feeding the same collect_errors_total ratio. The prior
-	// pkgFailures<total only flagged a TOTAL GHCR outage, so
-	// collect_errors_total{source="ghcr"} silently under-reported a
-	// majority-but-not-total scrape failure.
-	return pkgFailures == 0 || (total > 0 && pkgFailures*2 <= total)
+// cycleHealthy reports the cycle verdict: healthy when no wildcard owner
+// listing wholly failed and per-package scrape failures were at most half
+// of the attempts. A wholly-failed listing is unhealthy because an unknown
+// number of packages went uncollected and no exported series can show its
+// own absence — the state internal/dockerhub already reports unhealthy.
+func cycleHealthy(pkgFailures, total int, listingWhollyFailed bool) bool {
+	return !listingWhollyFailed && pkgFailures*2 <= total
 }

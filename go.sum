@@ -4,12 +4,12 @@ github.com/cplieger/health v1.6.0 h1:qgzslmEVq8asgMkEZ25arRZPazJRWsN7E8XJ6KgxMpg
 github.com/cplieger/health v1.6.0/go.mod h1:fGHTssNQpl2EjqRLxgs3n7bbj94gD5HDgi1KEk8cN0Q=
 github.com/cplieger/httpx/v5 v5.0.2 h1:v7azlVn+Sji3Kti1VANCkF+IGqslqP5C9QjsiZEPVoE=
 github.com/cplieger/httpx/v5 v5.0.2/go.mod h1:3ap2CAq592k7smKhe3lWrwklthtmJ6L4cIWMTMM8O10=
-github.com/cplieger/keyenc v1.0.6 h1:Ac/EoEY8Lgy4ZyTi9I4G4s00RBWGoOlI3RdsjGwHLRo=
-github.com/cplieger/keyenc v1.0.6/go.mod h1:9l4QSTuwTtYp2KYeYkvp2PXop12G5MqXeReqCqDlHWY=
 github.com/cplieger/metrics/v4 v4.0.0 h1:Ps4p3iDwEK9FsxNs94KfPeLBJrpN0xDaQi7hmahVq8I=
 github.com/cplieger/metrics/v4 v4.0.0/go.mod h1:UHgCGvnEbvrx5YCUKxUZcOQEkASPzkIuzi7gJS5jNNI=
 github.com/cplieger/pathinside/v2 v2.0.0 h1:UZxSiu3UBCCs+Xe0+Of+oTLyzL+4wchKO2tShGxK8b8=
 github.com/cplieger/pathinside/v2 v2.0.0/go.mod h1:XuMYE6rO3te8Yf6Zcy35PLMgDcWaIz3RglJatWPhHnU=
+github.com/cplieger/runesafe/v2 v2.0.0 h1:jEkFU2dbDxKLwgHag6l3gbSLpRNfkD8mMsdiCgu56wY=
+github.com/cplieger/runesafe/v2 v2.0.0/go.mod h1:X3avIOn44UaASh8QEhXDIKNWA4HLmSAZYWywNwpOYyE=
 github.com/cplieger/scheduler/v4 v4.0.1 h1:Jr5SA+EPEAYuYqFEPLXq1AMZ7GLRoIwNREL+BhBpkeQ=
 github.com/cplieger/scheduler/v4 v4.0.1/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
 github.com/cplieger/slogx v1.6.3 h1:1W8DxUwovnfbL1wjthdELHhw2gFH1FXaUcG34KjefIw=

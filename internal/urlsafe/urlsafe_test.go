@@ -2,6 +2,7 @@ package urlsafe
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -38,6 +39,25 @@ func TestIsSafeURLSegment_rejects_traversal_names(t *testing.T) {
 		t.Run(fmt.Sprintf("%q", tt.input), func(t *testing.T) {
 			if got := IsSafeURLSegment(tt.input); got != tt.want {
 				t.Errorf("IsSafeURLSegment(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSafeURLSegment_bounds_length(t *testing.T) {
+	tests := []struct {
+		name string
+		size int
+		want bool
+	}{
+		{name: "at the bound", size: maxSegmentBytes, want: true},
+		{name: "one over the bound", size: maxSegmentBytes + 1, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := strings.Repeat("a", tt.size)
+			if got := IsSafeURLSegment(input); got != tt.want {
+				t.Errorf("IsSafeURLSegment(%d chars) = %v, want %v", tt.size, got, tt.want)
 			}
 		})
 	}

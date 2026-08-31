@@ -21,7 +21,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 ### Why this design
 
 - **Stateless**: no on-disk persistence required. The app exposes current counts; time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `scheduler`, `slogx`, `envx`, and `keyenc` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, the poll loop, UTC logging, environment parsing, and the shared dedupe-key encoder. Small, auditable supply chain.
+- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `scheduler`, `slogx`, `envx`, and `runesafe` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, the poll loop, UTC logging, environment parsing, and the bound on scraped text reaching the log stream. Small, auditable supply chain.
 - **Distroless, rootless container**: runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
 - **Public repos only**: avoids credential management entirely.
 
@@ -56,7 +56,7 @@ services:
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
 
     ports:
-      - "9100:9100"
+      - "127.0.0.1:9100:9100"
 ```
 
 ## Configuration reference
@@ -115,7 +115,9 @@ Prometheus datasource; no plugins needed.
 
 1. Add a scrape target for `registry-stats:9100` in your collector
    (Prometheus, Alloy, or any Prometheus-compatible scraper); the shipped
-   alert rules assume `job="registry-stats"`
+   alert rules assume `job="registry-stats"`. The shipped compose example
+   publishes port 9100 on loopback, so a collector on another host needs
+   `"<trusted-ip>:9100:9100"` instead
 2. Import `grafana-dashboard.json` in Grafana
 3. Select your Prometheus/Mimir datasource when prompted
 
@@ -140,9 +142,9 @@ go quietly incomplete while no metric moves.
 | `RegistryStatsCollectStalled` | no collect cycle has completed in 3h, while the exporter is up and serving its last values | warning |
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
-| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, or no entry was usable at all | warning |
+| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, no entry was usable at all, or every ref resolved to nothing | warning |
 | `RegistryStatsCollectFailed` | the container logged an `ERROR`: a fetch or parse failure, a changed GHCR page, or a recovered panic | warning |
-| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing or a rate limit | warning |
+| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
 
 `RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,
 rather than absence over 3h directly. A counter that has just started carries
@@ -156,7 +158,10 @@ three `POLL_INTERVAL_HOURS`, and drop the rule in one-shot mode
 counts as healthy while most repos succeed, so a rate limit or a truncated owner
 listing takes images off `/metrics` without moving
 `registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info` default for
-that rule and for `RegistryStatsConfigRejected`: both key on `WARN` lines.
+that rule and for `RegistryStatsConfigRejected`'s every-cycle members: they key
+on `WARN` lines. `RegistryStatsConfigRejected` still catches a bad ref at any
+level, because config-parse warnings are emitted before the configured level
+applies.
 
 Thresholds and the `for:` windows are starting points. The scrape `job` label is
 yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
@@ -167,7 +172,7 @@ uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then refreshed after every collection cycle: a cycle that collects at least one repo keeps it, and a cycle in which every configured registry fails removes it. The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. In scheduled mode the probe also enforces a freshness deadline: a marker older than three poll intervals reports unhealthy, so a wedged collect loop gets restarted. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within three poll intervals, so a wedged collect loop gets restarted (a cycle that legitimately runs longer than that — a rate-limited registry, say — trips the same deadline). An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 

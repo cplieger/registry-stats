@@ -22,7 +22,7 @@ func capturingLogger(buf *bytes.Buffer) *slog.Logger {
 }
 
 // noMarkerServer serves HTML with no "Total downloads" marker for every
-// request, so ParseDownloads returns ErrHTMLFormatChanged (a parse
+// request, so parseDownloads returns errHTMLFormatChanged (a parse
 // failure) for any package scrape.
 func noMarkerServer(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -167,8 +167,8 @@ func TestCollect_noListingFailure_silent(t *testing.T) {
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
 	_, _, _ = c.Collect(t.Context(), refs)
 
-	if strings.Contains(buf.String(), "listing HTML format may have changed") {
-		t.Errorf("listing-format ERROR logged with zero listing parse failures; logs:\n%s", buf.String())
+	if strings.Contains(buf.String(), "owner listing yielded no packages") {
+		t.Errorf("listing-empty ERROR logged with zero listing parse failures; logs:\n%s", buf.String())
 	}
 }
 
@@ -185,15 +185,15 @@ func TestCollect_listingParseFailure_logsDrift(t *testing.T) {
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	_, _, _ = c.Collect(t.Context(), refs)
 
-	if !strings.Contains(buf.String(), "listing HTML format may have changed") {
-		t.Errorf("expected listing-format ERROR for a parse-failing wildcard listing; logs:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "owner listing yielded no packages") {
+		t.Errorf("expected listing-empty ERROR for a parse-failing wildcard listing; logs:\n%s", buf.String())
 	}
 }
 
 // TestCollect_noScrapes_noMajorityDrift verifies that when a wildcard
 // listing fails to parse (total stays 0 while parseFailures carries the
 // listing failure), the per-scrape majority ERROR stays silent: its
-// total>0 guard is false, so only the listing-format ERROR fires.
+// total>0 guard is false, so only the listing-empty ERROR fires.
 func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -258,13 +258,15 @@ func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 	}
 }
 
-// TestCollect_listingFailuresExcludedFromHealth verifies listing failures
-// are excluded from the per-package health ratio: a failing wildcard
-// listing plus one succeeding explicit scrape stays healthy, because
-// pkgFailures = failures - listingFailures = 0.
-func TestCollect_listingFailuresExcludedFromHealth(t *testing.T) {
+// TestCollect_whollyFailedListing_isUnhealthy verifies a wildcard listing
+// that yielded nothing flips the cycle unhealthy even when an explicit
+// scrape succeeded: an unknown number of packages went uncollected, and no
+// exported series can report its own absence, so collect_errors_total has
+// to move. Listing failures are still out of the per-package RATIO — they
+// are a separate arm of the verdict, not a subtraction.
+func TestCollect_whollyFailedListing_isUnhealthy(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /users/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
@@ -276,8 +278,8 @@ func TestCollect_listingFailuresExcludedFromHealth(t *testing.T) {
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
 	entries, _, healthy := c.Collect(t.Context(), refs)
 
-	if !healthy {
-		t.Error("Collect healthy = false, want true (listing failures excluded from package health)")
+	if healthy {
+		t.Error("Collect healthy = true, want false (the wildcard owner listing wholly failed)")
 	}
 	if len(entries) != 1 || entries[0].Pulls != 99 {
 		t.Fatalf("entries = %+v, want exactly one entry with Pulls=99", entries)
@@ -312,14 +314,14 @@ func TestCollect_minorityPackageFailures_healthy(t *testing.T) {
 // TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift pins the
 // pkgParseFailures arithmetic (parseFailures - listingParseFailures): a wildcard
 // whose listing page parse-fails (listingParseFailures=1) alongside a successful
-// explicit scrape (total=1) must fire ONLY the listing-format ERROR, never the
+// explicit scrape (total=1) must fire ONLY the listing-empty ERROR, never the
 // per-package majority ERROR. The lone parse failure belongs to the listing,
 // which has its own dedicated signal, so pkgParseFailures is 0 and the
 // per-package majority check (pkgParseFailures*2 > total) stays silent.
 func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /users/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>no package links here</html>`))
 	})
 	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
@@ -334,67 +336,64 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 	if attempted != 1 {
 		t.Fatalf("precondition: attempted = %d, want 1 (only the explicit pkg1 was scraped)", attempted)
 	}
-	if !healthy {
-		t.Errorf("healthy = false, want true (listing failures excluded; the one package scrape succeeded)")
+	if healthy {
+		t.Errorf("healthy = true, want false (the wildcard owner listing yielded no packages)")
 	}
 	if len(entries) != 1 || entries[0].Pulls != 99 {
 		t.Fatalf("entries = %+v, want exactly one entry with Pulls=99", entries)
 	}
 	logs := buf.String()
-	if !strings.Contains(logs, "listing HTML format may have changed") {
-		t.Errorf("expected listing-format ERROR for the parse-failing wildcard listing; logs:\n%s", logs)
+	if !strings.Contains(logs, "owner listing yielded no packages") {
+		t.Errorf("expected listing-empty ERROR for the parse-failing wildcard listing; logs:\n%s", logs)
 	}
 	if strings.Contains(logs, "majority of scrapes hit format errors") {
 		t.Errorf("per-package majority ERROR must not fire when the only parse failure is the listing (pkgParseFailures=0); logs:\n%s", logs)
 	}
 }
 
-// TestPkgHealthy unit-tests the pure per-package health verdict in
-// isolation from the HTTP-mock Collect pipeline. A cycle is healthy when
-// package failures are at most half of the scrapes (pkgFailures*2 <= total);
-// listing failures are excluded from the ratio (failures-listingFailures),
-// and an all-zero cycle (no scrapes, no failures) defaults to healthy. The
-// rows below pin every boundary outcome: empty, listing-only, exactly half,
-// a strict majority that is not a total outage, a full outage, a clear
-// minority, and the listing-exclusion arithmetic.
-func TestPkgHealthy(t *testing.T) {
+// TestCycleHealthy unit-tests the pure cycle verdict in isolation from the
+// HTTP-mock Collect pipeline. A cycle is healthy when no wildcard owner
+// listing wholly failed and package failures are at most half of the
+// scrapes (pkgFailures*2 <= total). The rows pin every boundary outcome:
+// empty, a wholly-failed listing with nothing scraped, exactly half, a
+// strict majority that is not a total outage, a full outage, and a clear
+// minority.
+func TestCycleHealthy(t *testing.T) {
 	tests := []struct {
-		name            string
-		failures        int
-		listingFailures int
-		total           int
-		want            bool
+		name                string
+		pkgFailures         int
+		total               int
+		listingWhollyFailed bool
+		want                bool
 	}{
-		{"no failures no scrapes is healthy", 0, 0, 0, true},
-		{"no failures with scrapes is healthy", 0, 0, 5, true},
-		{"listing failures only excluded stays healthy", 3, 3, 0, true},
-		{"sole package failure is a total outage", 1, 0, 1, false},
-		{"exactly half failures stays healthy", 1, 0, 2, true},
-		{"majority but not total is unhealthy", 2, 0, 3, false},
-		{"all packages failed is unhealthy", 3, 0, 3, false},
-		{"clear minority stays healthy", 1, 0, 4, true},
-		{"listing failure plus half package failures stays healthy", 3, 1, 4, true},
-		{"listing failure plus majority package failures is unhealthy", 4, 1, 4, false},
+		{name: "no failures no scrapes is healthy", want: true},
+		{name: "no failures with scrapes is healthy", total: 5, want: true},
+		{name: "a wholly failed listing is unhealthy", listingWhollyFailed: true},
+		{name: "a wholly failed listing is unhealthy even beside successful scrapes", total: 5, listingWhollyFailed: true},
+		{name: "sole package failure is a total outage", pkgFailures: 1, total: 1},
+		{name: "exactly half failures stays healthy", pkgFailures: 1, total: 2, want: true},
+		{name: "majority but not total is unhealthy", pkgFailures: 2, total: 3},
+		{name: "all packages failed is unhealthy", pkgFailures: 3, total: 3},
+		{name: "clear minority stays healthy", pkgFailures: 1, total: 4, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := pkgHealthy(tt.failures, tt.listingFailures, tt.total); got != tt.want {
-				t.Errorf("pkgHealthy(failures=%d, listingFailures=%d, total=%d) = %v, want %v",
-					tt.failures, tt.listingFailures, tt.total, got, tt.want)
+			if got := cycleHealthy(tt.pkgFailures, tt.total, tt.listingWhollyFailed); got != tt.want {
+				t.Errorf("cycleHealthy(pkgFailures=%d, total=%d, listingWhollyFailed=%v) = %v, want %v",
+					tt.pkgFailures, tt.total, tt.listingWhollyFailed, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestCollect_ContextCancelledDuringPacing pins collect's graceful-shutdown
-// path: when ctx is already cancelled, the per-package pacing select takes
-// the ctx.Done branch on the first iteration and returns immediately with
-// the results gathered so far, the attempted count, and the pkgHealthy
-// verdict for the partial counts, rather than blocking on the pacing timer
-// or panicking. MinPacing is an hour so the timer cannot fire before the
-// cancelled ctx wins the select, making the branch deterministic without a
-// real sleep; no HTTP request is issued because cancellation precedes the
-// first scrape (buildPackageList makes no network call for an explicit ref).
+// TestCollect_ContextCancelledDuringPacing pins Collect's graceful-shutdown
+// path: an already-cancelled ctx is caught at the top of the package loop, so
+// it returns immediately with the results gathered so far, the attempted
+// count and the cycle verdict, rather than blocking on a pacing wait or
+// panicking. MinPacing is an hour so nothing can complete first, making the
+// branch deterministic without a real sleep; no HTTP request is issued
+// because cancellation precedes the first scrape (buildPackageList makes no
+// network call for an explicit ref).
 func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 	c := NewClient(http.DefaultClient,
 		Options{MinPacing: time.Hour, PacingJitter: time.Nanosecond, RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
@@ -421,19 +420,21 @@ func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 // operator how much of the cycle a SIGTERM cost, so it has to shrink as
 // the cycle progresses rather than restate the list length.
 //
-// The handler cancels the context during the first package's scrape, so
-// the second iteration's pacing select takes the ctx.Done branch with one
-// of the two packages already attempted and one still unreached.
+// The stop is scheduled to land inside the SECOND package's pacing wait,
+// which is the widest window a signal can arrive in, so one of the two
+// packages is already collected and one is never reached. A package a stop
+// interrupted is neither attempted nor failed, so attempted stays at the
+// one that completed.
 //
 // synctest keeps it deterministic and free: the hour-long pacing costs no
-// wall time on the synthetic clock, and the second select cannot race its
-// timer, because an already-closed Done channel is the only ready case.
+// wall time on the synthetic clock, and the cancellation fires at a fixed
+// point on it rather than racing a response.
 func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			cancel()
 			_, _ = w.Write([]byte(downloadsHTML("5")))
 		}))
 
@@ -445,17 +446,60 @@ func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
 		})
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 
-		_, attempted, _ := c.Collect(ctx, refs)
+		// Between the first scrape (paced to t+1h) and the second (t+2h).
+		time.AfterFunc(90*time.Minute, cancel)
+		entries, attempted, healthy := c.Collect(ctx, refs)
 
-		if attempted != 1 {
-			t.Fatalf("Collect(2 refs, cancelled during the first scrape) attempted = %d, want 1", attempted)
+		if attempted != 1 || len(entries) != 1 {
+			t.Fatalf("Collect(2 refs, cancelled in the second pacing wait) = (%d entries, attempted %d), want (1, 1)",
+				len(entries), attempted)
+		}
+		if !healthy {
+			t.Error("Collect healthy = false, want true (a stop is not a package failure)")
 		}
 		logs := buf.String()
 		if !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
-			t.Fatalf("Collect(2 refs, cancelled during the first scrape) logged no interruption; logs:\n%s", logs)
+			t.Fatalf("Collect(2 refs, cancelled mid-cycle) logged no interruption; logs:\n%s", logs)
 		}
 		if !strings.Contains(logs, "remaining=1") {
 			t.Errorf("Collect(2 refs, 1 attempted) interruption log = %q, want it to carry remaining=1", logs)
+		}
+	})
+}
+
+// TestCollect_cancelledInPacingWait_isNotAFailure pins that the widest
+// window a SIGTERM can land in — the pacing wait before a scrape — is
+// reported as a stop rather than as a GHCR failure: nothing is counted
+// attempted, the cycle stays healthy so collect_errors_total does not move
+// on a redeploy, and the interruption WARN still names what was skipped.
+func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var buf bytes.Buffer
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("Collect issued a request, want the stop to land in the pacing wait first")
+		}))
+
+		c := NewClient(srv.Client(), Options{
+			MinPacing:    time.Hour,
+			PacingJitter: time.Nanosecond,
+			RetryOpts:    shortRetry(),
+			Logger:       capturingLogger(&buf),
+		})
+
+		time.AfterFunc(time.Minute, cancel)
+		entries, attempted, healthy := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+
+		if attempted != 0 || len(entries) != 0 {
+			t.Errorf("Collect(cancelled in the pacing wait) = (%d entries, attempted %d), want (0, 0)",
+				len(entries), attempted)
+		}
+		if !healthy {
+			t.Error("Collect healthy = false, want true (a stop is not a package failure)")
+		}
+		if logs := buf.String(); !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
+			t.Errorf("Collect(cancelled in the pacing wait) logged no interruption; logs:\n%s", logs)
 		}
 	})
 }

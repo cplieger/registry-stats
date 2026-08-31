@@ -117,16 +117,12 @@ var setMu sync.Mutex
 // disappeared instead of resetting the whole gauge. Guarded by setMu.
 var prevPulls, prevTags map[[3]string]bool
 
-// SetImage replaces the current image gauge data for one collect
-// cycle. Current values are Set in place first, then series absent from
-// this cycle are Deleted (diffed against the previous pass), so images
-// that disappear stop emitting. Unlike a Reset+Set pass, the gauges are
-// never observably empty mid-update: a concurrent /metrics scrape sees
-// every series with either its previous or its current cycle's value,
-// never a partially-populated set — so a scrape landing mid-update
-// cannot fake a pull-count regression to downstream alerting. (A scrape
-// may still straddle the per-series updates themselves — some series
-// fresh, some one cycle stale — which is benign for cumulative counts.)
+// SetImage replaces the image gauge data for one collect cycle: current
+// values are Set in place first, then series absent from this cycle are
+// Deleted (diffed against the previous pass), so images that disappear
+// stop emitting. The ORDER is the invariant — unlike a Reset+Set pass the
+// gauges are never observably empty mid-update, so a concurrent /metrics
+// scrape cannot fake a pull-count regression to downstream alerting.
 func SetImage(images []ImageMetric) {
 	setMu.Lock()
 	defer setMu.Unlock()
@@ -158,9 +154,9 @@ func SetImage(images []ImageMetric) {
 }
 
 // RecordHTTP records one HTTP request into the package HTTP metrics via the
-// library helper (caller-owned {method,path,status} label set). It takes
-// webhttp's RequestMetric, so the two string labels arrive named rather than
-// positional and this sink cannot transpose them.
+// library helper. The label values arrive named on webhttp's RequestMetric, so
+// nothing here derives them; the spread below is positional and must match the
+// {method, path, status} order declared on HTTPRequests.
 func RecordHTTP(m webhttp.RequestMetric) {
 	metrics.RecordHTTP(HTTPRequests, HTTPDuration, m.Latency, m.Method, m.Path, strconv.Itoa(m.Status))
 }

@@ -12,4 +12,6 @@ services:
       POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
 
     ports:
-      - "9100:9100"
+      # This endpoint has no authentication, so the example publishes it to this host only.
+      # For a collector on another host, publish on that trusted interface: "192.168.1.10:9100:9100", never "9100:9100".
+      - "127.0.0.1:9100:9100"

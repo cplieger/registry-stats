@@ -7,8 +7,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
 COPY internal/ internal/
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /registry-stats .
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7

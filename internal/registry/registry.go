@@ -38,9 +38,10 @@ const (
 	GHCR
 )
 
-// String returns the lowercase on-wire name of a registry ID.
-func (r ID) String() string {
-	switch r {
+// String returns the lowercase on-wire name of a registry ID. An unknown
+// or out-of-range ID renders as the empty string.
+func (id ID) String() string {
+	switch id {
 	case DockerHub:
 		return "dockerhub"
 	case GHCR:

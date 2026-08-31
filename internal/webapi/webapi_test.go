@@ -60,6 +60,23 @@ func TestNew_readinessEndpoint(t *testing.T) {
 	}
 }
 
+// TestNew_boundsRequestReadAndWrite pins the guarantee the library does not
+// make: webhttp leaves ReadTimeout and WriteTimeout unset, so dropping either
+// option turns a bounded request into an unbounded one with every other webapi
+// assertion still green. ReadHeaderTimeout and IdleTimeout are deliberately not
+// asserted: webhttp supplies non-zero defaults, and their exact values are not
+// part of this package's contract.
+func TestNew_boundsRequestReadAndWrite(t *testing.T) {
+	srv := New(Deps{Logger: testsupport.QuietLogger()})
+
+	if srv.ReadTimeout <= 0 {
+		t.Errorf("New().ReadTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout <= 0 {
+		t.Errorf("New().WriteTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.WriteTimeout)
+	}
+}
+
 // TestNew_appliesSecurityHeaders confirms the webhttp.SecurityHeaders baseline
 // is wired into New's middleware chain: every response carries nosniff, the
 // DENY frame guard, and the referrer policy, and neither CSP nor HSTS is set

@@ -8,31 +8,32 @@ import (
 
 // FuzzParseDownloads drives the production download-count parser with
 // arbitrary HTML. Invariant: it never returns a negative count without
-// an error — ParseDownloads rejects negative counts as format drift, so
+// an error — parseDownloads rejects negative counts as format drift, so
 // a non-negative count is the only successful outcome.
 func FuzzParseDownloads(f *testing.F) {
 	f.Add(`<span>Total downloads</span><h3 title="0">0</h3>`)
 	f.Add(`<span>Total downloads</span><h3 title="42">42</h3>`)
 	f.Add(`<span>Total downloads</span><h3 title="999999999">999999999</h3>`)
 	f.Add(`<span>Total downloads</span><div class="foo">bar</div><h3 title="176000">176K</h3>`)
+	f.Add(`<span>Total downloads</span><span title="1">rank</span><h3 title="27880">27.8K</h3>`)
 	f.Add("<div>nothing</div>")
 	f.Add(`<span>Total downloads</span><h3 title="abc">N/A</h3>`)
 	f.Add(`<span>Total downloads</span><h3 title="-5">-5</h3>`)
 	f.Add(`<span>Total downloads</span><h3 title="12345>`)
 	f.Add("")
 	f.Fuzz(func(t *testing.T, html string) {
-		count, err := ParseDownloads(html)
+		count, err := parseDownloads(html)
 		if err == nil && count < 0 {
-			t.Errorf("ParseDownloads(%q) = %d with nil error, want non-negative", html, count)
+			t.Errorf("parseDownloads(%q) = %d with nil error, want non-negative", html, count)
 		}
 	})
 }
 
 // FuzzParsePackageList drives the production package-list parser.
-// Invariants: (1) a nil error never accompanies an empty result
-// (ParsePackageList returns ErrHTMLFormatChanged when it finds nothing);
-// (2) every returned name passes IsSafeURLSegment, so a crafted page
-// cannot smuggle a path-traversal name into downstream URL construction.
+// Invariants: (1) every returned name passes IsSafeURLSegment, so a
+// crafted page cannot smuggle a path-traversal name into downstream URL
+// construction; (2) a reported refusal sample is itself a refused name,
+// so the bounded diagnostic cannot leak a name that was accepted.
 func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/app1">app1</a>`, "owner")
 	f.Add(`<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`, "o")
@@ -41,14 +42,14 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/good">good</a>`, "owner")
 	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">traversal</a>`, "owner")
 	f.Fuzz(func(t *testing.T, html, owner string) {
-		pkgs, err := ParsePackageList(html, owner)
-		if err == nil && len(pkgs) == 0 {
-			t.Errorf("ParsePackageList(%q, %q) returned nil error with 0 packages", html, owner)
-		}
+		pkgs, refused := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
 			if !urlsafe.IsSafeURLSegment(name) {
-				t.Errorf("ParsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
+				t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
 			}
+		}
+		if refused.Count > 0 && urlsafe.IsSafeURLSegment(refused.Sample) {
+			t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe segment", html, owner, refused.Sample)
 		}
 	})
 }

@@ -27,6 +27,9 @@ func TestParseRepoRefs(t *testing.T) {
 		{"a/b,owner/bad?repo,c/d", 2},
 		{"/norepo", 0},
 		{"noowner/", 0},
+		{"owner/*,owner/*", 1},
+		{"owner/a,owner/a", 1},
+		{"owner/*,owner/a", 2},
 	}
 	for _, tt := range tests {
 		got, _ := ParseRepoRefs(tt.input)
@@ -43,6 +46,32 @@ func TestParseRepoRefsWildcard(t *testing.T) {
 	}
 	if refs[1].Owner != "owner2" || refs[1].Repo != "*" {
 		t.Errorf("refs[1] = %+v, want owner2/*", refs[1])
+	}
+}
+
+func TestParseRepoRefs_acceptsOnlyExactWildcard(t *testing.T) {
+	for name, input := range map[string]string{
+		"star_prefix": "owner/*x",
+		"star_suffix": "owner/x*",
+		"double_star": "owner/**",
+	} {
+		t.Run(name, func(t *testing.T) {
+			refs, _ := ParseRepoRefs(input)
+			if len(refs) != 0 {
+				t.Errorf("ParseRepoRefs(%q) = %+v, want no refs", input, refs)
+			}
+		})
+	}
+
+	refs, warns := ParseRepoRefs("owner/*")
+	if len(warns) != 0 {
+		t.Fatalf("ParseRepoRefs(owner/*) warnings = %v, want none", warns)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("ParseRepoRefs(owner/*) refs = %+v, want one ref", refs)
+	}
+	if refs[0].Owner != "owner" || refs[0].Repo != "*" {
+		t.Errorf("ParseRepoRefs(owner/*) ref = %+v, want owner/*", refs[0])
 	}
 }
 
@@ -84,8 +113,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PollInterval != 1*time.Hour {
 		t.Errorf("PollInterval = %v, want 1h", cfg.PollInterval)
 	}
-	if cfg.ListenAddr != DefaultListenAddr {
-		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
+	if cfg.ListenAddr != defaultListenAddr {
+		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, defaultListenAddr)
 	}
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, slog.LevelInfo)
@@ -110,21 +139,6 @@ func TestLoadNegativeNumbers(t *testing.T) {
 	}
 }
 
-func TestLoadWildcard(t *testing.T) {
-	t.Setenv("DOCKERHUB_REPOS", "cplieger/*")
-	t.Setenv("GHCR_REPOS", "cplieger/*,cplieger/fclones")
-	t.Setenv("POLL_INTERVAL_HOURS", "1")
-
-	cfg, _ := Load()
-
-	if len(cfg.DockerHubRepos) != 1 || cfg.DockerHubRepos[0].Repo != "*" {
-		t.Errorf("DockerHubRepos = %+v, want [cplieger/*]", cfg.DockerHubRepos)
-	}
-	if len(cfg.GHCRRepos) != 2 {
-		t.Errorf("GHCRRepos len = %d, want 2", len(cfg.GHCRRepos))
-	}
-}
-
 // TestLoadZeroValues verifies that POLL_INTERVAL_HOURS=0 is a valid
 // value (one-shot mode), not coerced to the positive fallback.
 func TestLoadZeroValues(t *testing.T) {
@@ -137,34 +151,6 @@ func TestLoadZeroValues(t *testing.T) {
 	if cfg.PollInterval != 0 {
 		t.Errorf("PollInterval = %v, want 0 (one-shot mode)", cfg.PollInterval)
 	}
-}
-
-func TestLoad_poll_interval_clamped_to_max(t *testing.T) {
-	t.Setenv("POLL_INTERVAL_HOURS", "99999")
-	t.Setenv("DOCKERHUB_REPOS", "")
-	t.Setenv("GHCR_REPOS", "")
-
-	cfg, _ := Load()
-	const maxPollHours = 24 * 365
-	if cfg.PollInterval != time.Duration(maxPollHours)*time.Hour {
-		t.Errorf("PollInterval = %v, want %v (clamped)", cfg.PollInterval, time.Duration(maxPollHours)*time.Hour)
-	}
-}
-
-// Property-based tests exercising the full surface of ParseRepoRefs.
-func TestParseRepoRefs_never_panics(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		input := rapid.String().Draw(t, "input")
-		refs, _ := ParseRepoRefs(input)
-		for _, ref := range refs {
-			if ref.Owner == "" {
-				t.Errorf("ParseRepoRefs(%q) produced empty owner", input)
-			}
-			if ref.Repo == "" {
-				t.Errorf("ParseRepoRefs(%q) produced empty repo", input)
-			}
-		}
-	})
 }
 
 func TestParseRepoRefs_output_always_safe(t *testing.T) {
@@ -204,7 +190,7 @@ func warningsContain(warns []Warning, substr string) bool {
 // into prose would break any Loki filter or alert keyed on the attribute
 // rather than the message text.
 func TestWarningsCarryStructuredAttrs(t *testing.T) {
-	t.Setenv("DOCKERHUB_REPOS", "not-a-ref")
+	t.Setenv("DOCKERHUB_REPOS", "not-a-ref,owner/bad?repo")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
 	t.Setenv("LOG_LEVEL", "bogus")
@@ -215,6 +201,7 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {"value", "notanumber"},
 		"invalid LOG_LEVEL, using default":                     {"value", "bogus", "default", "info"},
 		"skipping invalid repo ref":                            {"input", "not-a-ref", "expected", "owner/repo or owner/*"},
+		"skipping repo ref with unsafe characters":             {"input", "owner/bad?repo"},
 	}
 	got := make(map[string][]any, len(warns))
 	for _, w := range warns {
@@ -285,6 +272,8 @@ func TestLoad_EnableMetrics(t *testing.T) {
 		{"true", true},
 		{"1", true},
 		{"yes", true},
+		{"no", true},
+		{"off", true},
 		{"", true},
 		{"false", false},
 		{"FALSE", false},
@@ -297,6 +286,40 @@ func TestLoad_EnableMetrics(t *testing.T) {
 			cfg, _ := Load()
 			if cfg.EnableMetrics != tt.want {
 				t.Errorf("Load(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoad_ListenAddr_trims verifies edge whitespace comes off LISTEN_ADDR
+// before the bind (an untrimmed " :9100" resolves the padding as a hostname)
+// and that the normalization is reported rather than silent.
+func TestLoad_ListenAddr_trims(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      string
+		want     string
+		wantWarn int
+	}{
+		{"leading_space", " :9100", ":9100", 1},
+		{"whitespace_only", "   ", defaultListenAddr, 1},
+		{"already_clean", ":9100", ":9100", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LOG_LEVEL"} {
+				t.Setenv(key, "")
+			}
+			t.Setenv("LISTEN_ADDR", tt.env)
+
+			cfg, warns := Load()
+
+			if cfg.ListenAddr != tt.want {
+				t.Errorf("Load(LISTEN_ADDR=%q).ListenAddr = %q, want %q", tt.env, cfg.ListenAddr, tt.want)
+			}
+			if len(warns) != tt.wantWarn {
+				t.Errorf("Load(LISTEN_ADDR=%q) returned %d warnings, want %d (warns=%v)",
+					tt.env, len(warns), tt.wantWarn, warns)
 			}
 		})
 	}
@@ -324,25 +347,6 @@ func TestLoad_LogLevel(t *testing.T) {
 				t.Errorf("Load(LOG_LEVEL=%q).LogLevel = %v, want %v", tt.env, cfg.LogLevel, tt.want)
 			}
 		})
-	}
-}
-
-// TestLoad_invalidLogLevel_warns verifies an unrecognized LOG_LEVEL is
-// surfaced with a warning (not silently swallowed) while still falling back to
-// Info — matching the app's own warn-and-default handling of a malformed
-// POLL_INTERVAL_HOURS. Reuses captureClampLog to observe the warning.
-func TestLoad_invalidLogLevel_warns(t *testing.T) {
-	t.Setenv("DOCKERHUB_REPOS", "")
-	t.Setenv("GHCR_REPOS", "")
-	t.Setenv("LOG_LEVEL", "bogus")
-
-	cfg, warns := Load()
-
-	if cfg.LogLevel != slog.LevelInfo {
-		t.Errorf("Load(LOG_LEVEL=bogus).LogLevel = %v, want Info (fallback)", cfg.LogLevel)
-	}
-	if !warningsContain(warns, "invalid LOG_LEVEL") {
-		t.Errorf("invalid LOG_LEVEL returned no warning, want one (warns=%v)", warns)
 	}
 }
 

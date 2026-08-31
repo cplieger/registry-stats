@@ -1,10 +1,6 @@
-package dockerhub_test
+package dockerhub
 
-import (
-	"testing"
-
-	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
-)
+import "testing"
 
 // FuzzDockerHubRepoUnmarshal drives the production single-repo metadata
 // parser with arbitrary bytes. The Docker Hub response is untrusted
@@ -26,12 +22,12 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":1,"pull_count":2}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := dockerhub.ParseRepoMeta(data)
+		n, err := parseRepoMeta(data)
 		if err != nil {
 			return
 		}
 		if n < 0 {
-			t.Errorf("ParseRepoMeta(%q) = %d with nil error, want errors on negative counts", data, n)
+			t.Errorf("parseRepoMeta(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }
@@ -56,19 +52,19 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, repos, err := dockerhub.ParseRepoListPage(data, owner)
+		repos, _, err := parseRepoListPage(data, owner)
 		if err != nil {
 			return
 		}
 		for _, r := range repos {
 			if r.Owner != owner {
-				t.Errorf("ParseRepoListPage(%q) produced entry with owner %q, want %q", data, r.Owner, owner)
+				t.Errorf("parseRepoListPage(%q) produced entry with owner %q, want %q", data, r.Owner, owner)
 			}
 			if r.Repo == "" {
-				t.Errorf("ParseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
+				t.Errorf("parseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
 			}
 			if r.Pulls < 0 {
-				t.Errorf("ParseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
+				t.Errorf("parseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
 			}
 		}
 	})
@@ -91,12 +87,12 @@ func FuzzDockerHubTagCountUnmarshal(f *testing.F) {
 	f.Add([]byte(``))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := dockerhub.ParseTagCount(data)
+		n, err := parseTagCount(data)
 		if err != nil {
 			return
 		}
 		if n < 0 {
-			t.Errorf("ParseTagCount(%q) = %d with nil error, want errors on negative counts", data, n)
+			t.Errorf("parseTagCount(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }
