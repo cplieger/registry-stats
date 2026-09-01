@@ -1,45 +1,31 @@
-// Package registry holds the pure domain types shared across registry-stats
-// packages: the flat per-image Entry a source emits, the owner/repo RepoRef
-// parsed from env config, and the typed registry ID. Types here carry no
-// behavior beyond ID.String; nothing in this package is ever serialized
-// (v2 is stateless). Named for the domain it describes — container
-// registries — not "model".
+// Package registry holds domain types shared across registry-stats packages.
 package registry
 
-// Entry is the flat per-image record a source emits for
-// one collected image: the owner/repo label parts kept separate (they
-// feed the {registry,owner,repo} gauge labels directly, without a
-// join/split round-trip), the cumulative pull/download count, and the
-// repo's total tag count. TagCount 0 means "emit no image_tags series
-// this cycle": GHCR never populates it, and Docker Hub leaves it 0 when
-// the count fetch fails or the repo genuinely has no tags.
+// Entry is one collected image. TagCount is nil when no count was fetched this
+// cycle or the registry does not publish one; a pointed-to zero is measured.
 type Entry struct {
 	Owner    string
 	Repo     string
 	Pulls    int64
-	TagCount int
+	TagCount *int
 }
 
-// RepoRef is an owner/repo pair parsed from env var input. Repo is "*" for
-// wildcard refs that expand at collection time.
+// RepoRef is an owner/repository pair. Repo is "*" for refs expanded at collection time.
 type RepoRef struct {
 	Owner string
 	Repo  string
 }
 
-// ID is the typed identity of a container registry that registry-stats
-// scrapes.
+// ID identifies a container registry.
 type ID uint8
 
-// ID values.
 const (
 	Unknown ID = iota
 	DockerHub
 	GHCR
 )
 
-// String returns the lowercase on-wire name of a registry ID. An unknown
-// or out-of-range ID renders as the empty string.
+// String returns the lowercase wire name; unknown IDs return an empty string.
 func (id ID) String() string {
 	switch id {
 	case DockerHub:

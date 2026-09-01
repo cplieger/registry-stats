@@ -1,6 +1,7 @@
 package ghcr
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
@@ -30,25 +31,31 @@ func FuzzParseDownloads(f *testing.F) {
 }
 
 // FuzzParsePackageList drives the production package-list parser.
-// Invariants: (1) every returned name passes IsSafeURLSegment, so a
-// crafted page cannot smuggle a path-traversal name into downstream URL
-// construction; (2) a reported refusal sample is itself a refused name,
-// so the bounded diagnostic cannot leak a name that was accepted.
+// Invariants: (1) every "/"-separated element of a returned name is
+// non-empty and passes IsSafeURLSegment, so a crafted page cannot smuggle
+// path traversal into downstream URL construction; (2) a reported refusal
+// sample is bounded, and an untruncated sample is itself a refused raw name.
 func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/app1">app1</a>`, "owner")
 	f.Add(`<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`, "o")
 	f.Add("<html>nothing here</html>", "owner")
 	f.Add("", "owner")
 	f.Add(`<a href="/users/owner/packages/container/package/good">good</a>`, "owner")
-	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">traversal</a>`, "owner")
+	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">nested name</a>`, "owner")
+	f.Add(`<a href="/users/owner/packages/container/package/..%2f..%2f">traversal</a>`, "owner")
 	f.Fuzz(func(t *testing.T, html, owner string) {
 		pkgs, refused := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
-			if !urlsafe.IsSafeURLSegment(name) {
-				t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
+			for segment := range strings.SplitSeq(name, "/") {
+				if !urlsafe.IsSafeURLSegment(segment) {
+					t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
+				}
 			}
 		}
-		if refused.Count > 0 && urlsafe.IsSafeURLSegment(refused.Sample) {
+		if len(refused.Sample) > 128 {
+			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most 128", html, owner, len(refused.Sample))
+		}
+		if refused.Count > 0 && len(refused.Sample) < 128 && urlsafe.IsSafeURLSegment(refused.Sample) {
 			t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe segment", html, owner, refused.Sample)
 		}
 	})

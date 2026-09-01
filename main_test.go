@@ -1,20 +1,12 @@
 package main
 
-// main_test.go is intentionally small: the tests below exercise the
-// only behavior main.go owns that isn't already covered by a direct
-// internal/* package test.
-//
-// Every other test this file used to host (handler/filter/writeJSON/
-// accessLog/shutdown, httpx retry/drain/redirect, DockerHub + GHCR
-// mock scraping, config parse + rapid/PBT coverage, collect
-// orchestration) was migrated in cycles 1-2 to its new owning package
-// alongside the corresponding main.go shim deletion. The legacy
-// on-disk storage tests (Save/Load/Prune/Cache) were not migrated to a
-// package -- they were deleted with the store when v2 became stateless.
+// The tests below exercise only the behavior main.go owns that isn't
+// already covered by a direct internal/* package test.
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,66 +20,98 @@ import (
 	"github.com/cplieger/webhttp/v2"
 )
 
-// mainFakeSource is a canned collect.Source for driving runCollect in
-// isolation from any HTTP path.
+// mainFakeSource is a canned collect.Source for driving runCollect.
 type mainFakeSource struct {
-	src     registry.ID
-	entries []registry.Entry
-	healthy bool
+	src           registry.ID
+	entries       []registry.Entry
+	listingFailed bool
 }
 
 func (f *mainFakeSource) Source() registry.ID { return f.src }
 
 func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, bool) {
-	return f.entries, len(f.entries), f.healthy
+	return f.entries, len(f.entries), f.listingFailed
 }
 
-// TestRunCollect_partialSuccessStaysHealthy pins the health-marker contract
-// runCollect owns: when one registry produces data and the other fails, the
-// cycle is degraded per-source but runCollect still returns true so the marker
-// stays healthy ("partial failures stay healthy as long as one repo succeeds").
-// Mutates process-global metrics, so no t.Parallel.
+func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
+	buf := &bytes.Buffer{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	raw := "bad\n" + strings.Repeat("x", 4096)
+	warning := configpkg.Warning{
+		Msg: "config warning",
+		Attrs: []slog.Attr{
+			slog.String("value", raw),
+			slog.Int("requested", 7),
+			slog.Group("group", slog.String("nested", "raw\nvalue")),
+		},
+	}
+	logWarnings([]configpkg.Warning{warning})
+
+	var record map[string]any
+	if err := json.NewDecoder(buf).Decode(&record); err != nil {
+		t.Fatalf("decode warning record: %v", err)
+	}
+	value, ok := record["value"].(string)
+	if !ok {
+		t.Fatalf("warning value = %#v, want string", record["value"])
+	}
+	if len(value) > warnValueBytes {
+		t.Errorf("warning value length = %d, want at most %d", len(value), warnValueBytes)
+	}
+	if strings.Contains(value, "\n") || !strings.HasPrefix(value, "bad ") {
+		t.Errorf("warning value = %q, want newline replaced with a space", value)
+	}
+	if got := record["requested"]; got != float64(7) {
+		t.Errorf("warning requested = %#v, want 7", got)
+	}
+	group, ok := record["group"].(map[string]any)
+	if !ok {
+		t.Fatalf("warning group = %#v, want object", record["group"])
+	}
+	if got := group["nested"]; got != "raw\nvalue" {
+		t.Errorf("warning group nested = %#v, want raw newline value", got)
+	}
+	if got := warning.Attrs[0].Value.String(); got != raw {
+		t.Errorf("logWarnings mutated source attr = %q, want original value", got)
+	}
+}
+
+// TestRunCollect_partialSuccessStaysHealthy pins the health-marker contract:
+// when one registry produces data and the other fails, runCollect still
+// returns true so the marker stays healthy.
 func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	dh := &mainFakeSource{
-		src:     registry.DockerHub,
-		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 1}},
-		healthy: true,
+		src:           registry.DockerHub,
+		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 1}},
+		listingFailed: false,
 	}
-	gh := &mainFakeSource{src: registry.GHCR, healthy: false} // no entries, unhealthy
+	gh := &mainFakeSource{src: registry.GHCR, listingFailed: true} // no entries, unhealthy
 	cfg := &configpkg.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
 		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}); !got {
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New()); !got {
 		t.Error("runCollect() = false, want true (DockerHub produced data; partial success stays healthy)")
-	}
-}
-
-// TestRunCollect_allEmptyIsUnhealthy pins the other side of the contract: when
-// no registry produces an entry, runCollect returns false so the marker flips
-// unhealthy. Mutates process-global metrics, so no t.Parallel.
-func TestRunCollect_allEmptyIsUnhealthy(t *testing.T) {
-	dh := &mainFakeSource{src: registry.DockerHub, healthy: false}
-	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh}); got {
-		t.Error("runCollect() = true, want false (no repo collected)")
 	}
 }
 
 func TestMarkCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	source := &mainFakeSource{
-		src:     registry.DockerHub,
-		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7, TagCount: 2}},
-		healthy: true,
+		src:           registry.DockerHub,
+		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7, TagCount: new(2)}},
+		listingFailed: false,
 	}
 	cfg := &configpkg.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
-		EnableMetrics:  true,
 	}
+	m := obs.New()
 	marker := &mainFakeMarker{}
 	ready := &webhttp.Ready{}
 
-	markCollect(t.Context(), cfg, []collect.Source{source}, marker, ready)
+	markCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
 	if !marker.Healthy() {
 		t.Error("markCollect first cycle left marker unhealthy, want healthy")
 	}
@@ -96,8 +120,8 @@ func TestMarkCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	}
 
 	source.entries = nil
-	source.healthy = false
-	markCollect(t.Context(), cfg, []collect.Source{source}, marker, ready)
+	source.listingFailed = true
+	markCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
 
 	if marker.Healthy() {
 		t.Error("markCollect failed cycle left marker healthy, want unhealthy")
@@ -106,47 +130,45 @@ func TestMarkCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 		t.Error("markCollect failed cycle cleared latched readiness")
 	}
 	rec := httptest.NewRecorder()
-	obs.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if body := rec.Body.String(); strings.Contains(body, `owner="o",registry="dockerhub",repo="app"`) {
 		t.Errorf("markCollect failed cycle left prior image series in metrics:\n%s", body)
 	}
 }
 
-// TestRunCollect_publishesImageMetrics pins the end-to-end metric contract
-// through the composition root: with metrics enabled, one runCollect cycle
-// flows each source's flat records into the {registry,owner,repo} gauge
-// labels on the real /metrics output (the same boundary the collector
-// scrapes, and the label set grafana-dashboard.json queries). Mutates
-// process-global metrics, so no t.Parallel.
+// TestRunCollect_publishesImageMetrics pins that one runCollect cycle flows
+// each source's records into the {registry,owner,repo} gauge labels on the
+// real /metrics output, the label set grafana-dashboard.json queries.
 func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	dh := &mainFakeSource{
-		src:     registry.DockerHub,
-		entries: []registry.Entry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: 2}},
-		healthy: true,
+		src:           registry.DockerHub,
+		entries:       []registry.Entry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: new(2)}},
+		listingFailed: false,
 	}
 	gh := &mainFakeSource{
-		src:     registry.GHCR,
-		entries: []registry.Entry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
-		healthy: true,
+		src:           registry.GHCR,
+		entries:       []registry.Entry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
+		listingFailed: false,
 	}
 	cfg := &configpkg.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
 		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
-		EnableMetrics:  true,
 	}
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}); !got {
+	m := obs.New()
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m); !got {
 		t.Fatal("runCollect() = false, want true")
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
-	obs.Handler()(w, r)
+	m.Handler()(w, r)
 	body := w.Body.String()
 
 	want := []string{
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
 		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 2`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
+		`registrystats_collect_duration_seconds_count 1`,
 	}
 	for _, line := range want {
 		if !strings.Contains(body, line) {
@@ -155,53 +177,16 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	}
 }
 
-// mainFakeMarker is a minimal healthSignal for asserting the health flag
-// recoverAndMarkUnhealthy sets.
+// mainFakeMarker is a minimal healthSignal for asserting the health flag.
 type mainFakeMarker struct{ healthy bool }
 
 func (m *mainFakeMarker) Set(h bool)    { m.healthy = h }
 func (m *mainFakeMarker) Healthy() bool { return m.healthy }
 
-// TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs pins the
-// collect-goroutine panic safety net: a recovered panic must flip the marker
-// unhealthy AND emit the "collect panicked" ERROR line (per the function
-// docstring). Swaps slog.Default to capture, so no t.Parallel.
-func TestRecoverAndMarkUnhealthy_onPanicMarksUnhealthyAndLogs(t *testing.T) {
-	buf := &bytes.Buffer{}
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
-	t.Cleanup(func() { slog.SetDefault(orig) })
-
-	m := &mainFakeMarker{healthy: true}
-	func() {
-		defer recoverAndMarkUnhealthy(m)
-		panic("boom")
-	}()
-
-	if m.Healthy() {
-		t.Error("recoverAndMarkUnhealthy did not flip marker to unhealthy after a recovered panic")
-	}
-	if !strings.Contains(buf.String(), "collect panicked") {
-		t.Errorf("missing alert log line %q; logs:\n%s", "collect panicked", buf.String())
-	}
-}
-
-// TestRecoverAndMarkUnhealthy_noPanicLeavesMarker pins the no-op path: with no
-// panic in the deferred scope the marker is left untouched.
-func TestRecoverAndMarkUnhealthy_noPanicLeavesMarker(t *testing.T) {
-	m := &mainFakeMarker{healthy: true}
-	func() {
-		defer recoverAndMarkUnhealthy(m)
-	}()
-	if !m.Healthy() {
-		t.Error("recoverAndMarkUnhealthy flipped marker with no panic")
-	}
-}
-
-// TestLogConfig_noReposLogsError drives logConfig's no-repos ERROR
-// branch. With zero repos configured, logConfig must emit the operator-facing
-// "no repos configured" ERROR that warns the healthcheck will fail after the
-// first collect. Swaps slog.Default to capture, so no t.Parallel.
+// TestLogConfig_noReposLogsError: with zero repos configured, logConfig must
+// emit the operator-facing "no repos configured" ERROR warning that the
+// healthcheck will fail after the first collect. Swaps slog.Default to
+// capture, so no t.Parallel.
 func TestLogConfig_noReposLogsError(t *testing.T) {
 	buf := &bytes.Buffer{}
 	orig := slog.Default()
@@ -217,14 +202,10 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 
 // TestConfiguredSources_preMintsConfiguredSourcesOnly pins the cold-start
 // contract the shipped RegistryStatsSourceDegraded rule reads: both per-source
-// collect counters carry a zero sample on /metrics before any collect has run,
-// so increase() has an earlier sample and a source's FIRST failure fires the
-// rule. A source with no configured refs gets no series, because a series would
-// claim registry-stats polls that registry. Resets the process-global counters
-// so the assertion does not depend on test order, hence no t.Parallel.
+// collect counters carry a zero sample before the first collect. A source with
+// no configured refs gets no series.
 func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
-	obs.CollectsTotal.Reset()
-	obs.CollectErrors.Reset()
+	m := obs.New()
 
 	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
 	sources := []collect.Source{
@@ -232,11 +213,11 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		&mainFakeSource{src: registry.GHCR},
 	}
 
-	obs.MintCollectSources(configuredSources(cfg, sources))
+	m.MintCollectSources(configuredSources(cfg, sources))
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
-	obs.Handler()(w, r)
+	m.Handler()(w, r)
 	body := w.Body.String()
 
 	for _, line := range []string{
@@ -249,5 +230,13 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 	}
 	if strings.Contains(body, `source="ghcr"`) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
+	}
+
+	runCollect(t.Context(), cfg, sources, m)
+	w = httptest.NewRecorder()
+	m.Handler()(w, r)
+	body = w.Body.String()
+	if !strings.Contains(body, `registrystats_collects_total{source="dockerhub"} 1`) || strings.Contains(body, `source="ghcr"`) {
+		t.Errorf("runCollect did not use the configured source set; got:\n%s", body)
 	}
 }

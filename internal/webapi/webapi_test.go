@@ -37,7 +37,7 @@ func TestNew_readinessEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Deps{Ready: tt.ready, Logger: testsupport.QuietLogger()})
+			srv := New(Deps{Metrics: obs.New(), Ready: tt.ready, Logger: testsupport.QuietLogger()})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 
@@ -62,12 +62,11 @@ func TestNew_readinessEndpoint(t *testing.T) {
 
 // TestNew_boundsRequestReadAndWrite pins the guarantee the library does not
 // make: webhttp leaves ReadTimeout and WriteTimeout unset, so dropping either
-// option turns a bounded request into an unbounded one with every other webapi
-// assertion still green. ReadHeaderTimeout and IdleTimeout are deliberately not
-// asserted: webhttp supplies non-zero defaults, and their exact values are not
-// part of this package's contract.
+// option turns a bounded request into an unbounded one. ReadHeaderTimeout and
+// IdleTimeout are deliberately not asserted: webhttp supplies non-zero
+// defaults not part of this package's contract.
 func TestNew_boundsRequestReadAndWrite(t *testing.T) {
-	srv := New(Deps{Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Logger: testsupport.QuietLogger()})
 
 	if srv.ReadTimeout <= 0 {
 		t.Errorf("New().ReadTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.ReadTimeout)
@@ -78,13 +77,13 @@ func TestNew_boundsRequestReadAndWrite(t *testing.T) {
 }
 
 // TestNew_appliesSecurityHeaders confirms the webhttp.SecurityHeaders baseline
-// is wired into New's middleware chain: every response carries nosniff, the
-// DENY frame guard, and the referrer policy, and neither CSP nor HSTS is set
-// (this is a non-browser metrics/health endpoint).
+// is wired into New's middleware chain: nosniff, the DENY frame guard, and
+// the referrer policy on every response, with neither CSP nor HSTS set (a
+// non-browser metrics/health endpoint).
 func TestNew_appliesSecurityHeaders(t *testing.T) {
 	readyTrue := &webhttp.Ready{}
 	readyTrue.Set(true)
-	srv := New(Deps{Ready: readyTrue, Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Ready: readyTrue, Logger: testsupport.QuietLogger()})
 
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -108,9 +107,8 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 }
 
 // TestAccessLogLevel_byStatus pins the app's level POLICY (fed to
-// webhttp.WithLogLevel) and its wiring: 2xx/3xx at DEBUG (scrape-quiet),
-// 4xx at WARN, 5xx at ERROR, observed end-to-end through the composed
-// webhttp.Logging middleware.
+// webhttp.WithLogLevel): 2xx/3xx at DEBUG (scrape-quiet), 4xx at WARN, 5xx
+// at ERROR, observed through the composed webhttp.Logging middleware.
 func TestAccessLogLevel_byStatus(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -147,62 +145,32 @@ func TestAccessLogLevel_byStatus(t *testing.T) {
 	}
 }
 
-func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
-	tests := []struct {
-		name          string
-		enableMetrics bool
-		wantStatus    int
-	}{
-		{"enabled serves metrics", true, http.StatusOK},
-		{"disabled hides metrics", false, http.StatusNotFound},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &webhttp.Ready{}
-			r.Set(true)
-			srv := New(Deps{
-				Ready:         r,
-				Logger:        testsupport.QuietLogger(),
-				EnableMetrics: tt.enableMetrics,
-			})
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-			srv.Handler.ServeHTTP(rec, req)
-			if rec.Code != tt.wantStatus {
-				t.Errorf("GET /metrics with EnableMetrics=%v: status = %d, want %d", tt.enableMetrics, rec.Code, tt.wantStatus)
-			}
-		})
-	}
-}
-
 // TestNew_boundsHTTPMetricCardinality pins the label vocabulary of
 // registrystats_http_requests_total through New's REAL route table and
-// middleware chain — which is where the bound now lives. The labels are
-// derived by webhttp's WithRecordRouteMetric and handed to
-// obs.RecordHTTP; this app has no derivation of its own, so the property
-// under test is the WIRING: that New reaches for the hook whose labels are
-// bounded by construction rather than the request-aware one.
+// middleware chain: the labels are derived by webhttp's
+// WithRecordRouteMetric and handed to Metrics.RecordHTTP, so the property
+// under test is that New reaches for the hook whose labels are bounded by
+// construction rather than the request-aware one.
 //
-// Two halves. The bound: a client-chosen method token collapses to the fixed
-// "other" bucket and an unmatched path to the fixed "unmatched" marker, so a
-// scanner cannot mint series in Mimir. The non-collapse: a matched route
-// keeps its real method and route template — including HEAD, which ServeMux
-// routes to the GET pattern and which the metric must still record as HEAD
-// so the metric and the access line for one request_id agree — and an
-// unmatched request keeps its real METHOD, only the path collapsing. That
-// last part is a deliberate change from the app's former hand-rolled
-// derivation, which collapsed both labels onto method="unmatched"; the
-// retired value is asserted absent below.
+// The bound: a client-chosen method token collapses to the fixed "other"
+// bucket and an unmatched path to the fixed "unmatched" marker. The
+// non-collapse: a matched route keeps its real method and route template
+// (including HEAD, which ServeMux routes to the GET pattern but which the
+// metric must still record as HEAD), and an unmatched request keeps its
+// real METHOD, only the path collapsing — a deliberate change from the
+// app's former hand-rolled derivation, which collapsed both labels onto
+// method="unmatched"; that retired value is asserted absent below.
 //
-// Observable only via the metrics exposition: the access log deliberately
-// keeps the raw path and the verbatim method, so a log assertion cannot
-// witness the collapse.
+// Observable only via the metrics exposition: the access log keeps the
+// raw path and verbatim method, so a log assertion cannot witness the
+// collapse.
 func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
 	const hostilePunct = "M!#$%&'*+-.^_`|~" // every byte a valid RFC 9110 tchar
 
 	ready := &webhttp.Ready{}
 	ready.Set(true)
-	srv := New(Deps{Ready: ready, Logger: testsupport.QuietLogger(), EnableMetrics: true})
+	m := obs.New()
+	srv := New(Deps{Metrics: m, Ready: ready, Logger: testsupport.QuietLogger()})
 
 	for _, req := range []struct{ method, target string }{
 		{http.MethodGet, "/api/health"},   // matched
@@ -217,7 +185,7 @@ func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	obs.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	m.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rec.Body.String()
 
 	present := map[string]string{
@@ -252,15 +220,13 @@ func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
 }
 
 // TestNew_usesSuppliedLoggerForAccessLog confirms New wires the caller's
-// logger (not a fresh default) into the access-log middleware: a request
-// routed through the returned server's handler emits its access-log line
-// into the supplied logger's sink.
+// logger (not a fresh default) into the access-log middleware.
 func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	r := &webhttp.Ready{}
 	r.Set(true)
-	srv := New(Deps{Ready: r, Logger: logger})
+	srv := New(Deps{Metrics: obs.New(), Ready: r, Logger: logger})
 
 	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
 

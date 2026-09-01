@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"pgregory.net/rapid"
 )
 
 func TestIsSafeURLSegment(t *testing.T) {
@@ -63,34 +61,13 @@ func TestIsSafeURLSegment_bounds_length(t *testing.T) {
 	}
 }
 
-func TestIsSafeURLSegment_never_panics(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		input := rapid.String().Draw(t, "input")
-		_ = IsSafeURLSegment(input) // must not panic
-	})
-}
-
-func TestIsSafeURLSegment_rejects_all_unsafe_chars(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		unsafe := rapid.SampledFrom([]byte{'/', '%', '\\', '?', '#', '@', ':'}).Draw(t, "char")
-		prefix := rapid.StringMatching(`[a-z]{0,5}`).Draw(t, "prefix")
-		suffix := rapid.StringMatching(`[a-z]{0,5}`).Draw(t, "suffix")
-		input := prefix + string(unsafe) + suffix
-		if IsSafeURLSegment(input) {
-			t.Errorf("IsSafeURLSegment(%q) = true, want false (contains %q)", input, string(unsafe))
-		}
-	})
-}
-
 // FuzzIsSafeURLSegment pins the positive security contract of the URL
 // path-segment allowlist: every string IsSafeURLSegment accepts must be
 // non-empty, must not be a traversal element ("." or ".."), and must
 // consist solely of the allowed bytes [A-Za-z0-9._-]. The byte-membership
 // check re-derives the allowlist independently rather than calling back
 // into the production regexp, so a regexp mutated to admit any other byte
-// (a space, "/", "~", a control or non-ASCII byte) is caught here; the
-// existing rejects-known-unsafe-chars property only enumerates seven
-// specific bytes and would miss such a change.
+// is caught here.
 func FuzzIsSafeURLSegment(f *testing.F) {
 	f.Add("cplieger")
 	f.Add("fclones-scheduler")

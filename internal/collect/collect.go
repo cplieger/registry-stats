@@ -1,13 +1,7 @@
-// Package collect is the registry-stats collection orchestrator. It
-// loops over a set of Source implementations, stamps each
-// source's flat []registry.Entry output with its registry label,
-// and returns the combined per-image metric records.
-//
-// The orchestrator is deliberately tiny: each source owns its own
-// *http.Client, retry options, logging, and pacing. Run's job is the
-// orchestration layer above that — invoke each configured source, keep
-// the per-source health accounting, and surface partial-degradation
-// warnings without failing the whole cycle.
+// Package collect is the registry-stats collection orchestrator: it loops
+// over a set of Source implementations, stamps each source's flat
+// []registry.Entry output with its registry label, and returns the
+// combined per-image metric records.
 package collect
 
 import (
@@ -19,44 +13,39 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Source collects registry-specific statistics for a list of refs — the
-// one seam this orchestrator drives, declared here at its consumer.
+// Source collects registry-specific statistics for a list of refs.
 // Implementations return flat per-image registry.Entry records; Run stamps
 // each with the source's registry label for the metric surface. attempted
-// counts refs the source tried to fetch (including failures), which Run
-// reports beside the served count when a source degrades; healthy is true
-// only when the source met its per-source health criteria.
+// counts refs the source tried to fetch (including failures), reported
+// beside the served count when a source degrades. listingFailed reports a
+// wildcard owner listing that failed without yielding any usable refs.
 //
-// Two obligations an implementation carries, decided here because this is
-// where they are consumed: Source() returns a known registry.ID, never
-// Unknown, since Run derives the metric and log label from it; and a
-// successful Collect returns entries whose Owner and Repo label components
-// are non-empty.
+// Source() must return a known registry.ID, never Unknown, since Run
+// derives the metric and log label from it; a successful Collect returns
+// entries whose Owner and Repo label components are non-empty.
 type Source interface {
 	Source() registry.ID
 	Collect(
 		ctx context.Context,
 		refs []registry.RepoRef,
-	) (entries []registry.Entry, attempted int, healthy bool)
+	) (entries []registry.Entry, attempted int, listingFailed bool)
 }
 
-// Options configures a single Run. Sources are the registry clients
-// that actually fetch data; RefsFor maps each source's on-wire name
-// (Source().String()) to the
-// []registry.RepoRef it should fetch, allowing the orchestrator to stay
-// agnostic of the per-registry config slice layout. A nil Logger falls
-// back to slog.Default.
+// Options configures a single Run. Metrics is required. RefsFor maps each
+// source's registry ID to the []registry.RepoRef it should fetch. A nil Logger
+// falls back to slog.Default.
 type Options struct {
+	Metrics *obs.Metrics
 	Logger  *slog.Logger
-	RefsFor func(name string) []registry.RepoRef
+	RefsFor func(registry.ID) []registry.RepoRef
 	Sources []Source
 }
 
-// Run orchestrates a single collection cycle: it invokes each source's
-// Collect (skipping sources whose ref slice is empty so empty-config paths
-// stay zero-cost), stamps each entry with its source's registry label, and
-// returns the combined per-image records. The caller owns the health
-// marker and derives it from the returned set (see main.runCollect).
+// Run orchestrates a single collection cycle: invokes each source's
+// Collect (skipping sources whose ref slice is empty), stamps each entry
+// with its source's registry label, and returns the combined per-image
+// records. The caller owns the health marker and derives it from the
+// returned set (see main.runCollect).
 func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 	logger := opts.Logger
 	if logger == nil {
@@ -75,28 +64,30 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 			// reads.
 			break
 		}
-		refs := refsFor(opts, src.Source().String())
+		refs := refsFor(opts, src.Source())
 		if len(refs) == 0 {
 			continue
 		}
 		invokedAnySource = true
-		srcImages, srcHealthy := collectSource(ctx, logger, src, refs)
+		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, src, refs)
 		if !srcHealthy {
 			degraded = true
 		}
 		images = append(images, srcImages...)
 	}
 
+	if ctx.Err() != nil {
+		logger.Warn("collection interrupted",
+			"error", ctx.Err(), "images", len(images))
+		return images
+	}
+
 	if len(images) == 0 {
-		// Cancellation first: a cycle can be both cancelled and degraded, and
-		// the interruption is the fact that explains the rest.
 		switch {
-		case ctx.Err() != nil:
-			logger.Warn("collection interrupted", "error", ctx.Err())
 		case !invokedAnySource:
 			logger.Warn("no repos configured")
 		case degraded:
-			logger.Error("all collections failed")
+			logger.Error("no images collected, at least one source failed")
 		default:
 			logger.Warn("no images found for the configured refs")
 		}
@@ -104,8 +95,7 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 	}
 
 	if degraded {
-		logger.Warn("partial collection failure, serving available data",
-			"images", len(images))
+		logger.Warn("partial collection failure", "images", len(images))
 	}
 
 	logger.Info("collection complete",
@@ -116,29 +106,27 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 }
 
 // collectSource invokes a single source's Collect and stamps its entries
-// with the source's registry label, reporting whether the source met its
-// health threshold. An unhealthy source gets a shortfall record under its
-// own registry label and bumps the per-source error metric. Entries are
-// stamped regardless of health so a degraded-but-nonempty source still
-// contributes its data. A cancelled cycle is a stop rather than a
-// collection failure, so it moves neither the error counter nor the record.
+// with the source's registry label. An unhealthy source bumps the
+// per-source error metric; entries are stamped regardless of health so a
+// degraded-but-nonempty source still contributes its data. A cancelled
+// cycle is a stop rather than a collection failure, so it moves neither
+// the error counter nor the record.
 func collectSource(
 	ctx context.Context,
+	m *obs.Metrics,
 	logger *slog.Logger,
 	src Source,
 	refs []registry.RepoRef,
 ) (images []obs.ImageMetric, srcHealthy bool) {
-	entries, attempted, srcHealthy := src.Collect(ctx, refs)
+	entries, attempted, listingFailed := src.Collect(ctx, refs)
+	srcHealthy = !listingFailed && len(entries)*2 >= attempted
 	label := src.Source().String()
-	// Count every invoked source as a collect run; collect_errors_total below is
-	// the failed subset, so collect_errors_total / collects_total is a valid
-	// per-source failure ratio.
-	obs.CollectsTotal.Inc(label)
-	if !srcHealthy && ctx.Err() == nil {
+	failed := !srcHealthy && ctx.Err() == nil
+	if failed {
 		logger.Warn("source reported unhealthy",
 			"source", label, "succeeded", len(entries), "attempted", attempted)
-		obs.CollectErrors.Inc(label)
 	}
+	m.RecordCollect(label, failed)
 
 	images = make([]obs.ImageMetric, 0, len(entries))
 	for _, e := range entries {
@@ -153,14 +141,11 @@ func collectSource(
 	return images, srcHealthy
 }
 
-// refsFor resolves refs for a given source name, returning nil when
-// opts.RefsFor is unset or the source has no refs. A nil RefsFor is
-// equivalent to "no refs for any source", which short-circuits the
-// whole loop — useful for orchestrator-only tests that pass canned
-// entries via fake sources with baked-in state.
-func refsFor(opts Options, name string) []registry.RepoRef {
+// refsFor resolves refs for a given source, returning nil when
+// opts.RefsFor is unset.
+func refsFor(opts Options, source registry.ID) []registry.RepoRef {
 	if opts.RefsFor == nil {
 		return nil
 	}
-	return opts.RefsFor(name)
+	return opts.RefsFor(source)
 }

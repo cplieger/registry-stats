@@ -10,13 +10,7 @@ import (
 	"github.com/cplieger/webhttp/v2"
 )
 
-// Default HTTP server timeouts. Chosen for a LAN-only setup:
-// per-request caps of a few seconds are comfortably above P99 and
-// below any reverse-proxy timeout. registry-stats is not a streaming
-// app, so all four are passed explicitly to webhttp.NewServer, whose
-// streaming-safe defaults otherwise leave ReadTimeout/WriteTimeout
-// unset. MaxHeaderBytes is left at webhttp's 1 MiB default, which
-// matches the previous hand-rolled value.
+// Explicit timeouts prevent the streaming-safe webhttp defaults from leaving reads and writes unbounded.
 const (
 	defaultReadHeaderTimeout = 5 * time.Second
 	defaultReadTimeout       = 10 * time.Second
@@ -24,59 +18,37 @@ const (
 	defaultIdleTimeout       = 60 * time.Second
 )
 
-// Deps is the injection surface for the webapi package. Ready is the
-// serving-readiness view backing GET /api/health — a *webhttp.Ready in
-// production, latched true after the first successful collect and cleared
-// on shutdown; a nil Ready renders /api/health as 503 unready. A nil Logger
-// falls back to slog.Default.
+// Deps supplies the HTTP server dependencies. Metrics is required. A nil Ready reports 503; a nil Logger uses slog.Default.
 type Deps struct {
-	Ready         webhttp.ReadinessChecker
-	Logger        *slog.Logger
-	EnableMetrics bool
+	Metrics *obs.Metrics
+	Ready   webhttp.ReadinessChecker
+	Logger  *slog.Logger
 }
 
-// New constructs the HTTP server, wiring the routes and the standard webhttp
-// middleware chain over webhttp.NewServer with the app's explicit (non-
-// streaming) timeout posture. It neither binds nor starts the server: the
-// composition root binds a listener up front (so a port-in-use error surfaces
-// synchronously) and drives the lifecycle with webhttp.Run.
+// New constructs the server without binding or starting it.
 func New(d Deps) *http.Server {
 	ready := d.Ready
 	if ready == nil {
-		// webhttp.ReadinessHandler calls Ready() unconditionally, so a nil
-		// checker would panic on the first request. A zero-value Ready reports
-		// not-ready, preserving the 503 a missing readiness view should return.
+		// ReadinessHandler calls Ready unconditionally.
 		ready = &webhttp.Ready{}
+	}
+	logger := d.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	mux := http.NewServeMux()
-	// GET /api/health is the HTTP serving-readiness gate, backed by
-	// webhttp.ReadinessHandler + the injected Ready view (200 {"status":"ok"}
-	// once the first collect has produced data, 503 {"status":"unready"}
-	// before then or during shutdown). It is deliberately DISTINCT from the
-	// container file-marker liveness probe the `registry-stats health`
-	// subcommand checks: same app, different question ("ready to serve?" vs
-	// "process alive?"), different mechanism (HTTP vs marker file).
 	mux.Handle("GET /api/health", webhttp.ReadinessHandler(ready))
-	if d.EnableMetrics {
-		mux.HandleFunc("GET /metrics", obs.Handler())
-	}
+	mux.HandleFunc("GET /metrics", d.Metrics.Handler())
 
-	// Middleware via webhttp.Chain, first listed outermost. Logging stays
-	// outermost so a recovered panic is logged as its 500 rather than the
-	// StatusRecorder's default 200. accessLogLevel is this app's level policy
-	// (~15s Prometheus scrape lines stay at DEBUG, 4xx/5xx are raised), and
-	// WithRecordRouteMetric is deliberately preferred over
-	// WithRecordMetricRequest as the metric sink: the library derives the
-	// bounded (method, path) label pair, so this app has no derivation of its
-	// own left to get wrong.
+	// Logging is outermost so recovered panics are recorded as 500 responses.
 	handler := webhttp.Chain(mux,
 		webhttp.Logging(
-			webhttp.WithLogger(d.Logger),
+			webhttp.WithLogger(logger),
 			webhttp.WithLogLevel(accessLogLevel),
-			webhttp.WithRecordRouteMetric(obs.RecordHTTP),
+			webhttp.WithRecordRouteMetric(d.Metrics.RecordHTTP),
 		),
-		webhttp.Recoverer(webhttp.WithRecoverLogger(d.Logger)),
+		webhttp.Recoverer(webhttp.WithRecoverLogger(logger)),
 		webhttp.SecurityHeaders(),
 	)
 
@@ -86,16 +58,11 @@ func New(d Deps) *http.Server {
 		webhttp.WithWriteTimeout(defaultWriteTimeout),
 		webhttp.WithReadHeaderTimeout(defaultReadHeaderTimeout),
 		webhttp.WithIdleTimeout(defaultIdleTimeout),
+		webhttp.WithErrorLog(slog.NewLogLogger(logger.Handler(), slog.LevelError)),
 	)
 }
 
-// accessLogLevel is the access-line LEVEL policy fed to webhttp.WithLogLevel:
-// DEBUG for 2xx/3xx (quiet by default; set LOG_LEVEL=debug to see them, so
-// ~15s Prometheus scrapes do not flood Loki), WARN for 4xx, and ERROR for
-// 5xx. This keeps dashboard failures traceable without drowning them in
-// normal-poll noise. Everything else about the line — attributes, request-id
-// minting and threading, deferred panic-safe emission — is webhttp.Logging's
-// mechanism.
+// accessLogLevel keeps routine scrape traffic at Debug while retaining failed requests.
 func accessLogLevel(_ *http.Request, status int) slog.Level {
 	switch {
 	case status >= 500:

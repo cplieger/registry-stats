@@ -6,10 +6,9 @@
 # The five PromQL rules (RegistryStatsTargetDown, RegistryStatsTargetAbsent,
 # RegistryStatsCollectStalled, RegistryStatsSourceDegraded,
 # RegistryStatsPullCountRegressed) read series from /metrics: scrape it and
-# evaluate them with Prometheus or the Mimir ruler. Every series they key on is
-# registered unconditionally at process start, so no rule needs an option set
-# first. The scrape `job` label is yours; the examples assume
-# job="registry-stats".
+# evaluate them with Prometheus or the Mimir ruler. Each rule below documents
+# its own series prerequisites and no-series case. The scrape `job` label is
+# yours; the examples assume job="registry-stats".
 #
 # The three LogQL rules (RegistryStatsConfigRejected, RegistryStatsCollectFailed,
 # RegistryStatsCollectionIncomplete) read the container's log stream, because
@@ -106,8 +105,8 @@ groups:
             owns that case.
       # The app's own per-source verdict. registry-stats increments
       # collect_errors_total once for a cycle in which that source failed a
-      # MAJORITY of its repos, or lost a Docker Hub owner listing outright, so
-      # one increment already means most of that registry's numbers are
+      # MAJORITY of its repos, or lost an owner listing outright, so one
+      # increment already means most of that registry's numbers are
       # missing rather than one flaky repo. A minority failure deliberately
       # does not move this counter, which is what
       # RegistryStatsCollectionIncomplete covers.
@@ -183,12 +182,12 @@ groups:
       # Keyed on the LEVEL, not on each message: registry-stats uses the slog
       # text handler, so every error line carries `level=ERROR` (uppercase, and
       # a lowercase matcher silently matches nothing). The expression is
-      # therefore level-wide rather than collection-specific: one rule covers a
-      # recovered panic in the collect goroutine, an all-registries-failed
-      # cycle, a GHCR listing that could not be fetched or parsed, a Docker Hub
-      # fetch or parse failure, a startup with no usable repo configuration,
-      # and a 5xx from the exporter's own endpoint. Only the majority-failure
-      # subset of those reaches registrystats_collect_errors_total.
+      # therefore level-wide rather than collection-specific: one rule covers an
+      # all-registries-failed cycle, a GHCR listing that could not be fetched or
+      # parsed, a Docker Hub fetch or parse failure, a startup with no usable
+      # repo configuration, and a 5xx from the exporter's own endpoint. Only the
+      # majority-failure subset of those reaches
+      # registrystats_collect_errors_total.
       - alert: RegistryStatsCollectFailed
         expr: |
           sum by (container) (count_over_time(
@@ -204,40 +203,39 @@ groups:
             expression is level-wide, so it covers serving and configuration
             errors as well as collection ones: a failed registry fetch or
             parse, a GHCR page whose markup changed, a cycle in which every
-            registry failed, a startup with no usable repo configuration, a
-            5xx from the exporter's own endpoint, or a recovered panic in the
-            collect goroutine. Read `docker logs registry-stats` for the
-            message; a GHCR format change carries a link to open an issue.
-      # The WARN lines that mean "this cycle counted fewer images than
-      # configured" while the app's health verdict stays healthy, so
+            registry failed, a startup with no usable repo configuration, or a
+            5xx from the exporter's own endpoint. Read
+            `docker logs registry-stats` for the message; a GHCR format change
+            carries a link to open an issue.
+      # The WARN lines that mean "this cycle exported an incomplete set of image
+      # or tag series" while the app's health verdict stays healthy, so
       # registrystats_collect_errors_total never moves and every PromQL rule
-      # above stays quiet. `ghcr scrape failed` is the per-package line: a
-      # minority of GHCR packages failing (a 404 on a stale wildcard entry, a
-      # 5xx, a timeout, or a below-majority parse failure) is invisible to
-      # every other rule here, while the identical Docker Hub condition logs at
-      # ERROR and reaches RegistryStatsCollectFailed. Enumerated rather than
-      # keyed on level=WARN, because the WARN stream also carries two shutdown
-      # lines that would fire on every redeploy. A MAJORITY of those failures,
-      # and a listing that fails WHOLLY, both flip the source unhealthy, so
-      # RegistryStatsSourceDegraded owns them through
-      # registrystats_collect_errors_total; the MINORITY cases are what this
-      # rule exists for.
+      # above stays quiet. `ghcr scrape failed` is the per-package line; a
+      # minority of GHCR packages failing removes their image series. The two
+      # tag-count failure lines keep the Docker Hub image series but omit its
+      # tag series. Enumerated rather than keyed on level=WARN, because the WARN
+      # stream also carries two shutdown lines that would fire on every
+      # redeploy. A MAJORITY of package failures, and a listing that fails
+      # WHOLLY, both flip the source unhealthy, so RegistryStatsSourceDegraded
+      # owns them through registrystats_collect_errors_total; the MINORITY and
+      # tag-count cases are what this rule exists for.
       - alert: RegistryStatsCollectionIncomplete
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `hit page cap|listing partially failed|rate limited|ghcr scrape failed` [2h]
+            |~ `hit page cap|listing partially failed|rate limited|ghcr scrape failed|tag count fetch failed|tag count parse failed` [2h]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "registry-stats is exporting an incomplete image set"
+          summary: "registry-stats cycle exported an incomplete set of image or tag series"
           description: >
-            A collect cycle lost images without failing: an owner listing was
-            truncated at its page cap or lost a page, a request was rate
-            limited, or a minority of GHCR packages failed to scrape. The
-            affected images drop off /metrics for that cycle while every PromQL
-            rule stays quiet, so the dashboard reads low rather than empty.
+            A collect cycle exported an incomplete set of image or tag series:
+            an owner listing stopped at its page cap or lost a page, a request
+            was rate limited, a minority of GHCR packages failed to scrape, or
+            a Docker Hub repo's tag count could not be read. The affected image
+            or tag series are absent from /metrics for that cycle while every
+            PromQL rule stays quiet, so the dashboard can show incomplete data.
             Track fewer packages or raise POLL_INTERVAL_HOURS if the rate
             limiting repeats.

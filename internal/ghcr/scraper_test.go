@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +18,10 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
-// packagePageURL is a representative production GHCR package-page URL for
-// the fetchHTML tests. httptest.NewTestServer's in-memory client routes
-// every request to the handler regardless of scheme, host or address — and
-// leaves Server.URL empty — so these tests pass the URL production would
-// build instead of a loopback address, which is closer to the real call.
+// packagePageURL is a representative production GHCR package-page URL:
+// httptest.NewTestServer's in-memory client routes every request to the
+// handler regardless of scheme, host or address and leaves Server.URL
+// empty, so these tests pass the URL production would build.
 const packagePageURL = "https://github.com/users/owner/packages/container/package/pkg"
 
 // shortRetry returns httpx options with a 1 ms base delay so retry
@@ -31,10 +31,7 @@ func shortRetry() []httpx.GetOption {
 }
 
 // fastPacing returns Options with microsecond pacing/jitter so mock
-// Collect tests don't sit on the 2-5 s production per-package delay
-// baked into DefaultMinPacing / DefaultPacingJitter. Non-mock tests
-// that intentionally exercise default pacing should keep passing
-// Options{} (zero value falls back to the DefaultPacing* constants).
+// Collect tests don't sit on the production per-package delay.
 func fastPacing(retry []httpx.GetOption, logger *slog.Logger) Options {
 	return Options{
 		MinPacing:    time.Microsecond,
@@ -66,6 +63,10 @@ func TestParseDownloads_Valid(t *testing.T) {
 		{"zero", downloadsHTML("0"), 0},
 		{"small", downloadsHTML("42"), 42},
 		{"large", downloadsHTML("999999999"), 999999999},
+		{"attribute value resembling title", `<span>Total downloads</span><h3 data-tip='title="1"' title="27800">27.8K</h3>`, 27800},
+		{"distant whitespace", `<span>Total downloads</span>` + strings.Repeat(" ", 501) + `<h3 title="9">9</h3>`, 9},
+		{"later titled element", `<span>Total downloads</span><h3 title="7">7</h3><span title="1">rank</span>`, 7},
+		{"form feed before count", "<span>Total downloads</span>\f<h3 title=\"8\">8</h3>", 8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -92,6 +93,12 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 		{"negative count", `<span>Total downloads</span><h3 title="-5">-5</h3>`},
 		{"title unclosed", `<span>Total downloads</span><h3 title="12345>`},
 		{"an element between the marker and the count", `<span>Total downloads</span><div class="foo">bar</div><h3 title="176000">176K</h3>`},
+		{"non-whitespace between marker and count", "<span>Total downloads</span>" + strings.Repeat("x", 501) + `<h3 title="999">999</h3>`},
+		{"title bytes inside attribute value", `<span>Total downloads</span><h3 data-tip='title="1"'>27.8K</h3>`},
+		{"title bytes after other text inside attribute value", `<span>Total downloads</span><h3 data-tip='x title="1"'>27.8K</h3>`},
+		{"two title attributes", `<span>Total downloads</span><h3 title="1" title="2">2</h3>`},
+		{"attribute name ending in title", `<span>Total downloads</span><h3 data-title="9">27.8K</h3>`},
+		{"element name beginning with h3", `<span>Total downloads</span><h3x title="9">27.8K</h3x>`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,25 +110,8 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 	}
 }
 
-func TestParseDownloads_TitleBeyondMaxDistance(t *testing.T) {
-	// The count element must start within maxTitleDistance (500 bytes) of
-	// the marker; padding pushes it past the window, so nothing follows the
-	// marker element and the parse fails closed.
-	padding := strings.Repeat("x", 501)
-	html := "<span>Total downloads</span>" + padding + `<h3 title="999">999</h3>`
-	_, err := parseDownloads(html)
-	if !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("err = %v, want errHTMLFormatChanged", err)
-	}
-}
-
 // TestParseDownloads_UsesAssociatedCountElement pins that the count is the
-// marker's OWN element rather than whatever titled element happens to be
-// nearby: a titled element between the marker and the count, of any tag,
-// makes the association ambiguous, so the sample is dropped behind the
-// format sentinel instead of publishing a number that may belong to
-// something else. The live shape passes, which is what keeps the strict
-// rule honest against the page GitHub actually ships.
+// marker's own element rather than another titled element nearby.
 func TestParseDownloads_UsesAssociatedCountElement(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -132,11 +122,6 @@ func TestParseDownloads_UsesAssociatedCountElement(t *testing.T) {
 		{
 			name:    "unrelated titled span before the count",
 			html:    `<span>Total downloads</span><span title="1">rank</span><h3 title="27880">27.8K</h3>`,
-			wantErr: true,
-		},
-		{
-			name:    "unrelated titled h3 before the count",
-			html:    `<span>Total downloads</span><h3 title="1">rank</h3><h3 title="27880">27.8K</h3>`,
 			wantErr: true,
 		},
 		{
@@ -169,7 +154,7 @@ func TestParsePackageList_Valid(t *testing.T) {
 <a href="/users/owner/packages/container/package/app2">app2</a>
 <a href="/users/owner/packages/container/package/app1">app1-dup</a>`
 	got, _ := parsePackageList(html, "owner", userOwner)
-	want := []string{"app1", "app2"}
+	want := []string{"app1", "app2", "app1"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d packages, want %d (%v)", len(got), len(want), got)
 	}
@@ -180,8 +165,9 @@ func TestParsePackageList_Valid(t *testing.T) {
 	}
 }
 
+// TestParsePackageList_MultiplePerLine pins that multiple package links
+// on the same HTML line are all extracted.
 func TestParsePackageList_MultiplePerLine(t *testing.T) {
-	// Multiple package links on the same line should all be extracted.
 	html := `<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`
 	got, _ := parsePackageList(html, "o", userOwner)
 	if len(got) != 2 {
@@ -189,9 +175,109 @@ func TestParsePackageList_MultiplePerLine(t *testing.T) {
 	}
 }
 
+func TestParsePackageList_DecodesNestedNames(t *testing.T) {
+	for _, encoded := range []string{"helm-charts%2Fgrafana-operator", "helm-charts%2fgrafana-operator"} {
+		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
+		got, refused := parsePackageList(html, "owner", userOwner)
+		if !slices.Equal(got, []string{"helm-charts/grafana-operator"}) || refused.Count != 0 {
+			t.Errorf("parsePackageList(%q) = (%v, %+v), want decoded nested name", encoded, got, refused)
+		}
+	}
+}
+
+func TestParsePackageList_RefusesUnsafeDecodedNames(t *testing.T) {
+	for _, encoded := range []string{"..%2f..%2fetc%2fpasswd", "%2e%2e%2f%2e%2e", "%2e", "a//b", "/abs", "a%2F", "bad%00name", "%zz"} {
+		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
+		got, refused := parsePackageList(html, "owner", userOwner)
+		if len(got) != 0 || refused.Count != 1 {
+			t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", encoded, got, refused)
+		}
+	}
+}
+
+func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
+	prefix := linkPrefix(userOwner, "owner")
+	tests := []struct {
+		name        string
+		html        string
+		want        []string
+		wantRefused int
+	}{
+		{
+			name:        "unsafe candidate containing package prefix",
+			html:        `<a href="` + prefix + `..` + prefix + `phantom">bad</a>`,
+			wantRefused: 1,
+		},
+		{
+			name:        "newline inside candidate",
+			html:        `<a href="` + prefix + "na\nme" + `">bad</a>`,
+			wantRefused: 1,
+		},
+		{
+			name: "space separated candidates",
+			html: `<div data-targets="` + prefix + `a ` + prefix + `b">`,
+			want: []string{"a", "b"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, refused := parsePackageList(tt.html, "owner", userOwner)
+			if !slices.Equal(got, tt.want) || refused.Count != tt.wantRefused {
+				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, refused=%d)", tt.html, got, refused, tt.want, tt.wantRefused)
+			}
+		})
+	}
+}
+
 // TestParsePackageList_Empty pins that the parse core reports zero names
 // and nothing else: whether an empty page means an empty owner or markup
 // drift depends on which page it is, which only the page loop knows.
+func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
+	prefix := "/users/NVIDIA/packages/container/package/"
+	tests := []struct {
+		name string
+		html string
+	}{
+		{"registered casing", `<a href="` + prefix + `CUDA">package</a>`},
+		{"other owner before package", `<a href="/users/other/packages/container/package/wrong">wrong</a><a href="` + prefix + `CUDA">package</a>`},
+		{"unicode before package", strings.Repeat("Ⱥ", 200) + `<a href="` + prefix + `CUDA">package</a>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, refused := parsePackageList(tt.html, "nvidia", userOwner)
+			if !slices.Equal(got, []string{"CUDA"}) || refused.Count != 0 {
+				t.Errorf("parsePackageList = (%v, %+v), want registered package casing preserved", got, refused)
+			}
+		})
+	}
+}
+
+func TestParsePackageList_BoundsRefusalSample(t *testing.T) {
+	raw := strings.Repeat("a", 256)
+	html := `<a href="/users/owner/packages/container/package/` + raw + `">package</a>`
+	got, refused := parsePackageList(html, "owner", userOwner)
+	if len(got) != 0 || refused.Count != 1 {
+		t.Fatalf("parsePackageList(overlong name) = (%v, %+v), want one refusal", got, refused)
+	}
+	if refused.Sample != strings.Repeat("a", 128) {
+		t.Errorf("refused.Sample = %q (%d bytes), want first 128 bytes", refused.Sample, len(refused.Sample))
+	}
+}
+
+func TestParsePackageList_KeepsFirstInformativeSample(t *testing.T) {
+	prefix := linkPrefix(userOwner, "owner")
+	html := `<a href="` + prefix + `"></a><a href="` + prefix + `%zz">bad</a>`
+	_, refused := parsePackageList(html, "owner", userOwner)
+	if refused.Count != 2 || refused.Sample != "%zz" {
+		t.Errorf("parsePackageList refusals = %+v, want count 2 and sample %%zz", refused)
+	}
+
+	merged := (refusals{Count: 1}).merge(refusals{Count: 1, Sample: "%zz"})
+	if merged.Count != 2 || merged.Sample != "%zz" {
+		t.Errorf("refusals.merge = %+v, want count 2 and sample %%zz", merged)
+	}
+}
+
 func TestParsePackageList_Empty(t *testing.T) {
 	got, refused := parsePackageList("<html>nothing here</html>", "owner", userOwner)
 	if len(got) != 0 || refused.Count != 0 {
@@ -209,13 +295,9 @@ func TestFetchHTML_ContextCancelled(t *testing.T) {
 	}
 }
 
-// --- Migrated from main_test.go in chain step 4 ---
-
 // TestFetchHTML_SendsBrowserHeaders verifies that fetchHTML installs
 // the browser-like User-Agent / Accept / Accept-Language triplet
-// GitHub requires for anonymous GHCR pages. Migrated from the legacy
-// TestFetchGitHubHTMLSuccess which asserted the same headers against
-// main.go's fetchGitHubHTML forwarder.
+// GitHub requires for anonymous GHCR pages.
 func TestFetchHTML_SendsBrowserHeaders(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") == "" {
@@ -243,9 +325,7 @@ func TestFetchHTML_SendsBrowserHeaders(t *testing.T) {
 // TestParseDownloads_ContentBeforeTitle pins the offset calculation
 // across a line boundary: the count element may sit on the line after the
 // marker, indented, with whitespace before its title attribute. GitHub
-// reflows that whitespace, so it is not format drift. Whatever else
-// precedes the title inside the start tag (class, id, data-*) is the same
-// byte scan, so one case covers them.
+// reflows that whitespace, so it is not format drift.
 func TestParseDownloads_ContentBeforeTitle(t *testing.T) {
 	tests := []struct {
 		name string
@@ -273,9 +353,7 @@ func TestParseDownloads_ContentBeforeTitle(t *testing.T) {
 
 // TestCollect_ExplicitMock exercises *Client.Collect against a mock
 // server for a single explicit ref, asserting the returned entry's
-// owner/repo pair and scraped download count plus healthy=true.
-// Migrated from TestCollectGHCRExplicitMock in main_test.go and
-// previously driven through the free-function ghcr.Collect shim.
+// owner/repo pair and scraped download count.
 func TestCollect_ExplicitMock(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/mypkg", func(w http.ResponseWriter, _ *http.Request) {
@@ -288,10 +366,10 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "mypkg"}}
-	entries, _, healthy := c.Collect(t.Context(), refs)
+	entries, _, listingFailed := c.Collect(t.Context(), refs)
 
-	if !healthy {
-		t.Error("expected healthy=true")
+	if listingFailed {
+		t.Error("listingFailed = true, want false")
 	}
 	if len(entries) != 1 {
 		t.Fatalf("Collect returned %d entries, want 1", len(entries))
@@ -306,7 +384,7 @@ func TestCollect_ExplicitMock(t *testing.T) {
 
 // TestCollect_WildcardMock exercises the wildcard branch end-to-end:
 // owner listing returns two packages, each package page returns a
-// download count. Migrated from TestCollectGHCRWildcardMock.
+// download count.
 func TestCollect_WildcardMock(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
@@ -334,23 +412,39 @@ func TestCollect_WildcardMock(t *testing.T) {
 	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, _, healthy := c.Collect(ctx, refs)
+	entries, _, listingFailed := c.Collect(ctx, refs)
 
-	if !healthy {
-		t.Error("expected healthy=true")
+	if listingFailed {
+		t.Error("listingFailed = true, want false")
 	}
 	if len(entries) != 2 {
 		t.Fatalf("Collect returned %d entries, want 2", len(entries))
 	}
 }
 
-// TestCollect_AllFailUnhealthy verifies that when every package scrape
-// fails with a non-parse error (e.g. 500), the returned healthy flag
-// is false and no zero-count entries are appended (a zero entry would
-// inject a false zero into the exposed gauge; the per-day delta is
-// computed downstream by Prometheus/Mimir). Migrated from
-// TestCollectGHCRAllFailUnhealthy.
-func TestCollect_AllFailUnhealthy(t *testing.T) {
+func TestScrapeDownloads_EscapesNestedName(t *testing.T) {
+	var path string
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.EscapedPath()
+		_, _ = w.Write([]byte(downloadsHTML("7")))
+	}))
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+
+	count, err := c.scrapeDownloads(t.Context(), "owner", "helm-charts/grafana-operator")
+	if err != nil {
+		t.Fatalf("scrapeDownloads: %v", err)
+	}
+	if count != 7 {
+		t.Errorf("scrapeDownloads count = %d, want 7", count)
+	}
+	if path != "/users/owner/packages/container/package/helm-charts%2Fgrafana-operator" {
+		t.Errorf("scrapeDownloads path = %q, want nested name escaped once", path)
+	}
+}
+
+// TestCollect_AllFailuresAreNotListingFailure verifies that package-scrape
+// failures do not set the source-private wildcard-listing fact.
+func TestCollect_AllFailuresAreNotListingFailure(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -358,37 +452,13 @@ func TestCollect_AllFailUnhealthy(t *testing.T) {
 	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
-	entries, _, healthy := c.Collect(t.Context(), refs)
+	entries, _, listingFailed := c.Collect(t.Context(), refs)
 
-	if healthy {
-		t.Error("expected healthy=false when all scrapes fail")
+	if listingFailed {
+		t.Error("expected listingFailed=false when all scrapes fail")
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected 0 entries (failures skipped), got %d", len(entries))
-	}
-}
-
-// TestCollect_AllParseFailures verifies that when every package scrape
-// returns HTML that misses the download marker, Collect reports
-// healthy=false and appends no zero-count entries. Migrated from
-// TestCollectGHCRAllParseFailures; also pins the "majority parse
-// failures" format-drift warning path.
-func TestCollect_AllParseFailures(t *testing.T) {
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><div>no download info here</div></html>`))
-	}))
-
-	client := srv.Client()
-	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
-	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
-	entries, _, healthy := c.Collect(t.Context(), refs)
-
-	if healthy {
-		t.Error("expected healthy=false when all parse failures")
-	}
-	if len(entries) != 0 {
-		t.Fatalf("expected 0 entries (parse failures skipped), got %d", len(entries))
 	}
 }
 
@@ -408,7 +478,6 @@ func TestFetchHTML_OverCap_IsFormatChanged(t *testing.T) {
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("fetchHTML over-cap error = %v, want errHTMLFormatChanged", err)
 	}
-	// The typed httpx error stays unwrappable for callers that want the limit.
 	if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); !ok {
 		t.Errorf("error = %v, want it to wrap *httpx.ResponseTooLargeError", err)
 	}
@@ -458,15 +527,10 @@ func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 	}
 }
 
-// TestBuildPackageListSharedKeyEncodingPreventsDuplicates guards the invariant
-// that makes the two dedup sites correct: the wildcard pass and the
-// explicit-ref pass write into ONE `seen` map, so they must encode a pair
-// identically. If only one of them were changed, the explicit ref would no
-// longer match its wildcard twin and the same package would be returned twice,
-// scraped twice and exported twice.
-//
-// Set membership cannot see a duplicate, so this test counts occurrences per
-// ref, which is the part that fails if the two encodings ever drift apart.
+// TestBuildPackageListSharedKeyEncodingPreventsDuplicates guards that the
+// wildcard and explicit-ref dedup passes write into the SAME `seen` map, so
+// an explicit ref already found by the wildcard is not returned, scraped
+// and exported a second time.
 func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/owner" && r.URL.Query().Get("tab") == "packages" {
@@ -484,9 +548,9 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 		{Owner: "owner", Repo: "app3"}, // genuinely new
 	}
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
-	packages, whollyFailed, parseFail := c.buildPackageList(t.Context(), refs)
-	if whollyFailed || parseFail != 0 {
-		t.Fatalf("listing failures: whollyFailed=%v parseFail=%d", whollyFailed, parseFail)
+	packages, whollyFailed := c.buildPackageList(t.Context(), refs)
+	if whollyFailed {
+		t.Fatal("listing failed, want successful deduplicated package list")
 	}
 
 	counts := make(map[registry.RepoRef]int, len(packages))
@@ -495,8 +559,7 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 	}
 	for ref, n := range counts {
 		if n != 1 {
-			t.Errorf("package %s/%s returned %d times, want exactly 1 (the wildcard and explicit passes disagree on the dedup key encoding)",
-				ref.Owner, ref.Repo, n)
+			t.Errorf("package %s/%s returned %d times, want exactly 1", ref.Owner, ref.Repo, n)
 		}
 	}
 	if len(packages) != 3 {
@@ -504,20 +567,17 @@ func TestBuildPackageListSharedKeyEncodingPreventsDuplicates(t *testing.T) {
 	}
 }
 
-// packageLink renders one package link of the form a listing page of kind
-// carries, so a fixture cannot drift from the prefix the parser matches.
+// packageLink renders one package link in the form a listing page of kind
+// carries, so a fixture matches the prefix the parser matches.
 func packageLink(kind ownerKind, owner, name string) string {
 	return `<a href="` + linkPrefix(kind, owner) + name + `">` + name + `</a>`
 }
 
-// listingClient returns a Client whose listing reads are capped at pageCap
-// pages and paced in microseconds.
-func listingClient(t *testing.T, h http.Handler, logger *slog.Logger, pageCap int) *Client {
+// listingClient returns a Client whose listing reads are paced in microseconds.
+func listingClient(t *testing.T, h http.Handler, logger *slog.Logger) *Client {
 	t.Helper()
 	srv := httptest.NewTestServer(t, h)
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), logger))
-	c.pageCap = pageCap
-	return c
+	return NewClient(srv.Client(), fastPacing(shortRetry(), logger))
 }
 
 // TestClient_ScrapePackageList_PaginatesOwnerListing pins the page loop: an
@@ -556,7 +616,7 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 				page := r.URL.Query().Get("page")
 				asked[page]++
 				_, _ = w.Write([]byte(tt.pages[page]))
-			}), capturingLogger(&buf), 5)
+			}), capturingLogger(&buf))
 
 			got, refused, err := c.scrapePackageList(t.Context(), "owner")
 			if err != nil {
@@ -578,34 +638,85 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 	}
 }
 
+func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
+	for _, count := range []int{maxListingCandidates, maxListingCandidates + 1} {
+		t.Run(fmt.Sprintf("candidates_%d", count), func(t *testing.T) {
+			var html strings.Builder
+			for i := range count {
+				html.WriteString(packageLink(userOwner, "owner", fmt.Sprintf("p%d", i)))
+			}
+			html.WriteString(lastPageMarker)
+			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(html.String()))
+			}), testsupport.QuietLogger())
+
+			got, _, err := c.scrapePackageList(t.Context(), "owner")
+			if count > maxListingCandidates {
+				if !errors.Is(err, errHTMLFormatChanged) || len(got) != 0 {
+					t.Fatalf("scrapePackageList(%d candidates) = (%d names, %v), want no names and errHTMLFormatChanged", count, len(got), err)
+				}
+				want := fmt.Sprintf("listing page 1 carried %d package candidates", count)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("scrapePackageList error = %q, want %q", err, want)
+				}
+				return
+			}
+			if err != nil || len(got) != maxListingCandidates {
+				t.Errorf("scrapePackageList(%d candidates) = (%d names, %v), want %d names", count, len(got), err, maxListingCandidates)
+			}
+		})
+	}
+}
+
+func TestClient_ScrapePackageList_RefusedOnlyPageFailsClosed(t *testing.T) {
+	pages := 0
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write([]byte(packageLink(userOwner, "owner", "good")))
+			return
+		}
+		_, _ = w.Write([]byte(`<a href="/users/owner/packages/container/package/%zz">bad</a>`))
+	}), testsupport.QuietLogger())
+
+	got, refused, err := c.scrapePackageList(t.Context(), "owner")
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged", err)
+	}
+	if !slices.Equal(got, []string{"good"}) || refused.Count != 1 || pages != 2 {
+		t.Errorf("scrapePackageList = (%v, %+v) after %d pages, want partial name and one refusal after 2 pages", got, refused, pages)
+	}
+}
+
 // TestClient_ScrapePackageList_PageCapWarnsOnTruncation pins the WARN an
 // operator's alert keys on: with names still arriving when the bound bites,
-// the listing is truncated and says so with the literal alerts.yaml matches.
+// the listing is truncated and warns with the literal alerts.yaml matches.
 func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 	var buf bytes.Buffer
 	pages := 0
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page"))))
-	}), capturingLogger(&buf), 2)
+	}), capturingLogger(&buf))
 
 	got, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList: %v", err)
 	}
-	if len(got) != 2 || pages != 2 {
-		t.Errorf("scrapePackageList = %v after %d pages, want 2 names from 2 pages (pageCap=2)", got, pages)
+	if len(got) != maxListingPages || pages != maxListingPages {
+		t.Errorf("scrapePackageList = %v after %d pages, want %d names from %d pages", got, pages, maxListingPages, maxListingPages)
 	}
 	logs := buf.String()
-	if !strings.Contains(logs, "hit page cap") || !strings.Contains(logs, "max_pages=2") {
-		t.Errorf("a truncated listing did not warn with the `hit page cap` literal and max_pages; logs:\n%s", logs)
+	wantPages := fmt.Sprintf("max_pages=%d", maxListingPages)
+	if !strings.Contains(logs, "hit page cap") || !strings.Contains(logs, wantPages) {
+		t.Errorf("a truncated listing did not warn with the `hit page cap` literal and %s; logs:\n%s", wantPages, logs)
 	}
 }
 
 // TestClient_ScrapePackageList_LaterPageFailureIsPartial pins the other
 // literal alerts.yaml keys on: a page after the first failing is a PARTIAL
-// listing, so the names already read come back with the error rather than
-// being discarded, and the owner is not reported as wholly failed.
+// listing, so the names already read come back with the error, and the
+// owner is not reported as wholly failed.
 func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
 	var buf bytes.Buffer
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -614,7 +725,7 @@ func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a")))
-	}), capturingLogger(&buf), 5)
+	}), capturingLogger(&buf))
 
 	got, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err == nil {
@@ -627,9 +738,36 @@ func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
 		t.Errorf("a partial listing did not warn with the `listing partially failed` literal; logs:\n%s", logs)
 	}
 
-	_, whollyFailed, _ := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	_, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed {
 		t.Error("buildPackageList reported a wholly failed listing, want partial (page 1 yielded a name)")
+	}
+}
+
+func TestClient_Collect_cancelledListingIsNotListingFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var buf bytes.Buffer
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a")))
+			return
+		}
+		cancel()
+		<-r.Context().Done()
+	}), capturingLogger(&buf))
+
+	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	if len(entries) != 0 || attempted != 0 || listingFailed {
+		t.Errorf("Collect(cancelled listing) = (%d entries, attempted %d, listingFailed %v), want (0, 0, false)",
+			len(entries), attempted, listingFailed)
+	}
+	logs := buf.String()
+	if strings.Contains(logs, "ghcr owner listing partially failed") {
+		t.Errorf("cancelled listing emitted the partial-listing alert record; logs:\n%s", logs)
+	}
+	if !strings.Contains(logs, "ghcr package listing cancelled") {
+		t.Errorf("cancelled listing emitted no cancellation record; logs:\n%s", logs)
 	}
 }
 
@@ -642,9 +780,9 @@ func TestClient_ScrapePackageList_ReadsOrganizationForm(t *testing.T) {
 		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
 	})
 	mux.HandleFunc("GET /orgs/myorg/packages", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(packageLink(orgOwner, "myorg", "svc")))
+		_, _ = w.Write([]byte(`<a href="/orgs/myorg/packages/container/package/svc">svc</a>`))
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger(), 5)
+	c := listingClient(t, mux, testsupport.QuietLogger())
 
 	got, _, err := c.scrapePackageList(t.Context(), "myorg")
 	if err != nil {
@@ -655,10 +793,54 @@ func TestClient_ScrapePackageList_ReadsOrganizationForm(t *testing.T) {
 	}
 }
 
+func TestClient_ScrapePackageList_OrganizationLaterPageFailureIsPartial(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
+	})
+	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "1" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc")))
+	})
+	c := listingClient(t, mux, testsupport.QuietLogger())
+
+	got, refused, err := c.scrapePackageList(t.Context(), "owner")
+	if err == nil {
+		t.Fatal("scrapePackageList error = nil, want organization page-2 failure")
+	}
+	if !slices.Equal(got, []string{"svc"}) || refused.Count != 0 {
+		t.Errorf("scrapePackageList = (%v, %+v), want organization page-1 name alongside error", got, refused)
+	}
+}
+
+func TestClient_ScrapePackageList_OrganizationFirstPageFailureKeepsUserSummary(t *testing.T) {
+	orgCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
+	})
+	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
+		orgCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	c := listingClient(t, mux, testsupport.QuietLogger())
+
+	got, refused, err := c.scrapePackageList(t.Context(), "owner")
+	if err == nil {
+		t.Fatal("scrapePackageList error = nil, want organization page-1 failure")
+	}
+	if len(got) != 0 || refused.Count != 0 || orgCalls == 0 {
+		t.Errorf("scrapePackageList = (%v, %+v) after %d organization calls, want empty user-form summary", got, refused, orgCalls)
+	}
+}
+
 // TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses pins the
 // diagnostic for the one state that stays ambiguous after the kind probe: a
 // user with no container packages and a user page whose link markup changed
-// are indistinguishable, so the error names both, the checkable one first.
+// are indistinguishable, so the error names both.
 func TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
@@ -667,7 +849,7 @@ func TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses(t *testing.T) {
 	mux.HandleFunc("GET /orgs/nobody/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // not an organization: this owner is a user
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger(), 5)
+	c := listingClient(t, mux, testsupport.QuietLogger())
 
 	got, _, err := c.scrapePackageList(t.Context(), "nobody")
 	if !errors.Is(err, errHTMLFormatChanged) {
@@ -680,20 +862,19 @@ func TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses(t *testing.T) {
 	}
 }
 
-// TestClient_ExpandWildcard_BoundsRefusedNameSample pins the one answer an
-// operator has to "why is my package missing": the count of names the
-// charset gate refused plus one sample, bounded at the emit site because
-// the sample is raw bytes off a scraped page — a single unterminated
-// attribute can otherwise reach the log stream megabytes wide.
+// TestClient_ExpandWildcard_BoundsRefusedNameSample pins that the refused
+// name count plus one sample is bounded at the emit site: the sample is
+// raw bytes off a scraped page, so an unterminated attribute must not
+// reach the log stream megabytes wide.
 func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	var buf bytes.Buffer
 	huge := strings.Repeat("%", 4096)
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<a href="` + linkPrefix(userOwner, "owner") + huge + `">bad</a>` +
-			packageLink(userOwner, "owner", "good")))
-	}), capturingLogger(&buf), 1)
+			packageLink(userOwner, "owner", "good") + lastPageMarker))
+	}), capturingLogger(&buf))
 
-	packages, whollyFailed, _ := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	packages, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed || len(packages) != 1 || packages[0].Repo != "good" {
 		t.Fatalf("buildPackageList = (%+v, whollyFailed=%v), want just owner/good", packages, whollyFailed)
 	}

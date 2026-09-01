@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,12 +20,12 @@ import (
 // the orchestrator in isolation from any real HTTP path.
 type fakeSource struct {
 	// lastRefs captures the refs Collect saw so tests can assert the
-	// orchestrator plumbs RefsFor(Source().String()) through correctly.
-	entries   []registry.Entry
-	lastRefs  []registry.RepoRef
-	attempted int
-	source    registry.ID
-	healthy   bool
+	// orchestrator plumbs RefsFor(Source()) through correctly.
+	entries       []registry.Entry
+	lastRefs      []registry.RepoRef
+	attempted     int
+	source        registry.ID
+	listingFailed bool
 	// cancel, when set, cancels the cycle's context from inside Collect, so a
 	// test can stage a source that was invoked and then interrupted.
 	cancel context.CancelFunc
@@ -43,7 +44,7 @@ func (f *fakeSource) Collect(
 	if f.cancel != nil {
 		f.cancel()
 	}
-	return f.entries, f.attempted, f.healthy
+	return f.entries, f.attempted, f.listingFailed
 }
 
 // newFakeDockerHub and newFakeGHCR build fakeSources whose Source() matches
@@ -60,40 +61,36 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{
-		{Owner: "owner", Repo: "app", Pulls: 42, TagCount: 2},
+		{Owner: "owner", Repo: "app", Pulls: 42, TagCount: new(2)},
 	}
 	dh.attempted = 1
-	dh.healthy = true
+	dh.listingFailed = false
 
 	gh := newFakeGHCR()
 	gh.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 500}}
 	gh.attempted = 1
-	gh.healthy = true
+	gh.listingFailed = false
 
 	images := collect.Run(ctx, collect.Options{
+		Metrics: obs.New(),
 		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []registry.RepoRef {
-			switch name {
-			case registry.DockerHub.String():
+		RefsFor: func(source registry.ID) []registry.RepoRef {
+			switch source {
+			case registry.DockerHub:
 				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
-			case registry.GHCR.String():
+			case registry.GHCR:
 				return []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}
 			}
 			return nil
 		},
 	})
 	want := []obs.ImageMetric{
-		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42, Tags: 2},
-		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500, Tags: 0},
+		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42, Tags: new(2)},
+		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500},
 	}
-	if len(images) != len(want) {
-		t.Fatalf("images = %+v, want %+v", images, want)
-	}
-	for i := range want {
-		if images[i] != want[i] {
-			t.Errorf("images[%d] = %+v, want %+v", i, images[i], want[i])
-		}
+	if !reflect.DeepEqual(images, want) {
+		t.Errorf("images = %+v, want %+v", images, want)
 	}
 	// RefsFor plumbed through correctly.
 	if len(dh.lastRefs) != 1 || dh.lastRefs[0].Repo != "app" {
@@ -104,68 +101,36 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	}
 }
 
-func TestRun_skips_empty_refs(t *testing.T) {
-	ctx := t.Context()
-	// GHCR has no refs - should be skipped entirely, not invoked.
-	dh := newFakeDockerHub()
-	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
-	dh.attempted = 1
-	dh.healthy = true
-
-	gh := newFakeGHCR() // would fail if invoked (healthy stays false)
-
-	images := collect.Run(ctx, collect.Options{
-		Sources: []collect.Source{dh, gh},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []registry.RepoRef {
-			if name == registry.DockerHub.String() {
-				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
-			}
-			return nil
-		},
-	})
-	if len(images) != 1 {
-		t.Errorf("images = %+v, want the one dockerhub record", images)
-	}
-	if gh.lastRefs != nil {
-		t.Errorf("gh should not have been invoked (empty refs), lastRefs = %+v", gh.lastRefs)
-	}
-}
-
 // TestRun_records_counters_only_for_invoked_sources pins the denominator the
 // shipped RegistryStatsCollectStalled and RegistryStatsSourceDegraded rules
 // read: a source with no configured refs moves neither counter, and an
 // invoked unhealthy source moves both.
 func TestRun_records_counters_only_for_invoked_sources(t *testing.T) {
-	obs.CollectsTotal.Reset()
-	obs.CollectErrors.Reset()
-	t.Cleanup(func() {
-		obs.CollectsTotal.Reset()
-		obs.CollectErrors.Reset()
-	})
+	m := obs.New()
 
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
-	dh.healthy = true
+	dh.listingFailed = false
 
 	gh := newFakeGHCR()
 	gh.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 2}}
 	gh.attempted = 1
-	gh.healthy = false
+	gh.listingFailed = true
 
 	scrape := func() string {
 		r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 		w := httptest.NewRecorder()
-		obs.Handler()(w, r)
+		m.Handler()(w, r)
 		return w.Body.String()
 	}
 
 	collect.Run(t.Context(), collect.Options{
+		Metrics: m,
 		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []registry.RepoRef {
-			if name == registry.DockerHub.String() {
+		RefsFor: func(source registry.ID) []registry.RepoRef {
+			if source == registry.DockerHub {
 				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
 			}
 			return nil
@@ -181,9 +146,10 @@ func TestRun_records_counters_only_for_invoked_sources(t *testing.T) {
 	}
 
 	collect.Run(t.Context(), collect.Options{
+		Metrics: m,
 		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(string) []registry.RepoRef {
+		RefsFor: func(registry.ID) []registry.RepoRef {
 			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
 		},
 	})
@@ -203,6 +169,50 @@ func TestRun_records_counters_only_for_invoked_sources(t *testing.T) {
 	}
 }
 
+func TestRun_derivesSourceHealthFromResults(t *testing.T) {
+	tests := []struct {
+		name          string
+		entries       int
+		attempted     int
+		listingFailed bool
+		wantHealthy   bool
+	}{
+		{name: "zero_attempts", wantHealthy: true},
+		{name: "all_failed", attempted: 3},
+		{name: "majority_failed", entries: 1, attempted: 3},
+		{name: "exactly_half_failed", entries: 1, attempted: 2, wantHealthy: true},
+		{name: "all_succeeded", entries: 2, attempted: 2, wantHealthy: true},
+		{name: "listing_failed", entries: 2, attempted: 2, listingFailed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := newFakeDockerHub()
+			src.attempted = tt.attempted
+			src.listingFailed = tt.listingFailed
+			for range tt.entries {
+				src.entries = append(src.entries, registry.Entry{Owner: "owner", Repo: "repo"})
+			}
+
+			buf := &bytes.Buffer{}
+			logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			collect.Run(t.Context(), collect.Options{
+				Metrics: obs.New(),
+				Sources: []collect.Source{src},
+				Logger:  logger,
+				RefsFor: func(registry.ID) []registry.RepoRef {
+					return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+				},
+			})
+
+			unhealthy := strings.Contains(buf.String(), `msg="source reported unhealthy"`)
+			if unhealthy == tt.wantHealthy {
+				t.Errorf("Run(entries=%d, attempted=%d, listingFailed=%v) healthy = %v, want %v; logs:\n%s",
+					tt.entries, tt.attempted, tt.listingFailed, !unhealthy, tt.wantHealthy, buf.String())
+			}
+		})
+	}
+}
+
 // TestRun_empty_cycle_log_classifies_cause pins the terminal record for each
 // cause of an empty cycle, which is the only observable the four states have
 // (they share one return). Order is part of the contract: a cycle that is
@@ -213,12 +223,12 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 	degraded.attempted = 2 // entries stay empty, healthy stays false
 
 	emptyButHealthy := newFakeDockerHub()
-	emptyButHealthy.healthy = true
+	emptyButHealthy.listingFailed = false
 
 	tests := []struct {
 		name     string
 		sources  []collect.Source
-		refsFor  func(string) []registry.RepoRef
+		refsFor  func(registry.ID) []registry.RepoRef
 		cancel   bool
 		want     string
 		unwanted []string
@@ -228,7 +238,7 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			sources: []collect.Source{degraded},
 			want:    `level=WARN msg="no repos configured"`,
 			unwanted: []string{
-				`msg="all collections failed"`,
+				`msg="no images collected, at least one source failed"`,
 				`msg="no images found for the configured refs"`,
 				`msg="collection interrupted"`,
 			},
@@ -236,8 +246,19 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 		{
 			name:    "all_sources_failed_reports_failure",
 			sources: []collect.Source{degraded},
-			refsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
-			want:    `level=ERROR msg="all collections failed"`,
+			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+			want:    `level=ERROR msg="no images collected, at least one source failed"`,
+			unwanted: []string{
+				`msg="no repos configured"`,
+				`msg="no images found for the configured refs"`,
+				`msg="collection interrupted"`,
+			},
+		},
+		{
+			name:    "mixed_health_without_images_reports_failure",
+			sources: []collect.Source{emptyButHealthy, degraded},
+			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+			want:    `level=ERROR msg="no images collected, at least one source failed"`,
 			unwanted: []string{
 				`msg="no repos configured"`,
 				`msg="no images found for the configured refs"`,
@@ -247,10 +268,10 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 		{
 			name:    "healthy_but_empty_reports_nothing_to_poll",
 			sources: []collect.Source{emptyButHealthy},
-			refsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
 			want:    `level=WARN msg="no images found for the configured refs"`,
 			unwanted: []string{
-				`msg="all collections failed"`,
+				`msg="no images collected, at least one source failed"`,
 				`msg="no repos configured"`,
 				`msg="collection interrupted"`,
 			},
@@ -258,11 +279,11 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 		{
 			name:    "cancelled_cycle_reports_interruption_before_failure",
 			sources: []collect.Source{degraded},
-			refsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
 			cancel:  true,
 			want:    `level=WARN msg="collection interrupted"`,
 			unwanted: []string{
-				`msg="all collections failed"`,
+				`msg="no images collected, at least one source failed"`,
 				`msg="no repos configured"`,
 				`msg="no images found for the configured refs"`,
 			},
@@ -288,6 +309,7 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			}
 
 			collect.Run(ctx, collect.Options{
+				Metrics: obs.New(),
 				Sources: sources,
 				Logger:  logger,
 				RefsFor: tt.refsFor,
@@ -313,12 +335,7 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 // context also stops the loop, so no later source mints a collects_total
 // sample for a cycle it never performed.
 func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
-	obs.CollectsTotal.Reset()
-	obs.CollectErrors.Reset()
-	t.Cleanup(func() {
-		obs.CollectsTotal.Reset()
-		obs.CollectErrors.Reset()
-	})
+	m := obs.New()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -326,14 +343,15 @@ func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	dh.attempted = 1
 	dh.cancel = cancel
 	gh := newFakeGHCR()
-	gh.healthy = true
+	gh.listingFailed = false
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	collect.Run(ctx, collect.Options{
+		Metrics: m,
 		Sources: []collect.Source{dh, gh},
 		Logger:  logger,
-		RefsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+		RefsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
 	})
 
 	if gh.lastRefs != nil {
@@ -341,7 +359,7 @@ func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	}
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
-	obs.Handler()(w, r)
+	m.Handler()(w, r)
 	body := w.Body.String()
 	if strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 1`) {
 		t.Errorf("a cancelled cycle moved collect_errors_total:\n%s", body)
@@ -354,14 +372,34 @@ func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	}
 }
 
-func TestRun_no_sources_configured_returns_no_images(t *testing.T) {
-	ctx := t.Context()
-	images := collect.Run(ctx, collect.Options{
-		Sources: []collect.Source{},
-		Logger:  testsupport.QuietLogger(),
+func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	dh := newFakeDockerHub()
+	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	dh.attempted = 1
+	dh.cancel = cancel
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	collect.Run(ctx, collect.Options{
+		Metrics: obs.New(),
+		Sources: []collect.Source{dh},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		},
 	})
-	if len(images) != 0 {
-		t.Errorf("images = %+v, want empty", images)
+
+	logs := buf.String()
+	if !strings.Contains(logs, `level=WARN msg="collection interrupted"`) {
+		t.Errorf("Run(cancelled non-empty source) logs = %q, want interruption record", logs)
+	}
+	if strings.Contains(logs, `msg="partial collection failure`) {
+		t.Errorf("Run(cancelled non-empty source) logs = %q, do not want partial-failure record", logs)
+	}
+	if strings.Contains(logs, `msg="collection complete"`) {
+		t.Errorf("Run(cancelled non-empty source) logs = %q, do not want completion record", logs)
 	}
 }
 
@@ -370,7 +408,7 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
 	dh.attempted = 1
-	dh.healthy = true
+	dh.listingFailed = false
 
 	// GHCR has refs but returns no entries and flags unhealthy. The
 	// cycle still serves data because DockerHub produced some.
@@ -378,9 +416,10 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	gh.attempted = 2
 
 	images := collect.Run(ctx, collect.Options{
+		Metrics: obs.New(),
 		Sources: []collect.Source{dh, gh},
 		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(name string) []registry.RepoRef {
+		RefsFor: func(source registry.ID) []registry.RepoRef {
 			return []registry.RepoRef{{Owner: "o", Repo: "r"}}
 		},
 	})
@@ -390,44 +429,38 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 }
 
 // TestRun_unhealthy_source_still_serves_entries pins that an unhealthy
-// source's data survives the stamp: main sends every returned image to
-// obs.SetImage and derives marker health from len(images), so gating the
-// stamp on the source verdict would silently drop the only data collected.
+// source's data survives the stamp.
 func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 	dh := newFakeDockerHub()
-	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 7, TagCount: 3}}
-	dh.attempted = 2 // one of two refs failed, so the source reports unhealthy
+	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 7, TagCount: new(3)}}
+	dh.attempted = 2
+	dh.listingFailed = true
 
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	images := collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
 		Sources: []collect.Source{dh},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(string) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "app"}, {Owner: "owner", Repo: "gone"}}
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{
+				{Owner: "owner", Repo: "app"},
+				{Owner: "owner", Repo: "gone"},
+			}
 		},
 	})
 
-	want := obs.ImageMetric{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 7, Tags: 3}
+	want := obs.ImageMetric{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 7, Tags: new(3)}
 	if len(images) != 1 {
 		t.Fatalf("images = %+v, want one record from the unhealthy source", images)
 	}
-	if images[0] != want {
+	if !reflect.DeepEqual(images[0], want) {
 		t.Errorf("images[0] = %+v, want %+v", images[0], want)
 	}
-}
-
-func TestRun_nil_refsfor_skips_all_sources(t *testing.T) {
-	ctx := t.Context()
-	dh := newFakeDockerHub() // healthy stays false
-	images := collect.Run(ctx, collect.Options{
-		Sources: []collect.Source{dh},
-		Logger:  testsupport.QuietLogger(),
-		// RefsFor: nil
-	})
-	if len(images) != 0 {
-		t.Errorf("images = %+v, want none (every source skipped)", images)
-	}
-	if dh.lastRefs != nil {
-		t.Errorf("dh.lastRefs = %+v, want nil (skipped)", dh.lastRefs)
+	logs := buf.String()
+	if !strings.Contains(logs, `msg="source reported unhealthy"`) ||
+		!strings.Contains(logs, `succeeded=1`) || !strings.Contains(logs, `attempted=2`) {
+		t.Errorf("Run() unhealthy source log missing succeeded=1 attempted=2; logs:\n%s", logs)
 	}
 }
 
@@ -438,11 +471,12 @@ func TestRun_defaults_logger(t *testing.T) {
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "o", Repo: "a", Pulls: 1}}
 	dh.attempted = 1
-	dh.healthy = true
+	dh.listingFailed = false
 
 	images := collect.Run(ctx, collect.Options{
+		Metrics: obs.New(),
 		Sources: []collect.Source{dh},
-		RefsFor: func(string) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "a"}} },
+		RefsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "a"}} },
 	})
 	if len(images) != 1 {
 		t.Fatalf("Run() = %+v, want one record", images)

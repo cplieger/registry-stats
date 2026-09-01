@@ -3,13 +3,9 @@ package dockerhub
 import "testing"
 
 // FuzzDockerHubRepoUnmarshal drives the production single-repo metadata
-// parser with arbitrary bytes. The Docker Hub response is untrusted
-// input feeding the cumulative image_pulls_total gauge, so the invariant
-// is: a nil error implies a non-negative pull count (a response without a
-// usable pull_count — malformed JSON, absent field, null, negative,
-// duplicated member — must error so it can never reach the gauge as a
-// bogus 0). The seed corpus pins the real response shape plus malformed
-// inputs.
+// parser. Invariant: a nil error implies a non-negative pull count, so a
+// response with no usable pull_count can never reach the cumulative gauge
+// as a bogus 0.
 func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":5000,"last_updated":"2026-03-06T12:00:00Z"}`))
 	f.Add([]byte(`{"pull_count":0}`))
@@ -33,13 +29,11 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 }
 
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
-// parser. Invariant: every entry it returns carries exactly the
-// requested owner, a non-empty repo name (the urlsafe guard drops
-// unsafe and empty names) and a non-negative pull count, so a crafted
-// listing response can neither smuggle a foreign owner into the label set
-// downstream code trusts, nor inject an empty/unsafe path segment into
-// the tags URL built from it, nor land a negative value in a cumulative
-// counter.
+// parser. Invariant: every entry carries exactly the requested owner, a
+// non-empty repo name, and a non-negative pull count — so a crafted
+// listing response cannot smuggle a foreign owner into the label set,
+// inject an unsafe path segment into the tags URL, or land a negative
+// value in a cumulative counter.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
@@ -71,12 +65,10 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 }
 
 // FuzzDockerHubTagCountUnmarshal drives the production tag-count parser.
-// The Docker Hub tags response is untrusted input feeding the image_tags
-// gauge, so the invariant is: a nil error implies a non-negative count
-// (a response without a usable count — malformed JSON, absent field,
-// negative value — must error so it can never reach the gauge). The
+// Invariant: a nil error implies a non-negative count, so a response
+// without a usable count can never reach the image_tags gauge. The
 // {"results":[{}]} seed carries over from the deleted tag-page parser's
-// committed corpus (valid JSON with no usable payload).
+// committed corpus.
 func FuzzDockerHubTagCountUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"count":164,"next":"page2","results":[{"name":"latest","digest":"sha256:abc"}]}`))
 	f.Add([]byte(`{"count":0,"next":"","results":[]}`))

@@ -66,10 +66,9 @@ services:
 | Variable | Description | Default | Required |
 | --- | --- | --- | --- |
 | `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (for example `myuser/*,otheruser/specific-app`) | _(unset)_ | No |
-| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for specific packages or `owner/*` to auto-discover all public packages for an owner (for example `myuser/*,otheruser/specific-app`) | _(unset)_ | No |
+| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
 | `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
-| `ENABLE_METRICS` | Serve the Prometheus metrics endpoint; `false` or `0` disables it | `true` | No |
 | `LISTEN_ADDR` | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port | `:9100` | No |
 
 ### Ports
@@ -102,8 +101,6 @@ Prometheus text format metrics. Includes:
 - `registrystats_collect_errors_total{source}`: failed collects per source
 - `registrystats_collect_duration_seconds`: collect cycle duration histogram
 - `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds`: runtime metrics
-
-Disabled when `ENABLE_METRICS=false`.
 
 ## Grafana integration
 
@@ -143,7 +140,7 @@ go quietly incomplete while no metric moves.
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
 | `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, no entry was usable at all, or every ref resolved to nothing | warning |
-| `RegistryStatsCollectFailed` | the container logged an `ERROR`: a fetch or parse failure, a changed GHCR page, or a recovered panic | warning |
+| `RegistryStatsCollectFailed` | the container logged an `ERROR`: a fetch or parse failure or a changed GHCR page | warning |
 | `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
 
 `RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,

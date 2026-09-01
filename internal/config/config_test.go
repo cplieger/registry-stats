@@ -3,11 +3,13 @@ package config
 import (
 	"log/slog"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 	"pgregory.net/rapid"
 )
@@ -32,20 +34,83 @@ func TestParseRepoRefs(t *testing.T) {
 		{"owner/*,owner/a", 2},
 	}
 	for _, tt := range tests {
-		got, _ := ParseRepoRefs(tt.input)
+		got, _ := parseRepoRefs(tt.input, registry.DockerHub)
 		if len(got) != tt.want {
-			t.Errorf("ParseRepoRefs(%q) = %d items, want %d", tt.input, len(got), tt.want)
+			t.Errorf("parseRepoRefs(%q, DockerHub) = %d items, want %d", tt.input, len(got), tt.want)
 		}
 	}
 }
 
-func TestParseRepoRefsWildcard(t *testing.T) {
-	refs, _ := ParseRepoRefs("owner/repo,owner2/*,owner3/pkg")
-	if len(refs) != 3 {
-		t.Fatalf("len = %d, want 3", len(refs))
+func TestParseRepoRefs_GHCRNestedNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		reg       registry.ID
+		want      []registry.RepoRef
+		wantWarns int
+	}{
+		{
+			name:  "uppercase_escape",
+			input: "owner/helm-charts%2Fgrafana-operator",
+			reg:   registry.GHCR,
+			want:  []registry.RepoRef{{Owner: "owner", Repo: "helm-charts/grafana-operator"}},
+		},
+		{
+			name:  "lowercase_escape",
+			input: "owner/helm-charts%2fgrafana-operator",
+			reg:   registry.GHCR,
+			want:  []registry.RepoRef{{Owner: "owner", Repo: "helm-charts/grafana-operator"}},
+		},
+		{name: "docker_hub_encoded_slash", input: "owner/helm-charts%2Fgrafana-operator", reg: registry.DockerHub, wantWarns: 1},
+		{name: "raw_nested_slash", input: "owner/helm-charts/grafana-operator", reg: registry.GHCR, wantWarns: 1},
+		{name: "dot_segments", input: "owner/..%2f..%2fetc%2fpasswd", reg: registry.GHCR, wantWarns: 1},
+		{name: "encoded_dot_segments", input: "owner/%2e%2e%2f%2e%2e", reg: registry.GHCR, wantWarns: 1},
+		{name: "single_dot", input: "owner/%2e", reg: registry.GHCR, wantWarns: 1},
+		{name: "empty_element", input: "owner/a//b", reg: registry.GHCR, wantWarns: 1},
+		{name: "trailing_slash", input: "owner/a%2F", reg: registry.GHCR, wantWarns: 1},
+		{name: "nul", input: "owner/bad%00name", reg: registry.GHCR, wantWarns: 1},
+		{name: "invalid_escape", input: "owner/%zz", reg: registry.GHCR, wantWarns: 1},
 	}
-	if refs[1].Owner != "owner2" || refs[1].Repo != "*" {
-		t.Errorf("refs[1] = %+v, want owner2/*", refs[1])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, warns := parseRepoRefs(tt.input, tt.reg)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("parseRepoRefs(%q, %v) refs = %+v, want %+v", tt.input, tt.reg, got, tt.want)
+			}
+			if len(warns) != tt.wantWarns {
+				t.Errorf("parseRepoRefs(%q, %v) returned %d warnings, want %d: %+v", tt.input, tt.reg, len(warns), tt.wantWarns, warns)
+			}
+		})
+	}
+}
+
+func TestParseRepoRefs_CanonicalizesOwner(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []registry.RepoRef
+	}{
+		{"Owner/*", []registry.RepoRef{{Owner: "owner", Repo: "*"}}},
+		{"OWNER/Repo", []registry.RepoRef{{Owner: "owner", Repo: "Repo"}}},
+		{"Mixed/repo,mixed/repo", []registry.RepoRef{{Owner: "mixed", Repo: "repo"}}},
+	}
+	for _, tt := range tests {
+		got, _ := parseRepoRefs(tt.input, registry.DockerHub)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("parseRepoRefs(%q, DockerHub) = %+v, want %+v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestParseRepoRefs_preservesFirstOccurrenceOrder(t *testing.T) {
+	refs, _ := parseRepoRefs("z/last,a/first,z/last,owner2/*,m/middle,a/first", registry.DockerHub)
+	want := []registry.RepoRef{
+		{Owner: "z", Repo: "last"},
+		{Owner: "a", Repo: "first"},
+		{Owner: "owner2", Repo: "*"},
+		{Owner: "m", Repo: "middle"},
+	}
+	if !slices.Equal(refs, want) {
+		t.Errorf("parseRepoRefs(%q, DockerHub) refs = %+v, want %+v", "z/last,a/first,z/last,owner2/*,m/middle,a/first", refs, want)
 	}
 }
 
@@ -56,22 +121,62 @@ func TestParseRepoRefs_acceptsOnlyExactWildcard(t *testing.T) {
 		"double_star": "owner/**",
 	} {
 		t.Run(name, func(t *testing.T) {
-			refs, _ := ParseRepoRefs(input)
+			refs, _ := parseRepoRefs(input, registry.DockerHub)
 			if len(refs) != 0 {
-				t.Errorf("ParseRepoRefs(%q) = %+v, want no refs", input, refs)
+				t.Errorf("parseRepoRefs(%q, DockerHub) = %+v, want no refs", input, refs)
 			}
 		})
 	}
 
-	refs, warns := ParseRepoRefs("owner/*")
+	refs, warns := parseRepoRefs("owner/*", registry.DockerHub)
 	if len(warns) != 0 {
-		t.Fatalf("ParseRepoRefs(owner/*) warnings = %v, want none", warns)
+		t.Fatalf("parseRepoRefs(owner/*, DockerHub) warnings = %v, want none", warns)
 	}
 	if len(refs) != 1 {
-		t.Fatalf("ParseRepoRefs(owner/*) refs = %+v, want one ref", refs)
+		t.Fatalf("parseRepoRefs(owner/*, DockerHub) refs = %+v, want one ref", refs)
 	}
 	if refs[0].Owner != "owner" || refs[0].Repo != "*" {
-		t.Errorf("ParseRepoRefs(owner/*) ref = %+v, want owner/*", refs[0])
+		t.Errorf("parseRepoRefs(owner/*, DockerHub) ref = %+v, want owner/*", refs[0])
+	}
+}
+
+func TestParseRepoRefs_warnsForEveryRejectedTokenOnce(t *testing.T) {
+	input := "good/one,bad, ,owner/bad?repo,good/one,also-bad,ok/two,owner/bad%repo"
+	refs, warns := parseRepoRefs(input, registry.GHCR)
+	wantRefs := []registry.RepoRef{
+		{Owner: "good", Repo: "one"},
+		{Owner: "ok", Repo: "two"},
+	}
+	if !slices.Equal(refs, wantRefs) {
+		t.Errorf("parseRepoRefs(%q, GHCR) refs = %+v, want %+v", input, refs, wantRefs)
+	}
+
+	wantWarns := []Warning{
+		{
+			Msg: "skipping invalid repo ref",
+			Attrs: []slog.Attr{
+				slog.String("input", "bad"),
+				slog.String("expected", "owner/repo or owner/*"),
+			},
+		},
+		{
+			Msg:   "skipping repo ref with unsafe characters",
+			Attrs: []slog.Attr{slog.String("input", "owner/bad?repo")},
+		},
+		{
+			Msg: "skipping invalid repo ref",
+			Attrs: []slog.Attr{
+				slog.String("input", "also-bad"),
+				slog.String("expected", "owner/repo or owner/*"),
+			},
+		},
+		{
+			Msg:   "skipping repo ref with unsafe characters",
+			Attrs: []slog.Attr{slog.String("input", "owner/bad%repo")},
+		},
+	}
+	if !slices.EqualFunc(warns, wantWarns, warningEqual) {
+		t.Errorf("parseRepoRefs(%q, GHCR) warnings = %+v, want %+v", input, warns, wantWarns)
 	}
 }
 
@@ -139,8 +244,8 @@ func TestLoadNegativeNumbers(t *testing.T) {
 	}
 }
 
-// TestLoadZeroValues verifies that POLL_INTERVAL_HOURS=0 is a valid
-// value (one-shot mode), not coerced to the positive fallback.
+// TestLoadZeroValues: POLL_INTERVAL_HOURS=0 is a valid value (one-shot
+// mode), not coerced to the positive fallback.
 func TestLoadZeroValues(t *testing.T) {
 	t.Setenv("POLL_INTERVAL_HOURS", "0")
 	t.Setenv("DOCKERHUB_REPOS", "")
@@ -156,26 +261,31 @@ func TestLoadZeroValues(t *testing.T) {
 func TestParseRepoRefs_output_always_safe(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		input := rapid.String().Draw(t, "input")
-		refs, _ := ParseRepoRefs(input)
-		for _, ref := range refs {
-			if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {
-				t.Errorf("ParseRepoRefs(%q) produced unsafe repo %q", input, ref.Repo)
-			}
-			if !urlsafe.IsSafeURLSegment(ref.Owner) {
-				t.Errorf("ParseRepoRefs(%q) produced unsafe owner %q", input, ref.Owner)
+		for _, reg := range []registry.ID{registry.DockerHub, registry.GHCR} {
+			refs, _ := parseRepoRefs(input, reg)
+			for _, ref := range refs {
+				if reg == registry.GHCR {
+					for part := range strings.SplitSeq(ref.Repo, "/") {
+						if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(part) {
+							t.Fatalf("parseRepoRefs(%q, GHCR) produced unsafe repo element %q", input, part)
+						}
+					}
+				} else if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {
+					t.Fatalf("parseRepoRefs(%q, DockerHub) produced unsafe repo %q", input, ref.Repo)
+				}
+				if !urlsafe.IsSafeURLSegment(ref.Owner) {
+					t.Fatalf("parseRepoRefs(%q, %v) produced unsafe owner %q", input, reg, ref.Owner)
+				}
 			}
 		}
 	})
 }
 
-// clampMaxPollHours mirrors the maxPollHours clamp threshold inside
-// Load (24 * 365). Referenced by the clamp-boundary tests below so
-// they assert against the exact threshold.
+// clampMaxPollHours mirrors Load's clamp threshold (24 * 365).
 const clampMaxPollHours = 24 * 365
 
 // warningsContain reports whether any returned Warning's message contains
-// substr. Config never logs (go-rulebook C1 relocation): warnings are values,
-// so the tests read them directly instead of capturing the global logger.
+// substr.
 func warningsContain(warns []Warning, substr string) bool {
 	for _, w := range warns {
 		if strings.Contains(w.Msg, substr) {
@@ -185,25 +295,29 @@ func warningsContain(warns []Warning, substr string) bool {
 	return false
 }
 
-// TestWarningsCarryStructuredAttrs pins the k/v shape main emits: the
-// pre-relocation code logged these as slog attributes, so flattening them
-// into prose would break any Loki filter or alert keyed on the attribute
-// rather than the message text.
+func warningEqual(a, b Warning) bool {
+	return a.Msg == b.Msg && slices.EqualFunc(a.Attrs, b.Attrs, slog.Attr.Equal)
+}
+
+// TestWarningsCarryStructuredAttrs pins the k/v shape main emits: flattening
+// these into prose would break any structured log query or alert keyed on the
+// attribute rather than the message text.
 func TestWarningsCarryStructuredAttrs(t *testing.T) {
-	t.Setenv("DOCKERHUB_REPOS", "not-a-ref,owner/bad?repo")
+	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
 	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
 	t.Setenv("LOG_LEVEL", "bogus")
 
 	_, warns := Load()
 
-	want := map[string][]any{
-		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {"value", "notanumber"},
-		"invalid LOG_LEVEL, using default":                     {"value", "bogus", "default", "info"},
-		"skipping invalid repo ref":                            {"input", "not-a-ref", "expected", "owner/repo or owner/*"},
-		"skipping repo ref with unsafe characters":             {"input", "owner/bad?repo"},
+	want := map[string][]slog.Attr{
+		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {slog.String("value", "notanumber")},
+		"invalid LOG_LEVEL, using default": {
+			slog.String("value", "bogus"),
+			slog.String("default", "info"),
+		},
 	}
-	got := make(map[string][]any, len(warns))
+	got := make(map[string][]slog.Attr, len(warns))
 	for _, w := range warns {
 		got[w.Msg] = w.Attrs
 	}
@@ -213,18 +327,29 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 			t.Errorf("no warning with message %q (got %v)", msg, got)
 			continue
 		}
-		if !reflect.DeepEqual(gotAttrs, attrs) {
+		if !slices.EqualFunc(gotAttrs, attrs, slog.Attr.Equal) {
 			t.Errorf("warning %q attrs = %v, want %v", msg, gotAttrs, attrs)
 		}
 	}
+
+	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "LOG_LEVEL", "LISTEN_ADDR"} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("POLL_INTERVAL_HOURS", "-5")
+	_, warns = Load()
+	wantNegative := []Warning{{
+		Msg:   "invalid POLL_INTERVAL_HOURS, using default of 1 hour",
+		Attrs: []slog.Attr{slog.String("value", "-5")},
+	}}
+	if !slices.EqualFunc(warns, wantNegative, warningEqual) {
+		t.Errorf("Load(POLL_INTERVAL_HOURS=-5) warnings = %+v, want %+v", warns, wantNegative)
+	}
 }
 
-// TestLoad_clamp_boundary_silent_at_exact_max verifies that a
-// POLL_INTERVAL_HOURS value exactly equal to the clamp threshold is
-// accepted as-is, with NO clamp warning. At the boundary the clamped and
-// unclamped durations are identical, so the only observable difference
-// between "clamp" and "don't clamp" is the warning: it must stay silent
-// when the input equals the maximum.
+// TestLoad_clamp_boundary_silent_at_exact_max: a POLL_INTERVAL_HOURS value
+// exactly equal to the clamp threshold is accepted as-is, with no clamp
+// warning — the only observable difference between clamping and not is
+// the warning.
 func TestLoad_clamp_boundary_silent_at_exact_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
@@ -243,13 +368,13 @@ func TestLoad_clamp_boundary_silent_at_exact_max(t *testing.T) {
 	}
 }
 
-// TestLoad_clamp_warns_one_above_max confirms the clamp branch (and
-// the log-capture mechanism) actually fire one hour above the threshold,
-// so the boundary test's "no warning" assertion is a genuine signal
-// rather than a silently-broken capture.
+// TestLoad_clamp_warns_one_above_max confirms the clamp branch fires one
+// hour above the threshold.
 func TestLoad_clamp_warns_one_above_max(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("LOG_LEVEL", "")
+	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
 
 	cfg, warns := Load()
@@ -259,51 +384,52 @@ func TestLoad_clamp_warns_one_above_max(t *testing.T) {
 		t.Errorf("Load(POLL_INTERVAL_HOURS=%d).PollInterval = %v, want %v (clamped)",
 			clampMaxPollHours+1, cfg.PollInterval, want)
 	}
-	if !warningsContain(warns, "POLL_INTERVAL_HOURS clamped") {
-		t.Errorf("Load above max returned no clamp warning, want one (warns=%v)", warns)
-	}
-}
-
-func TestLoad_EnableMetrics(t *testing.T) {
-	tests := []struct {
-		env  string
-		want bool
-	}{
-		{"true", true},
-		{"1", true},
-		{"yes", true},
-		{"no", true},
-		{"off", true},
-		{"", true},
-		{"false", false},
-		{"FALSE", false},
-		{" false ", false},
-		{"0", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.env, func(t *testing.T) {
-			t.Setenv("ENABLE_METRICS", tt.env)
-			cfg, _ := Load()
-			if cfg.EnableMetrics != tt.want {
-				t.Errorf("Load(ENABLE_METRICS=%q).EnableMetrics = %v, want %v", tt.env, cfg.EnableMetrics, tt.want)
-			}
-		})
+	wantWarns := []Warning{{
+		Msg: "POLL_INTERVAL_HOURS clamped",
+		Attrs: []slog.Attr{
+			slog.Int("requested", clampMaxPollHours+1),
+			slog.Int("max", clampMaxPollHours),
+		},
+	}}
+	if !slices.EqualFunc(warns, wantWarns, warningEqual) {
+		t.Errorf("Load above max warnings = %+v, want %+v", warns, wantWarns)
 	}
 }
 
 // TestLoad_ListenAddr_trims verifies edge whitespace comes off LISTEN_ADDR
-// before the bind (an untrimmed " :9100" resolves the padding as a hostname)
-// and that the normalization is reported rather than silent.
+// before the bind and that the normalization is reported rather than silent.
 func TestLoad_ListenAddr_trims(t *testing.T) {
 	tests := []struct {
-		name     string
-		env      string
-		want     string
-		wantWarn int
+		name      string
+		env       string
+		want      string
+		wantWarns []Warning
 	}{
-		{"leading_space", " :9100", ":9100", 1},
-		{"whitespace_only", "   ", defaultListenAddr, 1},
-		{"already_clean", ":9100", ":9100", 0},
+		{
+			name: "leading_space",
+			env:  " :9100",
+			want: ":9100",
+			wantWarns: []Warning{{
+				Msg: "trimmed whitespace from LISTEN_ADDR",
+				Attrs: []slog.Attr{
+					slog.String("value", " :9100"),
+					slog.String("using", ":9100"),
+				},
+			}},
+		},
+		{
+			name: "whitespace_only",
+			env:  "   ",
+			want: defaultListenAddr,
+			wantWarns: []Warning{{
+				Msg: "trimmed whitespace from LISTEN_ADDR",
+				Attrs: []slog.Attr{
+					slog.String("value", "   "),
+					slog.String("using", defaultListenAddr),
+				},
+			}},
+		},
+		{name: "already_clean", env: ":9100", want: ":9100"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -317,9 +443,8 @@ func TestLoad_ListenAddr_trims(t *testing.T) {
 			if cfg.ListenAddr != tt.want {
 				t.Errorf("Load(LISTEN_ADDR=%q).ListenAddr = %q, want %q", tt.env, cfg.ListenAddr, tt.want)
 			}
-			if len(warns) != tt.wantWarn {
-				t.Errorf("Load(LISTEN_ADDR=%q) returned %d warnings, want %d (warns=%v)",
-					tt.env, len(warns), tt.wantWarn, warns)
+			if !slices.EqualFunc(warns, tt.wantWarns, warningEqual) {
+				t.Errorf("Load(LISTEN_ADDR=%q) warnings = %+v, want %+v", tt.env, warns, tt.wantWarns)
 			}
 		})
 	}
@@ -350,8 +475,7 @@ func TestLoad_LogLevel(t *testing.T) {
 	}
 }
 
-// TestLoad_validLogLevel_silent confirms the warn fires only on invalid
-// input: a valid LOG_LEVEL parses without emitting the invalid-level warning.
+// TestLoad_validLogLevel_silent: the warn fires only on invalid input.
 func TestLoad_validLogLevel_silent(t *testing.T) {
 	t.Setenv("DOCKERHUB_REPOS", "")
 	t.Setenv("GHCR_REPOS", "")

@@ -1,10 +1,8 @@
 // Package config parses registry-stats configuration from environment
-// variables. The env var names (DOCKERHUB_REPOS, GHCR_REPOS,
-// POLL_INTERVAL_HOURS, LOG_LEVEL, LISTEN_ADDR, ENABLE_METRICS) and the
-// meaning of their values are an inviolate contract: the in-memory
-// representation here can evolve freely, the env surface cannot.
-// LISTEN_ADDR is edge-trimmed, because padding otherwise fails the bind
-// with the cause invisible.
+// variables. The env var names and the meaning of their values are an
+// inviolate contract: the in-memory representation here can evolve
+// freely, the env surface cannot. LISTEN_ADDR is edge-trimmed, because
+// padding otherwise fails the bind with the cause invisible.
 //
 // This package never logs: every non-fatal parse problem is returned as a
 // Warning value for the caller to emit.
@@ -14,6 +12,7 @@ import (
 	"cmp"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -36,22 +35,19 @@ type Config struct {
 	GHCRRepos      []registry.RepoRef // GHCR packages: "owner/repo" or "owner/*" (wildcard = all public)
 	PollInterval   time.Duration      // time between collections (0 = one-shot, collect once then serve)
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
-	EnableMetrics  bool               // serve /metrics endpoint (env ENABLE_METRICS)
 }
 
-// attrValue is the slog key the whole-value warnings carry that value under
-// (POLL_INTERVAL_HOURS twice, LOG_LEVEL, LISTEN_ADDR), so those sites cannot
-// drift apart. A skipped repo-list entry carries "input" instead: it is one
+// attrValue is the slog key the whole-value warnings carry that value
+// under. A skipped repo-list entry carries "input" instead: it is one
 // token out of the value, not the value.
 const attrValue = "value"
 
-// Warning is a non-fatal configuration note (an invalid or clamped value)
-// for the caller to log. Attrs carries slog key/value pairs rather than a
-// pre-rendered sentence, so attribute-keyed queries keep working. Warnings
-// never abort startup.
+// Warning is a non-fatal configuration note for the caller to log. Attrs
+// carries structured attributes rather than a pre-rendered sentence, so
+// attribute-keyed queries keep working.
 type Warning struct {
 	Msg   string
-	Attrs []any
+	Attrs []slog.Attr
 }
 
 // PollInterval returns the effective POLL_INTERVAL_HOURS as a duration
@@ -69,7 +65,7 @@ func PollInterval() (time.Duration, []Warning) {
 		}
 		warns = append(warns, Warning{
 			Msg:   "invalid POLL_INTERVAL_HOURS, using default of 1 hour",
-			Attrs: []any{attrValue, raw},
+			Attrs: []slog.Attr{slog.String(attrValue, raw)},
 		})
 		pollIntervalHours = 1
 	case !ok:
@@ -77,22 +73,23 @@ func PollInterval() (time.Duration, []Warning) {
 	case pollIntervalHours < 0:
 		warns = append(warns, Warning{
 			Msg:   "invalid POLL_INTERVAL_HOURS, using default of 1 hour",
-			Attrs: []any{attrValue, strconv.Itoa(pollIntervalHours)},
+			Attrs: []slog.Attr{slog.String(attrValue, strconv.Itoa(pollIntervalHours))},
 		})
 		pollIntervalHours = 1
 	}
-	// Clamp to a sensible upper bound: time.Duration is int64 nanoseconds
-	// (~292 years), so an unbounded hour count wraps. 2562048 hours yields a
-	// negative duration and scheduler.RunLoop returns at once on a
-	// non-positive Interval, so the collect loop would never run while the
-	// container still reported healthy off the boot marker; 5124096 hours
-	// wraps back through zero to 25m26s. 1 year is already nonsense for a
-	// stats poller.
+	// Clamp to a sensible upper bound: time.Duration is int64
+	// nanoseconds, so an unbounded hour count wraps. 2562048h yields a
+	// negative duration and scheduler.RunLoop returns at once, silently
+	// disabling the collect loop; 5124096h wraps back through zero to
+	// 25m26s and polls both registries every 25 minutes instead.
 	const maxPollHours = 24 * 365
 	if pollIntervalHours > maxPollHours {
 		warns = append(warns, Warning{
-			Msg:   "POLL_INTERVAL_HOURS clamped",
-			Attrs: []any{"requested", pollIntervalHours, "max", maxPollHours},
+			Msg: "POLL_INTERVAL_HOURS clamped",
+			Attrs: []slog.Attr{
+				slog.Int("requested", pollIntervalHours),
+				slog.Int("max", maxPollHours),
+			},
 		})
 		pollIntervalHours = maxPollHours
 	}
@@ -109,60 +106,48 @@ func Load() (Config, []Warning) {
 	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
 	if !logLevelOK {
 		warns = append(warns, Warning{
-			Msg:   "invalid LOG_LEVEL, using default",
-			Attrs: []any{attrValue, rawLogLevel, "default", "info"},
+			Msg: "invalid LOG_LEVEL, using default",
+			Attrs: []slog.Attr{
+				slog.String(attrValue, rawLogLevel),
+				slog.String("default", "info"),
+			},
 		})
 	}
 
-	// LISTEN_ADDR trims where the other envx.String reads do not: net.Listen
-	// resolves the padding in " :9100" as a hostname, so the bind fails with
-	// its cause invisible ("lookup  : no such host").
 	rawListenAddr := envx.String("LISTEN_ADDR")
 	listenAddr := strings.TrimSpace(rawListenAddr)
+	effectiveListenAddr := cmp.Or(listenAddr, defaultListenAddr)
 	if listenAddr != rawListenAddr {
 		warns = append(warns, Warning{
-			Msg:   "trimmed whitespace from LISTEN_ADDR",
-			Attrs: []any{attrValue, rawListenAddr, "using", cmp.Or(listenAddr, defaultListenAddr)},
+			Msg: "trimmed whitespace from LISTEN_ADDR",
+			Attrs: []slog.Attr{
+				slog.String(attrValue, rawListenAddr),
+				slog.String("using", effectiveListenAddr),
+			},
 		})
 	}
 
-	dhRepos, dhWarns := ParseRepoRefs(envx.String("DOCKERHUB_REPOS"))
+	dhRepos, dhWarns := parseRepoRefs(envx.String("DOCKERHUB_REPOS"), registry.DockerHub)
 	warns = append(warns, dhWarns...)
-	ghRepos, ghWarns := ParseRepoRefs(envx.String("GHCR_REPOS"))
+	ghRepos, ghWarns := parseRepoRefs(envx.String("GHCR_REPOS"), registry.GHCR)
 	warns = append(warns, ghWarns...)
 
 	return Config{
 		DockerHubRepos: dhRepos,
 		GHCRRepos:      ghRepos,
 		PollInterval:   pollInterval,
-		ListenAddr:     cmp.Or(listenAddr, defaultListenAddr),
+		ListenAddr:     effectiveListenAddr,
 		LogLevel:       logLevel,
-		EnableMetrics:  parseBoolEnv(envx.String("ENABLE_METRICS")),
 	}, warns
 }
 
-// parseBoolEnv returns true unless s is explicitly "false" or "0".
-//
-// Deliberately NOT envx.Bool: this app's documented contract is
-// default-enabled with exactly two disable spellings, so envx's wider
-// vocabulary ("no"/"off" false, "yes"/"on" true, warning on anything else)
-// would silently flip a value like "no" from enabled to disabled under an
-// inviolate compose-file contract.
-func parseBoolEnv(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "false", "0":
-		return false
-	default:
-		return true
-	}
-}
-
-// ParseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
-// pairs. Invalid entries (missing slash, unsafe characters) are skipped,
-// each reported as a Warning. Exact duplicates are dropped, keeping the
-// first occurrence and input order: a repeated ref costs a repeated owner
-// listing in every registry and contributes no entry.
-func ParseRepoRefs(s string) ([]registry.RepoRef, []Warning) {
+// parseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
+// pairs. GHCR repository tokens may contain percent-encoded nested names,
+// which are decoded and validated per path element; Docker Hub names remain
+// one segment. Invalid entries are skipped and reported as warnings. Owner
+// spelling is canonicalized to lower case, so deduplication folds owner case
+// while keeping the first occurrence and input order.
+func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	if s == "" {
 		return nil, nil
 	}
@@ -177,19 +162,44 @@ func ParseRepoRefs(s string) ([]registry.RepoRef, []Warning) {
 		owner, repo, ok := strings.Cut(p, "/")
 		if !ok || owner == "" || repo == "" {
 			warns = append(warns, Warning{
-				Msg:   "skipping invalid repo ref",
-				Attrs: []any{"input", p, "expected", "owner/repo or owner/*"},
+				Msg: "skipping invalid repo ref",
+				Attrs: []slog.Attr{
+					slog.String("input", p),
+					slog.String("expected", "owner/repo or owner/*"),
+				},
 			})
 			continue
 		}
-		if !urlsafe.IsSafeURLSegment(owner) || (repo != "*" && !urlsafe.IsSafeURLSegment(repo)) {
+
+		repoName := repo
+		unsafe := !urlsafe.IsSafeURLSegment(owner)
+		if repo != "*" {
+			if reg == registry.GHCR {
+				var err error
+				repoName, err = url.PathUnescape(repo)
+				unsafe = unsafe || err != nil || repoName == "" || strings.Contains(repo, "/")
+				if !unsafe {
+					for part := range strings.SplitSeq(repoName, "/") {
+						if !urlsafe.IsSafeURLSegment(part) {
+							unsafe = true
+							break
+						}
+					}
+				}
+			} else {
+				unsafe = unsafe || !urlsafe.IsSafeURLSegment(repo)
+			}
+		}
+		if unsafe {
 			warns = append(warns, Warning{
 				Msg:   "skipping repo ref with unsafe characters",
-				Attrs: []any{"input", p},
+				Attrs: []slog.Attr{slog.String("input", p)},
 			})
 			continue
 		}
-		ref := registry.RepoRef{Owner: owner, Repo: repo}
+
+		owner = strings.ToLower(owner)
+		ref := registry.RepoRef{Owner: owner, Repo: repoName}
 		if seen[ref] {
 			continue
 		}

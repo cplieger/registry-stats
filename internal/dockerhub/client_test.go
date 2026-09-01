@@ -24,10 +24,9 @@ func shortRetry() []httpx.GetOption {
 }
 
 // tagCountHandler returns a tags-listing handler with the given total
-// count. The results page deliberately holds a single entry so a test
-// passes only when the count field (not the page length) drives the value,
-// and "next" is deliberately non-empty: tagCount must not follow it, which
-// is what a caller's exact tags-request count asserts.
+// count, so a test passes only when the count field (not the page
+// length) drives the value. "next" is deliberately non-empty: tagCount
+// must not follow it.
 func tagCountHandler(count int) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -59,13 +58,13 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
-	entries, attempted, healthy := c.Collect(t.Context(), refs)
+	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1", attempted)
 	}
-	if !healthy {
-		t.Errorf("healthy = false, want true")
+	if listingFailed {
+		t.Errorf("listingFailed = true, want false")
 	}
 	if len(entries) != 1 {
 		t.Fatalf("entries len = %d, want 1", len(entries))
@@ -73,31 +72,30 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 	if entries[0].Owner != "owner" || entries[0].Repo != "myapp" || entries[0].Pulls != 5000 {
 		t.Errorf("entries[0] = %+v, want owner/myapp with 5000 pulls", entries[0])
 	}
-	if entries[0].TagCount != 164 {
-		t.Errorf("entries[0].TagCount = %d, want 164 (the count field, not the page length)", entries[0].TagCount)
+	if entries[0].TagCount == nil || *entries[0].TagCount != 164 {
+		t.Errorf("entries[0].TagCount = %v, want 164 (the count field, not the page length)", entries[0].TagCount)
 	}
 	if tagRequests != 1 {
 		t.Errorf("tags requests = %d, want exactly 1 per repo per cycle", tagRequests)
 	}
 }
 
-// TestClient_Collect_TagCountFailureKeepsEntry pins the skip-don't-zero
+// TestClient_Collect_TagCountFailureKeepsEntry pins the skip-don't-invent
 // contract for the tag count: a failing tags endpoint must not drop the
-// repo's entry (pulls stay intact) and must leave TagCount 0, so the
-// caller emits no image_tags series for the cycle rather than a wrong one.
-// It also pins which of the two collapsed failure arms fired: both land on
-// TagCount 0, so only the diagnostic tells a failed request from a repo
-// that legitimately has no tags.
+// repo's entry (pulls stay intact), but leaves TagCount nil because no value
+// was measured.
 func TestClient_Collect_TagCountFailureKeepsEntry(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    int
 		body      string
+		wantLevel string
 		wantMsg   string
+		wantShape bool
 		absentMsg string
 	}{
-		{"fetch_failure", http.StatusInternalServerError, "", "docker hub tag count fetch failed", "docker hub tag count parse failed"},
-		{"parse_failure", http.StatusOK, `{"results":[{"name":"latest"}]}`, "docker hub tag count parse failed", "docker hub tag count fetch failed"},
+		{"fetch_failure", http.StatusInternalServerError, "", "WARN", "docker hub tag count fetch failed", false, "docker hub tag count parse failed"},
+		{"parse_failure", http.StatusOK, `{"results":[{"name":"latest"}]}`, "ERROR", "docker hub tag count parse failed", true, "docker hub tag count fetch failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -113,20 +111,27 @@ func TestClient_Collect_TagCountFailureKeepsEntry(t *testing.T) {
 
 			logger, buf := captureLogger()
 			c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-			entries, attempted, healthy := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
+			entries, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
-			if attempted != 1 || !healthy {
-				t.Errorf("Collect tag-count %s = (attempted=%d, healthy=%v), want (1, true)", tt.name, attempted, healthy)
+			if attempted != 1 || listingFailed {
+				t.Errorf("Collect tag-count %s = (attempted=%d, listingFailed=%v), want (1, false)", tt.name, attempted, listingFailed)
 			}
 			if len(entries) != 1 {
 				t.Fatalf("Collect tag-count %s returned %d entries, want 1", tt.name, len(entries))
 			}
-			if entries[0].Pulls != 5000 || entries[0].TagCount != 0 {
-				t.Errorf("Collect tag-count %s entry = %+v, want pulls 5000 with TagCount 0", tt.name, entries[0])
+			if entries[0].Pulls != 5000 || entries[0].TagCount != nil {
+				t.Errorf("Collect tag-count %s entry = %+v, want pulls 5000 with no TagCount", tt.name, entries[0])
 			}
 			logs := buf.String()
-			if !strings.Contains(logs, `msg="`+tt.wantMsg+`"`) || !strings.Contains(logs, "repo=owner/myapp") || !strings.Contains(logs, "error=") {
-				t.Errorf("Collect tag-count %s did not log %q with repo and error; logs:\n%s", tt.name, tt.wantMsg, logs)
+			if !strings.Contains(logs, "level="+tt.wantLevel) || !strings.Contains(logs, `msg="`+tt.wantMsg+`"`) ||
+				!strings.Contains(logs, "repo=owner/myapp") || !strings.Contains(logs, "error=") {
+				t.Errorf("Collect tag-count %s did not log %s %q with repo and error; logs:\n%s", tt.name, tt.wantLevel, tt.wantMsg, logs)
+			}
+			if tt.wantShape && !strings.Contains(logs, "shape_change=true") {
+				t.Errorf("Collect tag-count %s did not classify the response-shape failure; logs:\n%s", tt.name, logs)
+			}
+			if !tt.wantShape && strings.Contains(logs, "shape_change=true") {
+				t.Errorf("Collect tag-count %s classified a fetch failure as a response-shape change; logs:\n%s", tt.name, logs)
 			}
 			if strings.Contains(logs, `msg="`+tt.absentMsg+`"`) {
 				t.Errorf("Collect tag-count %s logged wrong branch %q; logs:\n%s", tt.name, tt.absentMsg, logs)
@@ -152,19 +157,20 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, attempted, healthy := c.Collect(t.Context(), refs)
+	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
 	}
-	if !healthy {
-		t.Errorf("healthy = false, want true")
+	if listingFailed {
+		t.Errorf("listingFailed = true, want false")
 	}
 	if len(entries) != 2 {
 		t.Fatalf("entries len = %d, want 2", len(entries))
 	}
-	if entries[0].TagCount != 3 || entries[1].TagCount != 5 {
-		t.Errorf("tag counts = %d, %d, want 3, 5", entries[0].TagCount, entries[1].TagCount)
+	if entries[0].TagCount == nil || *entries[0].TagCount != 3 ||
+		entries[1].TagCount == nil || *entries[1].TagCount != 5 {
+		t.Errorf("tag counts = %v, %v, want 3, 5", entries[0].TagCount, entries[1].TagCount)
 	}
 }
 
@@ -196,14 +202,14 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 	}
 }
 
-func TestClient_Collect_DegradedOnAllFailures(t *testing.T) {
+func TestClient_Collect_AllExplicitFailuresAreNotListingFailure(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
-	entries, attempted, healthy := c.Collect(t.Context(), refs)
+	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
@@ -211,8 +217,8 @@ func TestClient_Collect_DegradedOnAllFailures(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("entries len = %d, want 0 (all fetches failed)", len(entries))
 	}
-	if healthy {
-		t.Errorf("healthy = true, want false (2/2 failures = fully degraded)")
+	if listingFailed {
+		t.Error("listingFailed = true, want false for explicit-repo failures")
 	}
 }
 
@@ -239,26 +245,19 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 	}
 }
 
-// TestClient_Collect_WildcardListingFailure_Health pins finding l-f4: the
-// healthy verdict must distinguish a wholesale wildcard listing outage
-// (unhealthy) from a legitimately-empty owner and a partial failure (both
-// healthy). Without the wholesale-outage signal a total Docker Hub listing
-// outage leaves attempted == 0, which the severe-degradation rule alone
-// reads as healthy — masking the outage from collect_errors_total.
-func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
+func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 	wildcard := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 
-	t.Run("wholesale_failure_is_unhealthy", func(t *testing.T) {
-		// Owner listing 404s on page 1 → zero usable repos → wholesale outage.
+	t.Run("wholesale_failure", func(t *testing.T) {
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
 
 		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
+		entries, attempted, listingFailed := c.Collect(t.Context(), wildcard)
 
-		if healthy {
-			t.Errorf("healthy = true, want false (wildcard listing wholly failed)")
+		if !listingFailed {
+			t.Error("listingFailed = false, want true for a wholesale wildcard listing failure")
 		}
 		if len(entries) != 0 {
 			t.Errorf("entries len = %d, want 0", len(entries))
@@ -268,8 +267,7 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		}
 	})
 
-	t.Run("legitimately_empty_owner_is_healthy", func(t *testing.T) {
-		// Owner listing succeeds with zero repos → not an outage, stays healthy.
+	t.Run("legitimately_empty_owner", func(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
@@ -277,54 +275,74 @@ func TestClient_Collect_WildcardListingFailure_Health(t *testing.T) {
 		srv := httptest.NewTestServer(t, mux)
 
 		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		entries, _, healthy := c.Collect(t.Context(), wildcard)
+		entries, _, listingFailed := c.Collect(t.Context(), wildcard)
 
-		if !healthy {
-			t.Errorf("healthy = false, want true (owner legitimately has zero repos)")
+		if listingFailed {
+			t.Error("listingFailed = true, want false for a legitimately empty owner")
 		}
 		if len(entries) != 0 {
 			t.Errorf("entries len = %d, want 0", len(entries))
 		}
 	})
 
-	t.Run("partial_failure_is_healthy", func(t *testing.T) {
-		// Page 1 returns one repo and signals another page; page 2 fails.
-		// listRepos returns the page-1 repo alongside the error → partial,
-		// not wholesale → stays healthy and serves the partial result.
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Query().Get("page") {
-			case "", "1":
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"results": []map[string]any{{"name": "a1", "pull_count": 1}},
-					"next":    "page2",
+	t.Run("partial_failure", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			page2Status int
+			page2Body   string
+			wantError   string
+			wantShape   bool
+		}{
+			{name: "http_error", page2Status: http.StatusNotFound, wantError: "list repos page 2"},
+			{name: "parse_error", page2Status: http.StatusOK, page2Body: `{"results":[],"results":[]}`, wantError: "parse repo list page 2", wantShape: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				mux := http.NewServeMux()
+				mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Query().Get("page") {
+					case "", "1":
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"results": []map[string]any{{"name": "a1", "pull_count": 1}},
+							"next":    "page2",
+						})
+					default:
+						w.WriteHeader(tt.page2Status)
+						_, _ = w.Write([]byte(tt.page2Body))
+					}
 				})
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-		})
-		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(2))
-		srv := httptest.NewTestServer(t, mux)
+				mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(2))
+				srv := httptest.NewTestServer(t, mux)
 
-		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		entries, attempted, healthy := c.Collect(t.Context(), wildcard)
+				logger, buf := captureLogger()
+				c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+				entries, attempted, listingFailed := c.Collect(t.Context(), wildcard)
 
-		if !healthy {
-			t.Errorf("healthy = false, want true (partial listing failure, one repo returned)")
-		}
-		if len(entries) != 1 || entries[0].Owner != "o" || entries[0].Repo != "a1" {
-			t.Errorf("entries = %+v, want one entry o/a1 (partial results served)", entries)
-		}
-		if attempted != 1 {
-			t.Errorf("attempted = %d, want 1", attempted)
+				if listingFailed {
+					t.Error("listingFailed = true, want false for a partial listing failure")
+				}
+				if len(entries) != 1 || entries[0].Owner != "o" || entries[0].Repo != "a1" {
+					t.Errorf("entries = %+v, want one entry o/a1 (partial results served)", entries)
+				}
+				if attempted != 1 {
+					t.Errorf("attempted = %d, want 1", attempted)
+				}
+				logs := buf.String()
+				if !strings.Contains(logs, `msg="docker hub listing partially failed"`) || !strings.Contains(logs, tt.wantError) {
+					t.Errorf("Collect() later-page %s did not log the partial-listing branch; logs:\n%s", tt.name, logs)
+				}
+				if strings.Contains(logs, "shape_change=true") != tt.wantShape {
+					t.Errorf("Collect() later-page %s shape_change=true presence = %v, want %v; logs:\n%s", tt.name, strings.Contains(logs, "shape_change=true"), tt.wantShape, logs)
+				}
+			})
 		}
 	})
 }
 
 // TestClient_Collect_PartialExplicitFailureLogsRepo covers the explicit-ref
-// state no other test reaches: exactly half the attempts fail, so the healthy
-// verdict survives and the per-repo ERROR is the only record of the configured
-// repo that was omitted. level=ERROR is what alerts.yaml keys on.
+// state no other test reaches: exactly half the attempts fail, while the
+// listing-failure fact stays false and the per-repo ERROR records the omitted
+// repo. level=ERROR is what alerts.yaml keys on.
 func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -352,10 +370,10 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 			logger, buf := captureLogger()
 			c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 			refs := []registry.RepoRef{{Owner: "bad", Repo: "app"}, {Owner: "good", Repo: "app"}}
-			entries, attempted, healthy := c.Collect(t.Context(), refs)
+			entries, attempted, listingFailed := c.Collect(t.Context(), refs)
 
-			if attempted != 2 || !healthy {
-				t.Errorf("Collect partial %s = (attempted=%d, healthy=%v), want (2, true)", tt.name, attempted, healthy)
+			if attempted != 2 || listingFailed {
+				t.Errorf("Collect partial %s = (attempted=%d, listingFailed=%v), want (2, false)", tt.name, attempted, listingFailed)
 			}
 			if len(entries) != 1 {
 				t.Fatalf("Collect partial %s returned %d entries, want 1", tt.name, len(entries))
@@ -376,32 +394,30 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 }
 
 // TestClient_Collect_CancelledMidFetch_IsNotAnOutage pins the cancellation
-// classification on the explicit-ref path: a stop is not a registry failure,
-// so the in-flight fetch error is recorded at DEBUG and never as the ERROR
-// alerts.yaml pages on. attempted still counts the ref that was tried, so the
-// leaf's own verdict stays unhealthy; neutrality is owed one layer up, where
-// collectSource declines to move collect_errors_total for a cancelled cycle.
+// classification on the explicit-ref path: a stop is not a registry
+// failure, so the in-flight fetch error is recorded at DEBUG, never the
+// ERROR alerts.yaml pages on.
 func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		// Cancel with the request in flight, then hold the handler until the
-		// client aborts, so the fetch deterministically fails on the stop
-		// rather than racing the response body.
+		// Cancel with the request in flight, then hold the handler until
+		// the client aborts, so the fetch deterministically fails on the
+		// stop rather than racing the response body.
 		cancel()
 		<-r.Context().Done()
 	}))
 
 	logger, buf := captureLogger()
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-	entries, attempted, healthy := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
+	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1 (the ref was tried)", attempted)
 	}
-	if len(entries) != 0 || healthy {
-		t.Errorf("Collect on a cancelled cycle = (%d entries, healthy=%v), want (0, false)", len(entries), healthy)
+	if len(entries) != 0 || listingFailed {
+		t.Errorf("Collect on a cancelled cycle = (%d entries, listingFailed=%v), want (0, false)", len(entries), listingFailed)
 	}
 	logs := buf.String()
 	if strings.Contains(logs, "level=ERROR") {
@@ -412,20 +428,18 @@ func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 	}
 }
 
-// captureLogger returns a logger that records everything (Debug and up)
-// into the returned buffer, so a test can assert which log lines a
-// Client emitted.
+// captureLogger returns a logger recording everything (Debug and up)
+// into the returned buffer.
 func captureLogger() (*slog.Logger, *bytes.Buffer) {
 	buf := &bytes.Buffer{}
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
 }
 
 // TestClient_Collect_WildcardListingError_LogsWarn pins the wildcard
-// expansion warn logs: a wholesale listing failure (zero usable repos)
-// logs the "wholly failed" warn, a partial failure (some pages returned)
-// logs the "partially failed" warn, and a successful listing stays
-// silent. Driving it through the public Collect (with a capturing
-// logger) also confirms the supplied logger is the one actually used.
+// expansion warn logs: a wholesale listing failure logs the "wholly
+// failed" warn, a partial failure logs "partially failed", and a
+// successful listing stays silent. Driving it through the public Collect
+// with a capturing logger also confirms the supplied logger is used.
 func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 	const (
 		whollyMsg    = "docker hub listing wholly failed"
@@ -460,7 +474,7 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 					"next":    "page2",
 				})
 			default:
-				w.WriteHeader(http.StatusNotFound) // page 2 fails; page 1 already yielded a repo
+				w.WriteHeader(http.StatusNotFound) // page 2 fails
 			}
 		})
 		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(1))

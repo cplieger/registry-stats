@@ -95,7 +95,7 @@ here.
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
   to the `cplieger` shared libs (`httpx`, `metrics`, `health`, `webhttp`,
-  `scheduler`, `slogx`, `envx`, `keyenc`) and `pgregory.net/rapid` (test-only). Prefer the standard library
+  `scheduler`, `slogx`, `envx`, `runesafe`) and `pgregory.net/rapid` (test-only). Prefer the standard library
   before reaching for a new dependency.
 - **The lowercase registry label comes from `Source().String()` alone.** The
   old interface carried a second method (`Name()`) with a prose must-equal
