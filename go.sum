@@ -1,7 +1,7 @@
 github.com/cplieger/envx/v2 v2.0.1 h1:s++DgE8adtWOElrNFRaHield1FNSLJzJqRWLHgRPWLg=
 github.com/cplieger/envx/v2 v2.0.1/go.mod h1:kKvTj6k8bxlYS2CtuF/7Go9zIe7qJYpMzckZNk8ucJc=
-github.com/cplieger/health v1.6.0 h1:qgzslmEVq8asgMkEZ25arRZPazJRWsN7E8XJ6KgxMpg=
-github.com/cplieger/health v1.6.0/go.mod h1:fGHTssNQpl2EjqRLxgs3n7bbj94gD5HDgi1KEk8cN0Q=
+github.com/cplieger/health v1.7.0 h1:GPKV//fmjsdpvP5as06wRvJ6MxqI7Y2mwiW/dyuOnoQ=
+github.com/cplieger/health v1.7.0/go.mod h1:fGHTssNQpl2EjqRLxgs3n7bbj94gD5HDgi1KEk8cN0Q=
 github.com/cplieger/httpx/v5 v5.0.2 h1:v7azlVn+Sji3Kti1VANCkF+IGqslqP5C9QjsiZEPVoE=
 github.com/cplieger/httpx/v5 v5.0.2/go.mod h1:3ap2CAq592k7smKhe3lWrwklthtmJ6L4cIWMTMM8O10=
 github.com/cplieger/keyenc v1.0.6 h1:Ac/EoEY8Lgy4ZyTi9I4G4s00RBWGoOlI3RdsjGwHLRo=
@@ -10,8 +10,8 @@ github.com/cplieger/metrics/v4 v4.0.0 h1:Ps4p3iDwEK9FsxNs94KfPeLBJrpN0xDaQi7hmah
 github.com/cplieger/metrics/v4 v4.0.0/go.mod h1:UHgCGvnEbvrx5YCUKxUZcOQEkASPzkIuzi7gJS5jNNI=
 github.com/cplieger/pathinside/v2 v2.0.0 h1:UZxSiu3UBCCs+Xe0+Of+oTLyzL+4wchKO2tShGxK8b8=
 github.com/cplieger/pathinside/v2 v2.0.0/go.mod h1:XuMYE6rO3te8Yf6Zcy35PLMgDcWaIz3RglJatWPhHnU=
-github.com/cplieger/scheduler/v4 v4.0.1 h1:Jr5SA+EPEAYuYqFEPLXq1AMZ7GLRoIwNREL+BhBpkeQ=
-github.com/cplieger/scheduler/v4 v4.0.1/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
+github.com/cplieger/scheduler/v4 v4.0.2 h1:nioyA1cfEUIXbOzez2ey9o5LfvR/+4odrbUs2b48X7A=
+github.com/cplieger/scheduler/v4 v4.0.2/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
 github.com/cplieger/slogx v1.6.3 h1:1W8DxUwovnfbL1wjthdELHhw2gFH1FXaUcG34KjefIw=
 github.com/cplieger/slogx v1.6.3/go.mod h1:KW/UCGyMK3grILRvcU4Zloawb27C13cLN5HQ7ZLNS5Q=
 github.com/cplieger/webhttp/v2 v2.0.2 h1:55fv7cuiF7GAjQAC1UZv7Jvi6cFCYvpUlKABlf4QKDU=
