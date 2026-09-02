@@ -1,7 +1,5 @@
-// Package collect is the registry-stats collection orchestrator: it loops
-// over a set of Source implementations, stamps each source's flat
-// []registry.Entry output with its registry label, and returns the
-// combined per-image metric records.
+// Package collect is the registry-stats collection orchestrator: it invokes
+// each registry Source in turn and returns the combined per-image records.
 package collect
 
 import (
@@ -13,16 +11,14 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Source collects registry-specific statistics for a list of refs.
-// Implementations return flat per-image registry.Entry records; Run stamps
-// each with the source's registry label for the metric surface. attempted
-// counts refs the source tried to fetch (including failures), reported
-// beside the served count when a source degrades. listingFailed reports a
+// Source collects registry-specific statistics for a list of refs, as flat
+// per-image registry.Entry records whose Owner and Repo label components
+// are non-empty. Source() must return a known registry.ID, since Run
+// derives the metric and log label from it. attempted counts per-image
+// fetch attempts including failures, after wildcard expansion, so it is
+// not len(refs); it is the denominator of Run's health verdict, so a ref
+// an implementation skips counts as neither. listingFailed reports a
 // wildcard owner listing that failed without yielding any usable refs.
-//
-// Source() must return a known registry.ID, never Unknown, since Run
-// derives the metric and log label from it; a successful Collect returns
-// entries whose Owner and Repo label components are non-empty.
 type Source interface {
 	Source() registry.ID
 	Collect(
@@ -31,9 +27,9 @@ type Source interface {
 	) (entries []registry.Entry, attempted int, listingFailed bool)
 }
 
-// Options configures a single Run. Metrics is required. RefsFor maps each
-// source's registry ID to the []registry.RepoRef it should fetch. A nil Logger
-// falls back to slog.Default.
+// Options configures a single Run. Metrics and RefsFor are required, and no
+// two Sources may report the same registry.ID: Run keys both the ref lookup
+// and the metric label on it. A nil Logger falls back to slog.Default.
 type Options struct {
 	Metrics *obs.Metrics
 	Logger  *slog.Logger
@@ -41,11 +37,12 @@ type Options struct {
 	Sources []Source
 }
 
-// Run orchestrates a single collection cycle: invokes each source's
-// Collect (skipping sources whose ref slice is empty), stamps each entry
-// with its source's registry label, and returns the combined per-image
-// records. The caller owns the health marker and derives it from the
-// returned set (see main.runCollect).
+// Run orchestrates a single collection cycle: it invokes each source's
+// Collect (skipping sources with no refs), stamps each entry with its
+// source's registry label, and returns the combined per-image records. The
+// caller owns the health marker and derives it from the returned set. A
+// cancelled cycle stops early and returns what it collected, with no error,
+// so a caller that publishes the set must check ctx.Err() first.
 func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 	logger := opts.Logger
 	if logger == nil {
@@ -64,7 +61,7 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 			// reads.
 			break
 		}
-		refs := refsFor(opts, src.Source())
+		refs := opts.RefsFor(src.Source())
 		if len(refs) == 0 {
 			continue
 		}
@@ -105,12 +102,11 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 	return images
 }
 
-// collectSource invokes a single source's Collect and stamps its entries
-// with the source's registry label. An unhealthy source bumps the
-// per-source error metric; entries are stamped regardless of health so a
-// degraded-but-nonempty source still contributes its data. A cancelled
-// cycle is a stop rather than a collection failure, so it moves neither
-// the error counter nor the record.
+// collectSource invokes one source's Collect and stamps its entries with the
+// source's registry label regardless of health, so a degraded-but-nonempty
+// source still contributes its data. A cancelled cycle is a stop rather than
+// a collection failure: the source still mints its collects_total sample,
+// but neither the error counter nor the unhealthy log line fires.
 func collectSource(
 	ctx context.Context,
 	m *obs.Metrics,
@@ -119,12 +115,15 @@ func collectSource(
 	refs []registry.RepoRef,
 ) (images []obs.ImageMetric, srcHealthy bool) {
 	entries, attempted, listingFailed := src.Collect(ctx, refs)
+	// Unhealthy when a wildcard owner listing wholly failed, or when more
+	// than half the attempts yielded no entry.
 	srcHealthy = !listingFailed && len(entries)*2 >= attempted
 	label := src.Source().String()
 	failed := !srcHealthy && ctx.Err() == nil
 	if failed {
 		logger.Warn("source reported unhealthy",
-			"source", label, "succeeded", len(entries), "attempted", attempted)
+			"source", label, "succeeded", len(entries), "attempted", attempted,
+			"listing_failed", listingFailed)
 	}
 	m.RecordCollect(label, failed)
 
@@ -139,13 +138,4 @@ func collectSource(
 		})
 	}
 	return images, srcHealthy
-}
-
-// refsFor resolves refs for a given source, returning nil when
-// opts.RefsFor is unset.
-func refsFor(opts Options, source registry.ID) []registry.RepoRef {
-	if opts.RefsFor == nil {
-		return nil
-	}
-	return opts.RefsFor(source)
 }

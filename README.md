@@ -123,14 +123,16 @@ overview, and tracked package count.
 
 ## Alerting
 
-registry-stats reports its state in two places, so the group in
-[`alerts.yaml`](alerts.yaml) is mixed. Five rules are PromQL, evaluated with
-Prometheus or the Mimir ruler over the `/metrics` endpoint you already scrape
-(see [Grafana integration](#grafana-integration)). Three are LogQL, evaluated
-with Loki's ruler over the container log, because their conditions leave no
-series to read: a repo ref rejected at parse time is never polled, and a cycle
-that loses a minority of its repos still reports healthy, so the exported counts
-go quietly incomplete while no metric moves.
+registry-stats reports its state in two places, so the rules ship as two files,
+one per expression language. [`alerts/promql.yaml`](alerts/promql.yaml) holds
+five rules, evaluated with Prometheus or the Mimir ruler over the `/metrics`
+endpoint you already scrape (see [Grafana integration](#grafana-integration)).
+[`alerts/logql.yaml`](alerts/logql.yaml) holds three, evaluated with Loki's
+ruler over the container log, because their conditions leave no series to read:
+a repo ref rejected at parse time is never polled, and a cycle that loses a
+minority of its repos still reports healthy, so the exported counts go quietly
+incomplete while no metric moves. Load each half into its own ruler: neither
+ruler parses the other's expressions.
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
@@ -140,7 +142,7 @@ go quietly incomplete while no metric moves.
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
 | `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, no entry was usable at all, or every ref resolved to nothing | warning |
-| `RegistryStatsCollectFailed` | the container logged an `ERROR`: a fetch or parse failure or a changed GHCR page | warning |
+| `RegistryStatsError` | the container logged an `ERROR`: a fetch or parse failure or a changed GHCR page | warning |
 | `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
 
 `RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,
@@ -169,7 +171,7 @@ uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within three poll intervals, so a wedged collect loop gets restarted (a cycle that legitimately runs longer than that — a rate-limited registry, say — trips the same deadline). An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, so the first two health lines of every boot are `WARN health state changed healthy=false` followed by `INFO health state changed healthy=true`; the WARN is routine start-up, not a failed cycle, even though a cycle that collects nothing logs the same record. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within three poll intervals, so a wedged collect loop gets restarted (a cycle that legitimately runs longer than that — a rate-limited registry, say — trips the same deadline). An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 

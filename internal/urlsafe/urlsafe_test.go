@@ -48,14 +48,41 @@ func TestIsSafeURLSegment_bounds_length(t *testing.T) {
 		size int
 		want bool
 	}{
-		{name: "at the bound", size: maxSegmentBytes, want: true},
-		{name: "one over the bound", size: maxSegmentBytes + 1, want: false},
+		{name: "at the bound", size: MaxSegmentBytes, want: true},
+		{name: "one over the bound", size: MaxSegmentBytes + 1, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input := strings.Repeat("a", tt.size)
 			if got := IsSafeURLSegment(input); got != tt.want {
 				t.Errorf("IsSafeURLSegment(%d chars) = %v, want %v", tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPackageName(t *testing.T) {
+	atBound := strings.Repeat("a", MaxSegmentBytes-len("owner"+"/"))
+	overBound := atBound + "a"
+	tests := []struct {
+		name  string
+		owner string
+		token string
+		want  string
+		ok    bool
+	}{
+		{name: "nested", owner: "owner", token: "helm-charts%2Fgrafana-operator", want: "helm-charts/grafana-operator", ok: true},
+		{name: "at whole-name bound", owner: "owner", token: atBound, want: atBound, ok: true},
+		{name: "over whole-name bound", owner: "owner", token: overBound},
+		{name: "many short elements", owner: "owner", token: strings.Repeat("a%2F", 126) + "a"},
+		{name: "raw slash", owner: "owner", token: "app/versions"},
+		{name: "unsafe element", owner: "owner", token: "app%2FRepo$"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := PackageName(tt.owner, tt.token)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("PackageName(%q, %q) = (%q, %v), want (%q, %v)", tt.owner, tt.token, got, ok, tt.want, tt.ok)
 			}
 		})
 	}

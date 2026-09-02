@@ -64,12 +64,31 @@ func TestNewClient_customLogger_isUsed(t *testing.T) {
 	}
 }
 
+func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
+	var buf bytes.Buffer
+	invalidCount := strings.Repeat("x", 4096)
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(downloadsHTML(invalidCount)))
+	}))
+
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	_, _, _ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+
+	logs := buf.String()
+	if !strings.Contains(logs, "ghcr scrape failed") {
+		t.Errorf("Collect(invalid count) emitted no scrape-failure log; logs:\n%s", logs)
+	}
+	if len(logs) > 1024 {
+		t.Errorf("Collect(4096-byte invalid count) emitted %d log bytes, want bounded output", len(logs))
+	}
+}
+
 // TestClient_Collect_pacesAtProductionDefaults drives Collect with the
 // zero-value pacing fields against an in-memory test server inside a
 // synctest bubble, so the real DefaultMinPacing / DefaultPacingJitter path
 // runs on the synthetic clock rather than costing real wall time per
-// package. It pins that both zero-value fallbacks apply, the delay leads
-// the FIRST scrape, and every interval lands in
+// package. It pins that both zero-value fallbacks apply, the first request
+// issues without advancing the clock, and every later interval lands in
 // [DefaultMinPacing, DefaultMinPacing+DefaultPacingJitter).
 //
 // httptest.NewTestServer's in-memory network is synctest-compatible and
@@ -100,17 +119,16 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 		if len(stamps) != len(refs) {
 			t.Fatalf("handler saw %d requests, want %d", len(stamps), len(refs))
 		}
+		if !stamps[0].Equal(start) {
+			t.Errorf("first request issued at %v, want no clock advance from %v", stamps[0], start)
+		}
 
-		// Interval 0 is the leading delay before the first scrape; the rest
-		// are the gaps between consecutive scrapes.
 		const maxPacing = DefaultMinPacing + DefaultPacingJitter
-		prev := start
-		for i, at := range stamps {
-			gap := at.Sub(prev)
+		for i := 1; i < len(stamps); i++ {
+			gap := stamps[i].Sub(stamps[i-1])
 			if gap < DefaultMinPacing || gap >= maxPacing {
 				t.Errorf("pacing interval %d = %v, want [%v, %v)", i, gap, DefaultMinPacing, maxPacing)
 			}
-			prev = at
 		}
 	})
 }
@@ -314,13 +332,11 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 }
 
 // TestCollect_ContextCancelledDuringPacing pins Collect's graceful-shutdown
-// path: an already-cancelled ctx is caught at the top of the package loop, so
-// it returns immediately with the results gathered so far, the attempted
-// count and the cycle verdict, rather than blocking on a pacing wait or
-// panicking. MinPacing is an hour so nothing can complete first, making the
-// branch deterministic without a real sleep; no HTTP request is issued
-// because cancellation precedes the first scrape (buildPackageList makes no
-// network call for an explicit ref).
+// path: an already-cancelled ctx reaches the first scrape and returns through
+// the cancelled-result arm with the results gathered so far, the attempted
+// count and the cycle verdict, rather than blocking or panicking. MinPacing is
+// an hour so an accidental leading wait would hang; no HTTP request completes
+// because the cancelled context reaches the transport immediately.
 func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 	c := NewClient(http.DefaultClient,
 		Options{MinPacing: time.Hour, PacingJitter: time.Nanosecond, RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
@@ -373,8 +389,8 @@ func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
 		})
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 
-		// Between the first scrape (paced to t+1h) and the second (t+2h).
-		time.AfterFunc(90*time.Minute, cancel)
+		// Between the immediate first scrape and the second at t+1h.
+		time.AfterFunc(30*time.Minute, cancel)
 		entries, attempted, listingFailed := c.Collect(ctx, refs)
 
 		if attempted != 1 || len(entries) != 1 {
@@ -394,18 +410,24 @@ func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
 	})
 }
 
-// TestCollect_cancelledInPacingWait_isNotAFailure pins that the widest
-// window a SIGTERM can land in — the pacing wait before a scrape — is
-// reported as a stop rather than as a GHCR failure: nothing is counted
-// attempted, listingFailed stays false so collect_errors_total does not move
-// on a redeploy, and the interruption WARN still names what was skipped.
+// TestCollect_cancelledInPacingWait_isNotAFailure pins that a SIGTERM in
+// the pacing wait before a later scrape is reported as a stop rather than as
+// a GHCR failure: the completed first package stays counted, the interrupted
+// package does not, listingFailed stays false, and the interruption WARN names
+// what was skipped.
 func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
+		requests := 0
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			t.Error("Collect issued a request, want the stop to land in the pacing wait first")
+			requests++
+			if requests > 1 {
+				t.Error("Collect issued the second request, want the stop to land in its pacing wait")
+				return
+			}
+			_, _ = w.Write([]byte(downloadsHTML("5")))
 		}))
 
 		c := NewClient(srv.Client(), Options{
@@ -416,17 +438,18 @@ func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 		})
 
 		time.AfterFunc(time.Minute, cancel)
-		entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
+		entries, attempted, listingFailed := c.Collect(ctx, refs)
 
-		if attempted != 0 || len(entries) != 0 {
-			t.Errorf("Collect(cancelled in the pacing wait) = (%d entries, attempted %d), want (0, 0)",
+		if attempted != 1 || len(entries) != 1 {
+			t.Errorf("Collect(cancelled in the second pacing wait) = (%d entries, attempted %d), want (1, 1)",
 				len(entries), attempted)
 		}
 		if listingFailed {
 			t.Error("Collect listingFailed = true, want false for cancellation")
 		}
 		if logs := buf.String(); !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
-			t.Errorf("Collect(cancelled in the pacing wait) logged no interruption; logs:\n%s", logs)
+			t.Errorf("Collect(cancelled in the second pacing wait) logged no interruption; logs:\n%s", logs)
 		}
 	})
 }

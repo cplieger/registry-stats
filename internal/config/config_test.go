@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"net/url"
 	"reflect"
 	"slices"
 	"strconv"
@@ -84,13 +85,39 @@ func TestParseRepoRefs_GHCRNestedNames(t *testing.T) {
 	}
 }
 
+func TestParseRepoRefs_RefusalReasons(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "owner", input: "owner$/repo", want: "owner not a safe URL segment"},
+		{name: "raw slash", input: "owner/app/versions", want: "raw slash; percent-encode nested names"},
+		{name: "escape", input: "owner/%zz", want: "invalid percent-escape"},
+		{name: "length", input: "owner/" + strings.Repeat("a", 256), want: "repository name over 255 bytes"},
+		{name: "charset", input: "owner/Repo$", want: "path element not a safe URL segment"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, warns := parseRepoRefs(tt.input, registry.GHCR)
+			if len(warns) != 1 {
+				t.Fatalf("parseRepoRefs(%q, GHCR) warnings = %+v, want one", tt.input, warns)
+			}
+			want := slog.String("reason", tt.want)
+			if len(warns[0].Attrs) != 2 || !warns[0].Attrs[1].Equal(want) {
+				t.Errorf("parseRepoRefs(%q, GHCR) reason = %+v, want %v", tt.input, warns[0].Attrs, want)
+			}
+		})
+	}
+}
+
 func TestParseRepoRefs_CanonicalizesOwner(t *testing.T) {
 	tests := []struct {
 		input string
 		want  []registry.RepoRef
 	}{
 		{"Owner/*", []registry.RepoRef{{Owner: "owner", Repo: "*"}}},
-		{"OWNER/Repo", []registry.RepoRef{{Owner: "owner", Repo: "Repo"}}},
+		{"OWNER/Repo", []registry.RepoRef{{Owner: "owner", Repo: "repo"}}},
 		{"Mixed/repo,mixed/repo", []registry.RepoRef{{Owner: "mixed", Repo: "repo"}}},
 	}
 	for _, tt := range tests {
@@ -98,6 +125,22 @@ func TestParseRepoRefs_CanonicalizesOwner(t *testing.T) {
 		if !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("parseRepoRefs(%q, DockerHub) = %+v, want %+v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestParseRepoRefs_CanonicalizesWholeRef(t *testing.T) {
+	for _, reg := range []registry.ID{registry.DockerHub, registry.GHCR} {
+		got, warns := parseRepoRefs("OWNER/Registry-Stats,owner/registry-stats", reg)
+		want := []registry.RepoRef{{Owner: "owner", Repo: "registry-stats"}}
+		if !slices.Equal(got, want) || len(warns) != 0 {
+			t.Errorf("parseRepoRefs(mixed case, %v) = (%+v, %+v), want (%+v, no warnings)", reg, got, warns, want)
+		}
+	}
+
+	got, warns := parseRepoRefs("cplieger/*,cplieger/Registry-Stats", registry.GHCR)
+	want := []registry.RepoRef{{Owner: "cplieger", Repo: "*"}, {Owner: "cplieger", Repo: "registry-stats"}}
+	if !slices.Equal(got, want) || len(warns) != 0 {
+		t.Errorf("parseRepoRefs(wildcard and explicit, GHCR) = (%+v, %+v), want (%+v, no warnings)", got, warns, want)
 	}
 }
 
@@ -160,8 +203,11 @@ func TestParseRepoRefs_warnsForEveryRejectedTokenOnce(t *testing.T) {
 			},
 		},
 		{
-			Msg:   "skipping repo ref with unsafe characters",
-			Attrs: []slog.Attr{slog.String("input", "owner/bad?repo")},
+			Msg: "skipping repo ref with unsafe characters",
+			Attrs: []slog.Attr{
+				slog.String("input", "owner/bad?repo"),
+				slog.String("reason", "path element not a safe URL segment"),
+			},
 		},
 		{
 			Msg: "skipping invalid repo ref",
@@ -171,8 +217,11 @@ func TestParseRepoRefs_warnsForEveryRejectedTokenOnce(t *testing.T) {
 			},
 		},
 		{
-			Msg:   "skipping repo ref with unsafe characters",
-			Attrs: []slog.Attr{slog.String("input", "owner/bad%repo")},
+			Msg: "skipping repo ref with unsafe characters",
+			Attrs: []slog.Attr{
+				slog.String("input", "owner/bad%repo"),
+				slog.String("reason", "invalid percent-escape"),
+			},
 		},
 	}
 	if !slices.EqualFunc(warns, wantWarns, warningEqual) {
@@ -264,11 +313,10 @@ func TestParseRepoRefs_output_always_safe(t *testing.T) {
 		for _, reg := range []registry.ID{registry.DockerHub, registry.GHCR} {
 			refs, _ := parseRepoRefs(input, reg)
 			for _, ref := range refs {
-				if reg == registry.GHCR {
-					for part := range strings.SplitSeq(ref.Repo, "/") {
-						if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(part) {
-							t.Fatalf("parseRepoRefs(%q, GHCR) produced unsafe repo element %q", input, part)
-						}
+				if reg == registry.GHCR && ref.Repo != "*" {
+					name, ok := urlsafe.PackageName(ref.Owner, url.PathEscape(ref.Repo))
+					if !ok || name != ref.Repo {
+						t.Fatalf("parseRepoRefs(%q, GHCR) produced unsafe repo %q", input, ref.Repo)
 					}
 				} else if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {
 					t.Fatalf("parseRepoRefs(%q, DockerHub) produced unsafe repo %q", input, ref.Repo)

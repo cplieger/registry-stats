@@ -7,12 +7,17 @@
 package dockerhub
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
@@ -22,13 +27,15 @@ import (
 
 // Pagination bounds for the owner listing. maxOwnerPages bounds how many
 // pages one owner costs, and hitting it is a signal that behaviour changed
-// (the warn log below surfaces it). pageSize is both what the request asks
-// for and the element count parseRepoListPage refuses to exceed; a page's
+// (the warn log below surfaces it). pageSize is what the request asks for;
+// listingElemCap is the maximum decode cost one page may impose, with
+// headroom so an upstream page-size widening is not a failure. A page's
 // SIZE is bounded by httpx's 10 MiB body cap and each listed name by
 // urlsafe.IsSafeURLSegment.
 const (
-	maxOwnerPages = 10
-	pageSize      = 100
+	maxOwnerPages  = 10
+	pageSize       = 100
+	listingElemCap = 4 * pageSize
 )
 
 // Client is the Docker Hub source (it satisfies collect.Source at the wiring
@@ -43,7 +50,7 @@ type Client struct {
 // per-request retry options and the logger, each with a meaningful zero
 // (httpx defaults; slog.Default).
 type Options struct {
-	// Logger receives the client's warnings; nil falls back to slog.Default.
+	// Logger receives the client's logs; nil falls back to slog.Default.
 	Logger *slog.Logger
 	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
 	// defaults.
@@ -53,10 +60,7 @@ type Options struct {
 // NewClient returns a Client that uses the provided *http.Client for all
 // outbound requests, configured by opts.
 func NewClient(client *http.Client, opts Options) *Client {
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
+	logger := cmp.Or(opts.Logger, slog.Default())
 	return &Client{
 		http:      client,
 		retryOpts: opts.RetryOpts,
@@ -69,17 +73,17 @@ func NewClient(client *http.Client, opts Options) *Client {
 // (registry.DockerHub.String()).
 func (c *Client) Source() registry.ID { return registry.DockerHub }
 
-// Collect gathers pull counts and total tag counts for every ref in refs.
-// Returns the per-repo entries plus the attempted count (including
-// failures). listingFailed reports a wildcard owner listing that failed
-// without yielding any usable repos.
-func (c *Client) Collect(
-	ctx context.Context,
-	refs []registry.RepoRef,
-) (entries []registry.Entry, attempted int, listingFailed bool) {
-	wildcardResults, wildcardAttempted, seen, listingFailed := collectWildcards(ctx, c, refs)
-	explicitResults, explicitAttempted := collectExplicit(ctx, c, refs, seen)
-	entries = append(wildcardResults, explicitResults...)
+// Collect gathers pull counts and total tag counts for every ref in
+// refs. Returns the per-repo entries plus the attempted count
+// (including failures). listingFailed reports a wildcard owner
+// listing that failed without yielding any usable repos. Cancellation
+// itself never sets listingFailed; a wholesale failure recorded before
+// the cancellation persists. A ref is counted in attempted before its
+// fetch, so an interrupted ref is in attempted and not in entries.
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool) {
+	wildcardResults, wildcardAttempted, seen, listingFailed := c.collectWildcards(ctx, refs)
+	explicitResults, explicitAttempted := c.collectExplicit(ctx, refs, seen)
+	entries = slices.Concat(wildcardResults, explicitResults)
 	attempted = wildcardAttempted + explicitAttempted
 	return entries, attempted, listingFailed
 }
@@ -91,13 +95,13 @@ func (c *Client) Collect(
 //
 // listingFailed is true when at least one owner listing wholly failed
 // (see collectWildcardRef).
-func collectWildcards(ctx context.Context, c *Client, refs []registry.RepoRef) (results []registry.Entry, attempted int, seen map[registry.RepoRef]bool, listingFailed bool) {
+func (c *Client) collectWildcards(ctx context.Context, refs []registry.RepoRef) (results []registry.Entry, attempted int, seen map[registry.RepoRef]bool, listingFailed bool) {
 	seen = make(map[registry.RepoRef]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {
 			continue
 		}
-		refResults, refAttempted, refFailed := collectWildcardRef(ctx, c, ref.Owner, seen)
+		refResults, refAttempted, refFailed := c.collectWildcardRef(ctx, ref.Owner, seen)
 		results = append(results, refResults...)
 		attempted += refAttempted
 		if refFailed {
@@ -112,8 +116,8 @@ func collectWildcards(ctx context.Context, c *Client, refs []registry.RepoRef) (
 // place). listingFailed reports a wholesale listing outage for this
 // owner. A partial failure, a legitimately empty owner and a cancelled
 // cycle all leave it false; a stop is not an outage.
-func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int, listingFailed bool) {
-	repos, err := listRepos(ctx, c, owner)
+func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int, listingFailed bool) {
+	repos, err := c.listRepos(ctx, owner)
 	switch {
 	case ctx.Err() != nil:
 		// A stop is not a classification.
@@ -144,7 +148,7 @@ func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[r
 		}
 		seen[key] = true
 		attempted++
-		repo.TagCount = tagCount(ctx, c, repo.Owner, repo.Repo)
+		repo.TagCount = c.tagCount(ctx, repo.Owner, repo.Repo)
 		results = append(results, *repo)
 		c.logger.Debug("docker hub repo collected", "repo", name,
 			"pulls", repo.Pulls, "tags", tagCountLogValue(repo.TagCount))
@@ -154,7 +158,7 @@ func collectWildcardRef(ctx context.Context, c *Client, owner string, seen map[r
 
 // collectExplicit fetches each non-wildcard ref unless it was already
 // collected earlier in the cycle.
-func collectExplicit(ctx context.Context, c *Client, refs []registry.RepoRef, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int) {
+func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int) {
 	for _, ref := range refs {
 		if ref.Repo == "*" {
 			continue
@@ -170,7 +174,7 @@ func collectExplicit(ctx context.Context, c *Client, refs []registry.RepoRef, se
 		attempted++
 
 		repoURL := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/%s/", ref.Owner, ref.Repo)
-		repoData, err := get(ctx, c, repoURL)
+		repoData, err := c.get(ctx, repoURL)
 		if err != nil {
 			if ctx.Err() != nil {
 				// A stop, not a registry failure.
@@ -185,12 +189,12 @@ func collectExplicit(ctx context.Context, c *Client, refs []registry.RepoRef, se
 		if err != nil {
 			c.logger.Error("docker hub parse failed",
 				"repo", name,
-				"shape_change", shapeChanged(err),
+				"shape_change", true,
 				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			continue
 		}
 
-		tags := tagCount(ctx, c, ref.Owner, ref.Repo)
+		tags := c.tagCount(ctx, ref.Owner, ref.Repo)
 		results = append(results, registry.Entry{
 			Owner:    ref.Owner,
 			Repo:     ref.Repo,
@@ -211,24 +215,30 @@ func tagCountLogValue(count *int) any {
 
 // listRepos paginates the Docker Hub owner listing endpoint. Returns
 // entries with Owner/Repo/Pulls populated; TagCount is left nil for the
-// caller to fill separately.
-func listRepos(ctx context.Context, c *Client, owner string) ([]registry.Entry, error) {
+// caller to fill separately. A listing that upstream says is complete but
+// that served fewer repositories than its own total is an error; a listing
+// truncated at the page cap is not, and the warning reports both numbers.
+func (c *Client) listRepos(ctx context.Context, owner string) ([]registry.Entry, error) {
 	var repos []registry.Entry
 	hitCap := true
+	total := 0
 
 	for page := 1; page <= maxOwnerPages; page++ {
 		if ctx.Err() != nil {
 			return repos, ctx.Err()
 		}
 		url := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/?page_size=%d&page=%d", owner, pageSize, page)
-		data, err := get(ctx, c, url)
+		data, err := c.get(ctx, url)
 		if err != nil {
 			return repos, fmt.Errorf("list repos page %d: %w", page, err)
 		}
 
-		pageRepos, more, err := parseRepoListPage(data, owner)
+		pageRepos, more, pageTotal, err := parseRepoListPage(data, owner)
 		if err != nil {
 			return repos, fmt.Errorf("parse repo list page %d: %w", page, err)
+		}
+		if page == 1 {
+			total = pageTotal
 		}
 		repos = append(repos, pageRepos...)
 
@@ -239,7 +249,12 @@ func listRepos(ctx context.Context, c *Client, owner string) ([]registry.Entry, 
 	}
 	if hitCap {
 		c.logger.Warn("docker hub owner listing hit page cap; results may be truncated",
-			"owner", owner, "max_pages", maxOwnerPages)
+			"owner", owner, "max_pages", maxOwnerPages, "collected", len(repos), "advertised", total)
+		return repos, nil
+	}
+	if len(repos) < total {
+		return repos, fmt.Errorf("%w: owner listing served %d of the %d repositories it advertises",
+			errResponseUnparsable, len(repos), total)
 	}
 
 	return repos, nil
@@ -248,10 +263,10 @@ func listRepos(ctx context.Context, c *Client, owner string) ([]registry.Entry, 
 // tagCount fetches a repo's total tag count with a single page_size=1
 // request, reading the tags listing's own top-level "count" field. Fetch,
 // cancellation, and parse failures return nil; a measured zero is preserved.
-func tagCount(ctx context.Context, c *Client, owner, repo string) *int {
+func (c *Client) tagCount(ctx context.Context, owner, repo string) *int {
 	name := owner + "/" + repo
 	url := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/tags/?page_size=1&page=1", name)
-	data, err := get(ctx, c, url)
+	data, err := c.get(ctx, url)
 	if err != nil {
 		if ctx.Err() != nil {
 			// A stop, not a registry failure.
@@ -263,12 +278,8 @@ func tagCount(ctx context.Context, c *Client, owner, repo string) *int {
 	}
 	n, err := parseTagCount(data)
 	if err != nil {
-		bounded := runesafe.SanitizeSingleLineBounded(err.Error(), 256)
-		if shapeChanged(err) {
-			c.logger.Error("docker hub tag count parse failed", "repo", name, "shape_change", true, "error", bounded)
-			return nil
-		}
-		c.logger.Warn("docker hub tag count parse failed", "repo", name, "shape_change", false, "error", bounded)
+		c.logger.Error("docker hub tag count parse failed", "repo", name, "shape_change", true,
+			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 		return nil
 	}
 	return new(n)
@@ -295,47 +306,98 @@ func parseRepoMeta(data []byte) (int64, error) {
 }
 
 // parseRepoListPage parses one page of the Docker Hub owner-listing
-// response. The upstream "next" token is an absolute URL the caller does
-// not follow, composing each request from its own page index instead.
-// The whole PAGE fails on an over-count response, any result without a
-// usable pull_count, or every result dropped as unsafe; zero repos with
-// a nil error reads as a legitimately empty owner.
-func parseRepoListPage(data []byte, owner string) ([]registry.Entry, bool, error) {
-	var resp struct {
-		Next    string `json:"next"`
-		Results []struct {
-			PullCount *int64 `json:"pull_count"`
-			Name      string `json:"name"`
-		} `json:"results"`
+// response. The upstream "next" token is an absolute URL the caller
+// does not follow, composing each request from its own page index
+// instead. total is the owner's repository count as the envelope
+// advertises it, and it is REQUIRED: it is the only value that can
+// prove a completed walk collected everything, which listRepos owns.
+// The whole PAGE fails on an over-count response, a missing total,
+// any retained result without a usable pull_count, or every result
+// dropped as unsafe; zero repos with a nil error and a zero total
+// reads as a legitimately empty owner.
+func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, more bool, total int, err error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.ReadToken()
+	if err != nil || tok.Kind() != '{' {
+		return nil, false, 0, fmt.Errorf("%w: listing page is not a JSON object", errResponseUnparsable)
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, false, fmt.Errorf("%w: %w", errResponseUnparsable, err)
-	}
-	if len(resp.Results) > pageSize {
-		return nil, false, fmt.Errorf("listing page carried %d results for a page_size=%d request", len(resp.Results), pageSize)
-	}
-	repos := make([]registry.Entry, 0, len(resp.Results))
-	for _, r := range resp.Results {
-		// Repo name comes from Docker Hub's listing JSON (not env config)
-		// and flows into the tags URL via tagCount, so route it through
-		// urlsafe to block path-traversal/query injection from a crafted
-		// or garbled response.
-		if !urlsafe.IsSafeURLSegment(r.Name) {
-			continue
+	var (
+		next  string
+		count *int
+		seen  int
+		repos = make([]registry.Entry, 0, pageSize)
+	)
+	for {
+		tok, err := dec.ReadToken()
+		if err != nil {
+			return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
 		}
-		if r.PullCount == nil || *r.PullCount < 0 {
-			return nil, false, fmt.Errorf("repo %q: %w", r.Name, errPullCountInvalid)
+		if tok.Kind() == '}' {
+			break
 		}
-		repos = append(repos, registry.Entry{
-			Owner: owner,
-			Repo:  r.Name,
-			Pulls: *r.PullCount,
-		})
+		switch tok.String() {
+		case "count":
+			if err := json.UnmarshalDecode(dec, &count); err != nil {
+				return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			}
+		case "next":
+			if err := json.UnmarshalDecode(dec, &next); err != nil {
+				return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			}
+		case "results":
+			open, err := dec.ReadToken()
+			if err != nil {
+				return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			}
+			if open.Kind() == 'n' {
+				break
+			}
+			if open.Kind() != '[' {
+				return nil, false, 0, fmt.Errorf("%w: results is not an array", errResponseUnparsable)
+			}
+			for dec.PeekKind() != ']' {
+				if len(repos) >= listingElemCap {
+					return nil, false, 0, fmt.Errorf("%w: listing page carried more than %d results for a page_size=%d request", errResponseUnparsable, listingElemCap, pageSize)
+				}
+				var res struct {
+					PullCount *int64 `json:"pull_count"`
+					Name      string `json:"name"`
+				}
+				if err := json.UnmarshalDecode(dec, &res); err != nil {
+					return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+				}
+				seen++
+				// Repo name comes from Docker Hub's listing JSON (not env
+				// config) and flows into the tags URL via tagCount, so route
+				// it through urlsafe to block path-traversal/query injection
+				// from a crafted or garbled response.
+				if !urlsafe.IsSafeURLSegment(res.Name) {
+					continue
+				}
+				if res.PullCount == nil || *res.PullCount < 0 {
+					return nil, false, 0, fmt.Errorf("repo %q: %w", res.Name, errPullCountInvalid)
+				}
+				repos = append(repos, registry.Entry{Owner: owner, Repo: res.Name, Pulls: *res.PullCount})
+			}
+			if _, err := dec.ReadToken(); err != nil {
+				return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			}
+		default:
+			if err := dec.SkipValue(); err != nil {
+				return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			}
+		}
 	}
-	if len(repos) == 0 && len(resp.Results) > 0 {
-		return nil, false, fmt.Errorf("all %d listed repo names rejected: %w", len(resp.Results), errRepoNameUnsafe)
+	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
+		return nil, false, 0, fmt.Errorf("%w: trailing data after the listing object", errResponseUnparsable)
 	}
-	return repos, resp.Next != "", nil
+	if len(repos) == 0 && seen > 0 {
+		return nil, false, 0, fmt.Errorf("all %d listed repo names rejected: %w", seen, errRepoNameUnsafe)
+	}
+	if count == nil || *count < 0 {
+		return nil, false, 0, fmt.Errorf("%w: listing total missing or negative", errResponseUnparsable)
+	}
+	return repos, next != "", *count, nil
 }
 
 // errPullCountInvalid is returned when a Docker Hub response decodes as
@@ -351,7 +413,12 @@ var errTagCountInvalid = errors.New("tag count missing or negative")
 // errRepoNameUnsafe classifies a page whose names Docker Hub cannot serve.
 var errRepoNameUnsafe = errors.New("listed repo names rejected as unsafe")
 
-// errResponseUnparsable classifies json/v2 duplicate-member, mismatched-case, and invalid-UTF-8 rejections after HTTP 200 as schema signals, not transport failures.
+// errResponseUnparsable classifies any post-200 schema failure as a
+// format-change signal rather than a transport one: a json/v2 decode
+// rejection, or a decoded envelope that contradicts what was asked
+// for. A case-variant member name is NOT one of these — json/v2 is
+// case-sensitive and ignores it silently, leaving the field nil, so a
+// required-field sentinel classifies that case.
 var errResponseUnparsable = errors.New("docker hub response did not decode")
 
 func shapeChanged(err error) bool {
@@ -381,6 +448,6 @@ func parseTagCount(data []byte) (int, error) {
 // get is the single retry-wrapped HTTP GET used by every Docker Hub
 // helper. The response body is capped at httpx.DefaultMaxBodyBytes
 // (10 MB) unless the caller's retryOpts override it.
-func get(ctx context.Context, c *Client, url string) ([]byte, error) {
+func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	return httpx.GetBytes(ctx, c.http, url, c.retryOpts...)
 }

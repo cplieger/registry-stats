@@ -17,7 +17,7 @@ import (
 	"github.com/cplieger/health"
 	"github.com/cplieger/httpx/v5"
 	collectpkg "github.com/cplieger/registry-stats/v2/internal/collect"
-	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
+	"github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
 	"github.com/cplieger/registry-stats/v2/internal/ghcr"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
@@ -32,10 +32,13 @@ import (
 // warnValueBytes bounds raw warning attributes while preserving enough input for diagnosis.
 const warnValueBytes = 128
 
+// pub serializes publishing a cycle's outcome against shutdown clearing it.
+var pub sync.Mutex
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "health" {
 		// The serving process reports configuration warnings; the frequent probe stays silent.
-		interval, _ := configpkg.PollInterval()
+		interval, _ := config.PollInterval()
 		health.RunProbe(health.DefaultPath, health.WithMaxAge(3*interval))
 	}
 
@@ -48,7 +51,7 @@ func main() {
 // run wires dependencies and serves until a signal or server error.
 func run() error {
 	levelVar := slogx.Setup(slogx.Options{})
-	cfg, warns := configpkg.Load()
+	cfg, warns := config.Load()
 	// Emit before applying LOG_LEVEL so error-level configuration cannot hide its own warning.
 	logWarnings(warns)
 	levelVar.Set(cfg.LogLevel)
@@ -59,7 +62,7 @@ func run() error {
 	defer stop()
 
 	marker := health.NewMarker(health.DefaultPath)
-	// A prior crash must not report healthy before this process collects.
+	// A marker inherited from a prior process must not report healthy before this one binds.
 	marker.Set(false)
 	defer marker.Cleanup()
 
@@ -75,7 +78,7 @@ func run() error {
 		if webhttp.CausedByCancellation(ctx, err) {
 			return nil
 		}
-		return fmt.Errorf("http server bind on %s: %w", cfg.ListenAddr, err)
+		return fmt.Errorf("http server bind: %w", err)
 	}
 	slog.Info("http server starting", "addr", ln.Addr().String())
 
@@ -94,12 +97,12 @@ func run() error {
 	marker.Set(true)
 
 	collect := func(ctx context.Context) {
-		markCollect(ctx, &cfg, sources, m, marker, &ready)
+		runCollect(ctx, &cfg, sources, m, marker, &ready)
 	}
 
 	var bg sync.WaitGroup
 	if cfg.PollInterval == 0 {
-		slog.Info("one-shot mode, collecting once then serving", "addr", ln.Addr().String())
+		slog.Info("one-shot mode, collecting once then serving")
 		bg.Go(func() { collect(ctx) })
 	} else {
 		slog.Info("scheduled mode", "interval", cfg.PollInterval)
@@ -111,10 +114,14 @@ func run() error {
 		})
 	}
 
+	markStopping := func() {
+		pub.Lock()
+		defer pub.Unlock()
+		ready.Set(false)
+	}
 	preDrain := func(context.Context) {
 		slog.Info("shutting down", "cause", context.Cause(ctx))
-		ready.Set(false)
-		marker.Set(false)
+		markStopping()
 	}
 
 	// Start this waiter before teardown so AwaitDone can observe a completed cycle.
@@ -124,18 +131,25 @@ func run() error {
 		close(bgDone)
 	}()
 
-	onShutdown := func(shutdownCtx context.Context) {
-		if !webhttp.AwaitDone(shutdownCtx, bgDone) {
+	waitForCollect := func(ctx context.Context) {
+		if !webhttp.AwaitDone(ctx, bgDone) {
 			slog.Warn("collect goroutines did not finish before shutdown deadline")
 		}
+	}
+	onShutdown := func(shutdownCtx context.Context) { waitForCollect(shutdownCtx) }
+	serveExit := func(shutdownCtx context.Context) {
+		stop()
+		markStopping()
+		waitForCollect(shutdownCtx)
 	}
 
 	return webhttp.Run(ctx, srv, ln, onShutdown,
 		webhttp.WithShutdownGrace(10*time.Second),
-		webhttp.WithPreDrain(preDrain))
+		webhttp.WithPreDrain(preDrain),
+		webhttp.WithServeExit(serveExit))
 }
 
-func logWarnings(warns []configpkg.Warning) {
+func logWarnings(warns []config.Warning) {
 	for _, w := range warns {
 		attrs := slices.Clone(w.Attrs)
 		for i, attr := range attrs {
@@ -148,12 +162,15 @@ func logWarnings(warns []configpkg.Warning) {
 	}
 }
 
-// runCollect executes one cycle and reports whether it collected an image.
+// runCollect executes one cycle, publishes its outcome and reports whether
+// it collected an image.
 func runCollect(
 	ctx context.Context,
-	cfg *configpkg.Config,
+	cfg *config.Config,
 	sources []collectpkg.Source,
 	m *obs.Metrics,
+	marker healthSignal,
+	ready *webhttp.Ready,
 ) bool {
 	start := time.Now()
 	images := collectpkg.Run(ctx, collectpkg.Options{
@@ -163,14 +180,25 @@ func runCollect(
 		RefsFor: func(source registry.ID) []registry.RepoRef { return refsFor(cfg, source) },
 	})
 	m.ObserveCollectDuration(time.Since(start))
-	// Do not delete the last complete metric set during a cancelled cycle.
-	if ctx.Err() == nil {
-		m.SetImage(images)
+
+	pub.Lock()
+	defer pub.Unlock()
+	// A cancelled cycle publishes nothing: SetImage deletes every label key
+	// absent from this pass; readiness is preDrain's once shutdown starts,
+	// and the marker's removal is Cleanup's.
+	if ctx.Err() != nil {
+		return len(images) > 0
 	}
-	return len(images) > 0
+	m.SetImage(images)
+	ok := len(images) > 0
+	marker.Set(ok)
+	if ok {
+		ready.Set(true)
+	}
+	return ok
 }
 
-func refsFor(cfg *configpkg.Config, source registry.ID) []registry.RepoRef {
+func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
 	switch source {
 	case registry.DockerHub:
 		return cfg.DockerHubRepos
@@ -180,7 +208,7 @@ func refsFor(cfg *configpkg.Config, source registry.ID) []registry.RepoRef {
 	return nil
 }
 
-func configuredSources(cfg *configpkg.Config, sources []collectpkg.Source) []string {
+func configuredSources(cfg *config.Config, sources []collectpkg.Source) []string {
 	names := make([]string, 0, len(sources))
 	for _, src := range sources {
 		source := src.Source()
@@ -192,31 +220,12 @@ func configuredSources(cfg *configpkg.Config, sources []collectpkg.Source) []str
 	return names
 }
 
-func markCollect(
-	ctx context.Context,
-	cfg *configpkg.Config,
-	sources []collectpkg.Source,
-	m *obs.Metrics,
-	marker healthSignal,
-	ready *webhttp.Ready,
-) {
-	ok := runCollect(ctx, cfg, sources, m)
-	// Shutdown owns both health signals after preDrain runs.
-	if ctx.Err() != nil {
-		return
-	}
-	marker.Set(ok)
-	if ok {
-		ready.Set(true)
-	}
-}
-
 // healthSignal is the write-only liveness contract used by the collect loop.
 type healthSignal interface {
 	Set(healthy bool)
 }
 
-func logConfig(cfg *configpkg.Config) {
+func logConfig(cfg *config.Config) {
 	for _, r := range cfg.DockerHubRepos {
 		slog.Info("docker hub repo", "ref", r.Owner+"/"+r.Repo)
 	}

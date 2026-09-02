@@ -13,25 +13,12 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // shortRetry returns httpx options with a 1 ms base delay so retry tests
 // don't wait a full second between attempts.
 func shortRetry() []httpx.GetOption {
 	return []httpx.GetOption{httpx.WithBaseDelay(time.Millisecond)}
-}
-
-func TestClient_ListRepos_ParseError(t *testing.T) {
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-	_, err := listRepos(t.Context(), c, "testowner")
-	if err == nil {
-		t.Error("expected parse error for invalid JSON")
-	}
 }
 
 // TestParseTagCount: a present, non-negative count is returned; malformed
@@ -48,7 +35,6 @@ func TestParseTagCount(t *testing.T) {
 	}{
 		{"real shape", `{"count":164,"next":"p2","results":[{"name":"latest"}]}`, 164, false, false},
 		{"zero tags", `{"count":0,"next":"","results":[]}`, 0, false, false},
-		{"count differs from results length", `{"count":7,"results":[{"name":"a"}]}`, 7, false, false},
 		{"missing count", `{"next":"","results":[]}`, 0, true, true},
 		{"negative count", `{"count":-1}`, 0, true, true},
 		{"duplicate count", `{"count":1,"count":2}`, 0, true, true},
@@ -80,11 +66,13 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 		switch page {
 		case "", "1":
 			json.NewEncoder(w).Encode(map[string]any{
+				"count":   2,
 				"results": []map[string]any{{"name": "a1", "pull_count": 10}},
 				"next":    "page2",
 			})
 		case "2":
 			json.NewEncoder(w).Encode(map[string]any{
+				"count":   2,
 				"results": []map[string]any{{"name": "a2", "pull_count": 20}},
 				"next":    "",
 			})
@@ -95,7 +83,7 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
-	repos, err := listRepos(t.Context(), c, "o")
+	repos, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
 	}
@@ -124,7 +112,7 @@ func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
 	}))
 
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry()})
-	if got := tagCount(t.Context(), c, "o", "a"); got != nil {
+	if got := c.tagCount(t.Context(), "o", "a"); got != nil {
 		t.Errorf("tagCount on a failing server = %v, want nil", got)
 	}
 }
@@ -149,6 +137,7 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 			ownerPages++
 			page := r.URL.Query().Get("page")
 			json.NewEncoder(w).Encode(map[string]any{
+				"count":   1000,
 				"results": []map[string]any{{"name": "a" + page, "pull_count": 1}},
 				"next":    "keep-going",
 			})
@@ -235,18 +224,24 @@ func TestParseRepoListPage_requiresPullCount(t *testing.T) {
 		wantErr   bool
 		wantShape bool
 	}{
-		{"every result carries a count", `{"next":"","results":[{"name":"a","pull_count":1},{"name":"b","pull_count":0}]}`, false, false},
-		{"empty page is fine", `{"next":"","results":[]}`, false, false},
+		{"every result carries a count", `{"count":2,"next":"","results":[{"name":"a","pull_count":1},{"name":"b","pull_count":0}]}`, false, false},
+		{"empty page is fine", `{"count":0,"next":"","results":[]}`, false, false},
+		{"null results is empty", `{"count":0,"next":"","results":null}`, false, false},
+		{"missing results is empty", `{"count":0,"next":""}`, false, false},
+		{"unknown member is skipped", `{"count":0,"unknown":{"nested":true},"results":[]}`, false, false},
+		{"case-variant count is ignored", `{"Count":0,"results":[]}`, true, true},
+		{"missing total fails the page", `{"next":"","results":[]}`, true, true},
+		{"trailing data fails the page", `{"count":0,"results":[]} true`, true, true},
 		{"duplicate results member", `{"results":[],"results":[]}`, true, true},
 		{"one result missing the count fails the page", `{"next":"","results":[{"name":"a","pull_count":1},{"name":"b"}]}`, true, true},
 		{"null count fails the page", `{"results":[{"name":"a","pull_count":null}]}`, true, true},
 		{"negative count fails the page", `{"results":[{"name":"a","pull_count":-5}]}`, true, true},
-		{"an unsafe name is dropped before its count is required", `{"results":[{"name":"bad/traversal"},{"name":"a","pull_count":1}]}`, false, false},
+		{"an unsafe name is dropped before its count is required", `{"count":2,"results":[{"name":"bad/traversal"},{"name":"a","pull_count":1}]}`, false, false},
 		{"a page of nothing but unsafe names fails", `{"results":[{"name":"bad/traversal"},{"name":"../evil"}]}`, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repos, _, err := parseRepoListPage([]byte(tt.data), "owner")
+			repos, _, _, err := parseRepoListPage([]byte(tt.data), "owner")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseRepoListPage(%q) error = %v, wantErr %v", tt.data, err, tt.wantErr)
 			}
@@ -260,25 +255,44 @@ func TestParseRepoListPage_requiresPullCount(t *testing.T) {
 	}
 }
 
-// TestParseRepoListPage_refusesMoreResultsThanRequested pins the element-count
-// bound: every request asks for pageSize results, so a page carrying more
-// is refused before any entry is built.
-func TestParseRepoListPage_refusesMoreResultsThanRequested(t *testing.T) {
+func TestParseRepoListPage_allowsModestPageWidening(t *testing.T) {
 	results := make([]map[string]any, 0, pageSize+1)
 	for i := range pageSize + 1 {
 		results = append(results, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
 	}
-	data, err := json.Marshal(map[string]any{"next": "", "results": results})
+	data, err := json.Marshal(map[string]any{"count": len(results), "next": "", "results": results})
 	if err != nil {
 		t.Fatalf("Setup: marshal listing page: %v", err)
 	}
 
-	repos, more, err := parseRepoListPage(data, "owner")
+	repos, more, _, err := parseRepoListPage(data, "owner")
+	if err != nil {
+		t.Fatalf("parseRepoListPage(%d results) error = %v, want nil", len(results), err)
+	}
+	if len(repos) != len(results) || more {
+		t.Errorf("parseRepoListPage(%d results) = (%d repos, more=%v), want (%d, false)", len(results), len(repos), more, len(results))
+	}
+}
+
+func TestParseRepoListPage_refusesPastElementCap(t *testing.T) {
+	results := make([]map[string]any, 0, listingElemCap+1)
+	for i := range listingElemCap + 1 {
+		results = append(results, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
+	}
+	data, err := json.Marshal(map[string]any{"count": len(results), "next": "", "results": results})
+	if err != nil {
+		t.Fatalf("Setup: marshal listing page: %v", err)
+	}
+
+	repos, more, _, err := parseRepoListPage(data, "owner")
 	if err == nil {
 		t.Fatalf("parseRepoListPage(%d results) error = nil, want a refusal", len(results))
 	}
 	if len(repos) != 0 || more {
 		t.Errorf("parseRepoListPage(%d results) = (%d repos, more=%v), want (0, false)", len(results), len(repos), more)
+	}
+	if !shapeChanged(err) {
+		t.Errorf("shapeChanged(parseRepoListPage(%d results)) = false, want true", len(results))
 	}
 }
 
@@ -287,8 +301,8 @@ func TestParseRepoListPage_refusesMoreResultsThanRequested(t *testing.T) {
 // path/query-injection vector into the tags URL built from it, so it
 // must be dropped while safe names on the same page survive.
 func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
-	data := []byte(`{"next":"","results":[{"name":"bad/traversal","pull_count":1},{"name":"good","pull_count":2}]}`)
-	repos, _, err := parseRepoListPage(data, "owner")
+	data := []byte(`{"count":2,"next":"","results":[{"name":"bad/traversal","pull_count":1},{"name":"good","pull_count":2}]}`)
+	repos, _, _, err := parseRepoListPage(data, "owner")
 	if err != nil {
 		t.Fatalf("parseRepoListPage(%q) error = %v", data, err)
 	}

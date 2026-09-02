@@ -236,6 +236,7 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 		{
 			name:    "no_configured_refs_reports_configuration",
 			sources: []collect.Source{degraded},
+			refsFor: func(registry.ID) []registry.RepoRef { return nil },
 			want:    `level=WARN msg="no repos configured"`,
 			unwanted: []string{
 				`msg="no images collected, at least one source failed"`,
@@ -331,9 +332,11 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 // TestRun_cancelled_source_moves_no_error_counter pins the neutrality a
 // redeploy needs: a source cancelled mid-cycle reports unhealthy of its own
 // return, but the orchestrator neither counts it as a collection error nor
-// says it was degraded, so no shipped rule fires on a shutdown. The dead
-// context also stops the loop, so no later source mints a collects_total
-// sample for a cycle it never performed.
+// says it was degraded, so no shipped rule fires on a shutdown. The
+// accounting is asymmetric: the invoked source still mints its own
+// collects_total sample, the RegistryStatsCollectStalled denominator, while
+// the dead context stops the loop so no later source mints one for a cycle
+// it never performed.
 func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	m := obs.New()
 
@@ -361,6 +364,9 @@ func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	w := httptest.NewRecorder()
 	m.Handler()(w, r)
 	body := w.Body.String()
+	if !strings.Contains(body, `registrystats_collects_total{source="dockerhub"} 1`) {
+		t.Errorf("a cancelled invoked source did not mint a collects_total sample:\n%s", body)
+	}
 	if strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 1`) {
 		t.Errorf("a cancelled cycle moved collect_errors_total:\n%s", body)
 	}
@@ -426,6 +432,54 @@ func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
 	if len(images) != 1 {
 		t.Errorf("images = %+v, want the one DockerHub record served", images)
 	}
+}
+
+func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.T) {
+	t.Run("degraded_cycle", func(t *testing.T) {
+		serving := newFakeDockerHub()
+		serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+		serving.attempted = 1
+
+		failed := newFakeGHCR()
+		failed.attempted = 1
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		collect.Run(t.Context(), collect.Options{
+			Metrics: obs.New(),
+			Sources: []collect.Source{serving, failed},
+			Logger:  logger,
+			RefsFor: func(registry.ID) []registry.RepoRef {
+				return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+			},
+		})
+
+		logs := buf.String()
+		if !strings.Contains(logs, `level=WARN msg="partial collection failure" images=1`) {
+			t.Errorf("Run() degraded serving cycle missing partial-failure record; logs:\n%s", logs)
+		}
+	})
+
+	t.Run("healthy_cycle", func(t *testing.T) {
+		serving := newFakeDockerHub()
+		serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+		serving.attempted = 1
+
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		collect.Run(t.Context(), collect.Options{
+			Metrics: obs.New(),
+			Sources: []collect.Source{serving},
+			Logger:  logger,
+			RefsFor: func(registry.ID) []registry.RepoRef {
+				return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+			},
+		})
+
+		if logs := buf.String(); strings.Contains(logs, `msg="partial collection failure"`) {
+			t.Errorf("Run() healthy serving cycle logged a partial failure; logs:\n%s", logs)
+		}
+	})
 }
 
 // TestRun_unhealthy_source_still_serves_entries pins that an unhealthy

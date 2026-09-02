@@ -11,7 +11,10 @@ import (
 	"github.com/cplieger/webhttp/v2"
 )
 
-// Metrics records and serves registry-stats metrics.
+// Metrics records and serves registry-stats metrics. Every method is safe for
+// concurrent use: the metric values synchronize themselves and setMu covers the
+// per-cycle label bookkeeping, so the HTTP goroutines and the collect loop
+// share one value.
 type Metrics struct {
 	registry        *metrics.Registry
 	httpRequests    *metrics.LabeledCounter
@@ -29,6 +32,7 @@ type Metrics struct {
 // New constructs an isolated metrics registry.
 func New() *Metrics {
 	m := &Metrics{
+		registry: metrics.NewRegistry("registrystats"),
 		httpRequests: metrics.NewLabeledCounter(
 			"http_requests_total",
 			"Total HTTP requests",
@@ -48,11 +52,16 @@ func New() *Metrics {
 			"http_request_duration_seconds",
 			"HTTP request latency",
 		),
+		// APIBuckets, not the default: a cycle polling two registries behind a
+		// 30s per-request timeout would land every sample in DefaultBuckets' +Inf.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",
 			metrics.WithBuckets(metrics.APIBuckets()),
 		),
+		// _total on a gauge is a deliberate deviation: the name is the published
+		// series, and metrics/v4's Counter has no Set, so the per-cycle
+		// replacement SetImage performs cannot be a counter.
 		imagePulls: metrics.NewLabeledGauge(
 			"image_pulls_total",
 			"Total pull count per image",
@@ -64,7 +73,6 @@ func New() *Metrics {
 			[]string{"registry", "owner", "repo"},
 		),
 	}
-	m.registry = metrics.NewRegistry("registrystats")
 	m.registry.MustRegister(
 		m.httpRequests,
 		m.collectsTotal,
@@ -98,7 +106,9 @@ func (m *Metrics) ObserveCollectDuration(d time.Duration) {
 	m.collectDuration.Observe(d.Seconds())
 }
 
-// ImageMetric holds per-image gauge data set after each collect cycle.
+// ImageMetric holds per-image gauge data set after each collect cycle. A nil
+// Tags means no tag count was measured this cycle and clears any tags series
+// the image had; a pointed-to zero is a measured zero and is emitted.
 type ImageMetric struct {
 	Registry string // "dockerhub" or "ghcr"
 	Owner    string
@@ -107,7 +117,12 @@ type ImageMetric struct {
 	Tags     *int
 }
 
-// SetImage replaces the image gauge data for one collect cycle.
+// SetImage replaces the image gauge data for one collect cycle. Current values
+// are Set in place and departed series dropped one by one rather than Reset+Set,
+// so a series present in both this cycle and the last is never missing from a
+// concurrent scrape: it reads either value. A scrape overlapping the update may
+// still straddle it, reading some series one cycle stale, and where a cycle
+// replaces the whole set it can miss the family entirely.
 func (m *Metrics) SetImage(images []ImageMetric) {
 	m.setMu.Lock()
 	defer m.setMu.Unlock()

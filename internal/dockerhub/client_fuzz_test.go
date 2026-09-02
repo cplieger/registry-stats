@@ -46,7 +46,7 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {
-		repos, _, err := parseRepoListPage(data, owner)
+		repos, _, _, err := parseRepoListPage(data, owner)
 		if err != nil {
 			return
 		}

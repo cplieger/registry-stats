@@ -44,7 +44,11 @@ const attrValue = "value"
 
 // Warning is a non-fatal configuration note for the caller to log. Attrs
 // carries structured attributes rather than a pre-rendered sentence, so
-// attribute-keyed queries keep working.
+// attribute-keyed queries keep working. Attrs holds only top-level string
+// or int attributes: no groups, so a caller can bound a string value
+// without resolving one. Attribute values are raw environment input, and a
+// caller that emits them owns capping and sanitizing them first
+// (runesafe.SanitizeSingleLineCapped).
 type Warning struct {
 	Msg   string
 	Attrs []slog.Attr
@@ -142,11 +146,10 @@ func Load() (Config, []Warning) {
 }
 
 // parseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
-// pairs. GHCR repository tokens may contain percent-encoded nested names,
-// which are decoded and validated per path element; Docker Hub names remain
-// one segment. Invalid entries are skipped and reported as warnings. Owner
-// spelling is canonicalized to lower case, so deduplication folds owner case
-// while keeping the first occurrence and input order.
+// pairs. GHCR repository tokens may contain percent-encoded nested names;
+// Docker Hub names remain one segment. Invalid entries are skipped and
+// reported as warnings. Each accepted ref is canonicalized to lower case,
+// because neither registry distinguishes repository case.
 func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	if s == "" {
 		return nil, nil
@@ -171,34 +174,27 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 			continue
 		}
 
-		repoName := repo
-		unsafe := !urlsafe.IsSafeURLSegment(owner)
-		if repo != "*" {
-			if reg == registry.GHCR {
-				var err error
-				repoName, err = url.PathUnescape(repo)
-				unsafe = unsafe || err != nil || repoName == "" || strings.Contains(repo, "/")
-				if !unsafe {
-					for part := range strings.SplitSeq(repoName, "/") {
-						if !urlsafe.IsSafeURLSegment(part) {
-							unsafe = true
-							break
-						}
-					}
-				}
-			} else {
-				unsafe = unsafe || !urlsafe.IsSafeURLSegment(repo)
-			}
+		repoName, reason := repo, ""
+		if !urlsafe.IsSafeURLSegment(owner) {
+			reason = "owner not a safe URL segment"
+		} else {
+			repoName, reason = resolveRepoName(reg, owner, repo)
 		}
-		if unsafe {
+		if reason != "" {
 			warns = append(warns, Warning{
-				Msg:   "skipping repo ref with unsafe characters",
-				Attrs: []slog.Attr{slog.String("input", p)},
+				Msg: "skipping repo ref with unsafe characters",
+				Attrs: []slog.Attr{
+					slog.String("input", p),
+					slog.String("reason", reason),
+				},
 			})
 			continue
 		}
 
 		owner = strings.ToLower(owner)
+		if repoName != "*" {
+			repoName = strings.ToLower(repoName)
+		}
 		ref := registry.RepoRef{Owner: owner, Repo: repoName}
 		if seen[ref] {
 			continue
@@ -207,4 +203,39 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 		refs = append(refs, ref)
 	}
 	return refs, warns
+}
+
+// resolveRepoName validates one token's repository half for reg and returns
+// the canonical repository name. A non-empty reason names the refusing rule.
+func resolveRepoName(reg registry.ID, owner, repo string) (name, reason string) {
+	if repo == "*" {
+		return repo, ""
+	}
+	if reg != registry.GHCR {
+		if !urlsafe.IsSafeURLSegment(repo) {
+			return "", "repository not a safe URL segment"
+		}
+		return repo, ""
+	}
+	name, ok := urlsafe.PackageName(owner, repo)
+	if ok {
+		return name, ""
+	}
+	return "", ghcrRefusalReason(owner, repo)
+}
+
+// ghcrRefusalReason names the rule PackageName refused. It does not decide
+// acceptance and is called only after PackageName returns false.
+func ghcrRefusalReason(owner, repo string) string {
+	name, err := url.PathUnescape(repo)
+	switch {
+	case strings.Contains(repo, "/"):
+		return "raw slash; percent-encode nested names"
+	case err != nil:
+		return "invalid percent-escape"
+	case len(owner)+1+len(name) > urlsafe.MaxSegmentBytes:
+		return "repository name over 255 bytes"
+	default:
+		return "path element not a safe URL segment"
+	}
 }

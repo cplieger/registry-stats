@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
@@ -27,10 +26,13 @@ import (
 	"github.com/cplieger/runesafe/v2"
 )
 
-// errHTMLFormatChanged is the sentinel for any GHCR HTML parse failure.
-// Callers compare via errors.Is to distinguish parse drift from transport
-// errors.
-var errHTMLFormatChanged = errors.New("GHCR HTML format changed")
+var (
+	// errHTMLFormatChanged is the sentinel for GHCR HTML parse failures.
+	// Callers compare via errors.Is to distinguish parse drift from transport
+	// errors.
+	errHTMLFormatChanged = errors.New("GHCR HTML format changed")
+	errEmptyListing     = errors.New("GHCR package listing was empty")
+)
 
 const htmlWhitespace = " \t\n\f\r"
 
@@ -38,8 +40,8 @@ const htmlWhitespace = " \t\n\f\r"
 // response is a format signal, not legitimate content.
 const ghcrBodyCap = 2 << 20
 
-// maxListingCandidates bounds per-page work before each accepted package
-// becomes a paced request; the worst measured legitimate page carried 30.
+// maxListingCandidates bounds matching link occurrences plus charset refusals
+// per page, counted before dedup; the largest measured page carried 30 candidates.
 const maxListingCandidates = 100
 
 // maxListingPages bounds how many pages of one owner's packages listing a
@@ -81,18 +83,14 @@ func linkPrefix(kind ownerKind, owner string) string {
 	return fmt.Sprintf("/users/%s/packages/container/package/", owner)
 }
 
-// fetchHTML fetches a GitHub HTML page, spacing consecutive GHCR requests
-// by c.pacingDelay first. httpx retries 429, 5xx and transient transport
+// fetchHTML fetches a GitHub HTML page, spacing requests by c.pacingDelay
+// after the first of the cycle. httpx retries 429, 5xx and transient transport
 // errors per c.opts.RetryOpts; other non-2xx statuses fail fast. The
 // appended browser headers (anonymous GHCR pages gate on User-Agent) and
 // ghcrBodyCap always win, because options are applied left to right.
-func (c *Client) fetchHTML(ctx context.Context, pageURL string) (string, error) {
-	timer := time.NewTimer(c.pacingDelay())
-	select {
-	case <-ctx.Done():
-		timer.Stop()
-		return "", ctx.Err()
-	case <-timer.C:
+func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (string, error) {
+	if err := p.wait(ctx); err != nil {
+		return "", err
 	}
 
 	// Fresh slice so c.opts.RetryOpts, reused across every request, is
@@ -135,12 +133,12 @@ func (r refusals) merge(other refusals) refusals {
 }
 
 // scrapePackageList reads one owner's packages listing and returns the
-// package names in listing order plus what the charset gate refused. A
+// package names in listing order plus the candidates it could not use. A
 // first-page failure, and a first page with no package links, yield no
 // names and an error; a later page's failure returns the names collected
 // so far alongside it.
-func (c *Client) scrapePackageList(ctx context.Context, owner string) ([]string, refusals, error) {
-	names, refused, err := c.readListing(ctx, owner, userOwner)
+func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) ([]string, refusals, error) {
+	names, refused, err := c.readListing(ctx, p, owner, userOwner)
 	if err != nil || len(names) > 0 {
 		return names, refused, err
 	}
@@ -149,20 +147,29 @@ func (c *Client) scrapePackageList(ctx context.Context, owner string) ([]string,
 	// is an organization, so the org form settles the KIND — and only that: a
 	// 404 there proves the owner is a user and leaves its zero links as
 	// ambiguous as before, which is what emptyListingError reports.
-	orgNames, orgRefused, orgErr := c.readListing(ctx, owner, orgOwner)
+	orgNames, orgRefused, orgErr := c.readListing(ctx, p, owner, orgOwner)
+	// Past the guard above the user form yielded no names and no error, which
+	// only its refusal-free first page does, so orgRefused is the only
+	// non-empty diagnostic this function can return.
 	switch {
 	case orgErr == nil && len(orgNames) > 0:
 		return orgNames, orgRefused, nil
-	case orgErr == nil:
+	case orgErr == nil || isNotFound(orgErr):
 		return nil, orgRefused, emptyListingError(owner)
-	case isNotFound(orgErr):
-		return nil, refused, emptyListingError(owner)
 	default:
-		if len(orgNames) > 0 {
-			return orgNames, orgRefused, orgErr
-		}
-		return nil, refused, orgErr
+		return orgNames, orgRefused, orgErr
 	}
+}
+
+// partialListing returns a failed page with the names already collected. It
+// warns for non-cancelled partial results because alerts/logql.yaml keys on the
+// message text.
+func (c *Client) partialListing(ctx context.Context, owner string, page int, names []string, refused refusals, err error) ([]string, refusals, error) {
+	if len(names) > 0 && ctx.Err() == nil {
+		c.opts.Logger.Warn("ghcr owner listing partially failed",
+			"owner", owner, "packages", len(names), "page", page, "error", err)
+	}
+	return names, refused, err
 }
 
 // readListing walks one owner's listing in kind's URL form from page 1 up
@@ -171,31 +178,25 @@ func (c *Client) scrapePackageList(ctx context.Context, owner string) ([]string,
 // A page that fails is a partial listing, returned with the names already
 // collected. Exhausting the cap while names still arrive is a truncated
 // listing. Both states WARN, unless the cycle's own cancellation caused the
-// failure, because alerts.yaml keys on their message text.
-func (c *Client) readListing(ctx context.Context, owner string, kind ownerKind) ([]string, refusals, error) {
+// failure, because alerts/logql.yaml keys on their message text.
+func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
 		names   []string
 		refused refusals
 	)
 	seen := make(map[string]bool)
 	for page := 1; page <= maxListingPages; page++ {
-		html, err := c.fetchHTML(ctx, listingURL(kind, owner, page))
+		html, err := c.fetchHTML(ctx, p, listingURL(kind, owner, page))
 		if err != nil {
-			if len(names) == 0 {
-				return nil, refused, err
-			}
-			if ctx.Err() == nil {
-				c.opts.Logger.Warn("ghcr owner listing partially failed",
-					"owner", owner, "packages", len(names), "page", page, "error", err)
-			}
-			return names, refused, err
+			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
 		pageNames, pageRefused := parsePackageList(html, owner, kind)
 		candidates := len(pageNames) + pageRefused.Count
-		if candidates > maxListingCandidates {
-			return nil, refused, fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates)
-		}
 		refused = refused.merge(pageRefused)
+		if candidates > maxListingCandidates {
+			return c.partialListing(ctx, owner, page, names, refused,
+				fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates))
+		}
 		added := 0
 		for _, name := range pageNames {
 			if seen[name] {
@@ -207,7 +208,8 @@ func (c *Client) readListing(ctx context.Context, owner string, kind ownerKind) 
 		}
 		if added == 0 {
 			if pageRefused.Count > 0 {
-				return names, refused, fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page)
+				return c.partialListing(ctx, owner, page, names, refused,
+					fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page))
 			}
 			return names, refused, nil
 		}
@@ -223,8 +225,8 @@ func (c *Client) readListing(ctx context.Context, owner string, kind ownerKind) 
 // emptyListingError names both causes of a first listing page with no
 // package links, the checkable one first, behind the format sentinel.
 func emptyListingError(owner string) error {
-	return fmt.Errorf("%w: no public container packages found for %s - check the owner name, or the listing markup changed",
-		errHTMLFormatChanged, owner)
+	return fmt.Errorf("%w: %w: no public container packages found for %s - check the owner name, or the listing markup changed",
+		errHTMLFormatChanged, errEmptyListing, owner)
 }
 
 // isNotFound reports whether err is GitHub answering 404, which on the
@@ -256,38 +258,51 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 		}
 		at := cursor + i
 		if at+len(prefix) > len(html) || !strings.EqualFold(html[at:at+len(prefix)], prefix) {
+			// The root self-overlaps only at its trailing slash, where the prefix
+			// would begin mid-path rather than at a link, so skipping it whole
+			// cannot pass over a candidate addressing this owner.
+			cursor = at + len(root)
+			continue
+		}
+
+		var quote byte
+		switch {
+		case strings.HasSuffix(html[:at], `href="`):
+			quote = '"'
+		case strings.HasSuffix(html[:at], `href='`):
+			quote = '\''
+		default:
+			if refused.Sample == "" {
+				refused.Sample = strings.Clone(html[at : at+min(len(prefix), 128)])
+			}
+			refused.Count++
 			cursor = at + len(root)
 			continue
 		}
 
 		nameStart := at + len(prefix)
-		nameEnd := strings.IndexAny(html[nameStart:], "\"'<> \t")
+		nameEnd := strings.IndexByte(html[nameStart:], quote)
 		if nameEnd == -1 {
+			raw := html[nameStart:]
+			if refused.Sample == "" {
+				refused.Sample = strings.Clone(raw[:min(len(raw), 128)])
+			}
+			refused.Count++
 			break
 		}
 		nameEnd += nameStart
 		raw := html[nameStart:nameEnd]
 		cursor = nameEnd
 
-		name, err := url.PathUnescape(raw)
-		safe := err == nil && name != ""
-		// A decoded name is checked per element.
-		if safe {
-			for segment := range strings.SplitSeq(name, "/") {
-				if !urlsafe.IsSafeURLSegment(segment) {
-					safe = false
-					break
-				}
-			}
-		}
-		if !safe {
+		name, ok := urlsafe.PackageName(owner, raw)
+		if !ok {
 			if refused.Sample == "" {
 				refused.Sample = strings.Clone(raw[:min(len(raw), 128)])
 			}
 			refused.Count++
 			continue
 		}
-		names = append(names, name)
+		names = append(names, strings.Clone(name))
 	}
 	return names, refused
 }
@@ -298,9 +313,9 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 // The /users/ form serves both account kinds: GitHub redirects an organization
 // to the repo-scoped package page through the allowlisted redirect policy, so
 // expandWildcard's account kind is deliberately not threaded here.
-func (c *Client) scrapeDownloads(ctx context.Context, owner, pkg string) (int64, error) {
+func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, owner, pkg string) (int64, error) {
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", owner, url.PathEscape(pkg))
-	html, err := c.fetchHTML(ctx, pageURL)
+	html, err := c.fetchHTML(ctx, p, pageURL)
 	if err != nil {
 		return 0, err
 	}
@@ -315,7 +330,7 @@ func (c *Client) scrapeDownloads(ctx context.Context, owner, pkg string) (int64,
 // deliberately not meaningful: GitHub reflows whitespace without breaking
 // this.
 func parseDownloads(html string) (int64, error) {
-	markerIdx := strings.Index(html, "Total downloads")
+	markerIdx := markerText(html)
 	if markerIdx == -1 {
 		return 0, errHTMLFormatChanged
 	}
@@ -356,6 +371,32 @@ func parseDownloads(html string) (int64, error) {
 	return count, nil
 }
 
+// markerText returns the first "Total downloads" occurrence whose next
+// non-whitespace byte begins the element's closing tag.
+func markerText(html string) int {
+	const marker = "Total downloads"
+	for at := 0; ; {
+		i := strings.Index(html[at:], marker)
+		if i < 0 {
+			return -1
+		}
+		i += at
+		rest := strings.TrimLeft(html[i+len(marker):], " \t\r\n")
+		if strings.HasPrefix(rest, "<") {
+			return i
+		}
+		at = i + len(marker)
+	}
+}
+
+// titleAttribute returns the h3 start tag's single title attribute value.
+// Every attribute in the tag must be name="value" or name='value': a bare
+// (valueless) attribute, an unquoted value, or a second title all refuse the
+// tag, and so does a > inside a quoted value, which truncates tag before this
+// runs. All four are legal or near-legal HTML that GitHub does not currently
+// serve, and refusing them is deliberate — a count read out of a tag this
+// function cannot fully account for is worse than no count, and the caller
+// reports the refusal as format drift.
 func titleAttribute(tag string) (string, bool) {
 	attrs := tag[len("<h3"):]
 	var title string
@@ -407,11 +448,12 @@ func titleAttribute(tag string) (string, bool) {
 // cycle is a stop, not an outage, and sets neither return.
 func (c *Client) expandWildcard(
 	ctx context.Context,
+	p *pacer,
 	ref registry.RepoRef,
 	seen map[registry.RepoRef]bool,
 	packages []registry.RepoRef,
 ) (out []registry.RepoRef, listingWhollyFailed bool) {
-	names, refused, err := c.scrapePackageList(ctx, ref.Owner)
+	names, refused, err := c.scrapePackageList(ctx, p, ref.Owner)
 	if refused.Count > 0 {
 		// Bounded at the emit site: the sample is a raw scraped string, and
 		// 128 bytes is above any legitimate GHCR package name.
@@ -429,16 +471,12 @@ func (c *Client) expandWildcard(
 		}
 		wholly := len(names) == 0
 		if wholly {
-			if errors.Is(err, errHTMLFormatChanged) {
+			if errors.Is(err, errHTMLFormatChanged) && !errors.Is(err, errEmptyListing) {
 				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err,
 					"report_at", "https://github.com/cplieger/registry-stats/issues")
 			} else {
 				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
 			}
-		}
-		if errors.Is(err, httpx.ErrRateLimited) {
-			c.opts.Logger.Warn("ghcr listing rate limited", "owner", ref.Owner,
-				"hint", "consider increasing pacing delay")
 		}
 		return c.appendPackages(names, ref.Owner, seen, packages), wholly
 	}
@@ -467,12 +505,12 @@ func (*Client) appendPackages(
 
 // buildPackageList expands wildcard refs (owner/*) by scraping the owner's
 // packages listing, then appends explicit refs unless already covered by a
-// wildcard. Both passes key the shared `seen` map on the (owner, package)
-// pair itself, so no encoding is shared and the two cannot disagree about
-// one package. listingWhollyFailed is true when any owner's listing errored
-// with no names.
+// wildcard. Config folds every ref to lower case, so the two passes cannot
+// disagree about one package. listingWhollyFailed is true when any owner's
+// listing errored with no names.
 func (c *Client) buildPackageList(
 	ctx context.Context,
+	p *pacer,
 	refs []registry.RepoRef,
 ) (packages []registry.RepoRef, listingWhollyFailed bool) {
 	seen := make(map[registry.RepoRef]bool)
@@ -481,7 +519,7 @@ func (c *Client) buildPackageList(
 			continue
 		}
 		var wholly bool
-		packages, wholly = c.expandWildcard(ctx, ref, seen, packages)
+		packages, wholly = c.expandWildcard(ctx, p, ref, seen, packages)
 		listingWhollyFailed = listingWhollyFailed || wholly
 	}
 	for _, ref := range refs {

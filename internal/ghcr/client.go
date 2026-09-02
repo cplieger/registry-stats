@@ -10,6 +10,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/runesafe/v2"
 )
 
 // Options configures GHCR-specific scraper policy. Its zero value selects
@@ -26,7 +27,7 @@ type Options struct {
 }
 
 // DefaultMinPacing and DefaultPacingJitter are the production pacing
-// values applied when an Options field is zero. Each request waits
+// values applied when an Options field is zero. Each paced interval is
 // DefaultMinPacing plus a uniformly distributed jitter in
 // [0, DefaultPacingJitter).
 const (
@@ -67,23 +68,20 @@ func (c *Client) Collect(
 	ctx context.Context,
 	refs []registry.RepoRef,
 ) (entries []registry.Entry, attempted int, listingFailed bool) {
+	p := &pacer{delay: c.pacingDelay}
 	pkgParseFailures := 0
-	packages, listingWhollyFailed := c.buildPackageList(ctx, refs)
+	packages, listingWhollyFailed := c.buildPackageList(ctx, p, refs)
 
 	for _, ref := range packages {
-		if ctx.Err() != nil {
-			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
-			return entries, attempted, listingWhollyFailed
-		}
-		res := c.scrapePackage(ctx, ref)
-		if res.cancelled {
+		stat, err := c.scrapePackage(ctx, p, ref)
+		if err != nil && ctx.Err() != nil {
 			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
 			return entries, attempted, listingWhollyFailed
 		}
 
 		attempted++
-		if !res.ok {
-			if res.parseFailed {
+		if err != nil {
+			if errors.Is(err, errHTMLFormatChanged) {
 				pkgParseFailures++
 			}
 			// A missing entry leaves the gauge unset for this cycle (the
@@ -91,7 +89,7 @@ func (c *Client) Collect(
 			// drop into the cumulative pull count.
 			continue
 		}
-		entries = append(entries, res.stat)
+		entries = append(entries, stat)
 	}
 
 	// A majority rather than all, so alerting can fire before the registry
@@ -106,10 +104,34 @@ func (c *Client) Collect(
 }
 
 // logInterrupted records the packages already collected and the ones a
-// cancelled cycle never reached.
+// cancelled cycle did not complete.
 func (c *Client) logInterrupted(collected, remaining int, err error) {
 	c.opts.Logger.Warn("ghcr collection interrupted by context cancellation",
 		"collected", collected, "remaining", remaining, "error", err)
+}
+
+// pacer spaces consecutive GHCR requests inside one Collect. The first
+// wait of a sequence returns immediately: pacing is a property of the
+// sequence, and a fresh cycle has no predecessor to space against.
+// One Collect is sequential, so the started bit needs no lock.
+type pacer struct {
+	delay   func() time.Duration
+	started bool
+}
+
+func (p *pacer) wait(ctx context.Context) error {
+	if !p.started {
+		p.started = true
+		return nil
+	}
+	timer := time.NewTimer(p.delay())
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // pacingDelay returns the inter-request delay for GHCR requests: the
@@ -129,37 +151,23 @@ func (c *Client) pacingDelay() time.Duration {
 	return pacingMin + jitter
 }
 
-// scrapeResult is the outcome of one package scrape: stat is valid only
-// when ok is true; parseFailed marks an errHTMLFormatChanged; cancelled
-// marks a shutdown, which is neither an attempt nor a failure.
-type scrapeResult struct {
-	stat        registry.Entry
-	ok          bool
-	parseFailed bool
-	cancelled   bool
-}
-
-// scrapePackage scrapes a single package's download count and classifies
-// the outcome, logging the failure (and a rate-limit hint) on error. On
-// success it returns the populated stat with ok=true; on any failure ok
-// is false so the caller leaves the package out of results.
-func (c *Client) scrapePackage(ctx context.Context, ref registry.RepoRef) scrapeResult {
-	downloads, err := c.scrapeDownloads(ctx, ref.Owner, ref.Repo)
+// scrapePackage scrapes one package's download count, reporting the failure
+// itself so the caller only classifies it. The error is errHTMLFormatChanged
+// for format drift and carries ctx.Err() when a shutdown interrupted the
+// scrape; on any error the entry is zero and the caller leaves the package out
+// of results.
+func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoRef) (registry.Entry, error) {
+	downloads, err := c.scrapeDownloads(ctx, p, ref.Owner, ref.Repo)
 	if err != nil {
 		if ctx.Err() != nil {
-			c.opts.Logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo, "error", err)
-			return scrapeResult{cancelled: true}
+			c.opts.Logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo,
+				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			return registry.Entry{}, err
 		}
-		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo, "error", err)
-		if errors.Is(err, httpx.ErrRateLimited) {
-			c.opts.Logger.Warn("ghcr rate limited", "package", ref.Owner+"/"+ref.Repo,
-				"hint", "consider increasing pacing delay or reducing package count")
-		}
-		return scrapeResult{parseFailed: errors.Is(err, errHTMLFormatChanged)}
+		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo,
+			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+		return registry.Entry{}, err
 	}
 	c.opts.Logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)
-	return scrapeResult{
-		stat: registry.Entry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads},
-		ok:   true,
-	}
+	return registry.Entry{Owner: ref.Owner, Repo: ref.Repo, Pulls: downloads}, nil
 }

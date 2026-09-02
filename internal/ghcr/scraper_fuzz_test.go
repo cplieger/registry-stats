@@ -1,7 +1,7 @@
 package ghcr
 
 import (
-	"strings"
+	"net/url"
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
@@ -46,17 +46,18 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Fuzz(func(t *testing.T, html, owner string) {
 		pkgs, refused := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
-			for segment := range strings.SplitSeq(name, "/") {
-				if !urlsafe.IsSafeURLSegment(segment) {
-					t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
-				}
+			canonical, ok := urlsafe.PackageName(owner, url.PathEscape(name))
+			if !ok || canonical != name {
+				t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
 			}
 		}
 		if len(refused.Sample) > 128 {
 			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most 128", html, owner, len(refused.Sample))
 		}
-		if refused.Count > 0 && len(refused.Sample) < 128 && urlsafe.IsSafeURLSegment(refused.Sample) {
-			t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe segment", html, owner, refused.Sample)
+		if refused.Count > 0 && len(refused.Sample) < 128 {
+			if _, ok := urlsafe.PackageName(owner, refused.Sample); ok {
+				t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe package token", html, owner, refused.Sample)
+			}
 		}
 	})
 }

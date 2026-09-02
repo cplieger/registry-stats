@@ -144,6 +144,7 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/owner/", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
+			"count": 2,
 			"results": []map[string]any{
 				{"name": "app1", "pull_count": 100},
 				{"name": "app2", "pull_count": 200},
@@ -174,10 +175,45 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 	}
 }
 
+func TestClient_Collect_WildcardTagFailuresKeepEntries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"count": 2,
+			"results": []map[string]any{
+				{"name": "app1", "pull_count": 100},
+				{"name": "app2", "pull_count": 200},
+			},
+			"next": "",
+		})
+	})
+	mux.HandleFunc("GET /v2/repositories/o/app1/tags/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("GET /v2/repositories/o/app2/tags/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewTestServer(t, mux)
+
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	entries, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "o", Repo: "*"}})
+
+	if attempted != 2 || listingFailed {
+		t.Errorf("Collect with wildcard tag failures = (attempted=%d, listingFailed=%v), want (2, false)", attempted, listingFailed)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Collect with wildcard tag failures returned %d entries, want 2", len(entries))
+	}
+	if entries[0].Pulls != 100 || entries[0].TagCount != nil || entries[1].Pulls != 200 || entries[1].TagCount != nil {
+		t.Errorf("Collect with wildcard tag failures entries = %+v, want both pull counts with no TagCount", entries)
+	}
+}
+
 func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/owner/", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
 			"results": []map[string]any{
 				{"name": "app1", "pull_count": 100},
 			},
@@ -270,7 +306,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 	t.Run("legitimately_empty_owner", func(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": ""})
 		})
 		srv := httptest.NewTestServer(t, mux)
 
@@ -294,7 +330,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 			wantShape   bool
 		}{
 			{name: "http_error", page2Status: http.StatusNotFound, wantError: "list repos page 2"},
-			{name: "parse_error", page2Status: http.StatusOK, page2Body: `{"results":[],"results":[]}`, wantError: "parse repo list page 2", wantShape: true},
+			{name: "parse_error", page2Status: http.StatusOK, page2Body: `{"count":1,"results":[],"results":[]}`, wantError: "parse repo list page 2", wantShape: true},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -303,6 +339,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 					switch r.URL.Query().Get("page") {
 					case "", "1":
 						_ = json.NewEncoder(w).Encode(map[string]any{
+							"count":   1,
 							"results": []map[string]any{{"name": "a1", "pull_count": 1}},
 							"next":    "page2",
 						})
@@ -339,10 +376,43 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 	})
 }
 
+func TestClient_Collect_WildcardListingFailureIsSticky(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/bad/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /v2/repositories/good/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"count":   1,
+			"results": []map[string]any{{"name": "app", "pull_count": 42}},
+			"next":    "",
+		})
+	})
+	mux.HandleFunc("GET /v2/repositories/good/app/tags/", tagCountHandler(1))
+	srv := httptest.NewTestServer(t, mux)
+
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	refs := []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "*"}}
+	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+
+	if !listingFailed {
+		t.Error("Collect after an earlier wildcard listing failure = listingFailed false, want true")
+	}
+	if attempted != 1 {
+		t.Errorf("Collect after an earlier wildcard listing failure attempted = %d, want 1", attempted)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Collect after an earlier wildcard listing failure returned %d entries, want 1", len(entries))
+	}
+	if entries[0].Owner != "good" || entries[0].Repo != "app" || entries[0].Pulls != 42 {
+		t.Errorf("Collect after an earlier wildcard listing failure entry = %+v, want good/app with 42 pulls", entries[0])
+	}
+}
+
 // TestClient_Collect_PartialExplicitFailureLogsRepo covers the explicit-ref
 // state no other test reaches: exactly half the attempts fail, while the
 // listing-failure fact stays false and the per-repo ERROR records the omitted
-// repo. level=ERROR is what alerts.yaml keys on.
+// repo. level=ERROR is what alerts/logql.yaml keys on.
 func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -396,7 +466,7 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 // TestClient_Collect_CancelledMidFetch_IsNotAnOutage pins the cancellation
 // classification on the explicit-ref path: a stop is not a registry
 // failure, so the in-flight fetch error is recorded at DEBUG, never the
-// ERROR alerts.yaml pages on.
+// ERROR alerts/logql.yaml pages on.
 func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -428,6 +498,42 @@ func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 	}
 }
 
+func TestClient_Collect_CancelledTagFetchKeepsPulls(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/owner/myapp/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"pull_count": 5000})
+	})
+	mux.HandleFunc("GET /v2/repositories/owner/myapp/tags/", func(_ http.ResponseWriter, r *http.Request) {
+		cancel()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewTestServer(t, mux)
+
+	logger, buf := captureLogger()
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
+
+	if attempted != 1 || listingFailed {
+		t.Errorf("Collect after tag cancellation = (attempted=%d, listingFailed=%v), want (1, false)", attempted, listingFailed)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Collect after tag cancellation returned %d entries, want 1", len(entries))
+	}
+	if entries[0].Pulls != 5000 || entries[0].TagCount != nil {
+		t.Errorf("Collect after tag cancellation entry = %+v, want pulls 5000 with no TagCount", entries[0])
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, `msg="docker hub tag count fetch cancelled"`) {
+		t.Errorf("Collect after tag cancellation did not record the cancelled tag fetch; logs:\n%s", logs)
+	}
+	if strings.Contains(logs, `msg="docker hub tag count fetch failed"`) || strings.Contains(logs, `msg="docker hub tag count parse failed"`) {
+		t.Errorf("Collect after tag cancellation recorded a tag-count failure; logs:\n%s", logs)
+	}
+}
+
 // captureLogger returns a logger recording everything (Debug and up)
 // into the returned buffer.
 func captureLogger() (*slog.Logger, *bytes.Buffer) {
@@ -437,9 +543,9 @@ func captureLogger() (*slog.Logger, *bytes.Buffer) {
 
 // TestClient_Collect_WildcardListingError_LogsWarn pins the wildcard
 // expansion warn logs: a wholesale listing failure logs the "wholly
-// failed" warn, a partial failure logs "partially failed", and a
-// successful listing stays silent. Driving it through the public Collect
-// with a capturing logger also confirms the supplied logger is used.
+// failed" warn, while a successful listing stays silent. Driving it
+// through the public Collect with a capturing logger also confirms the
+// supplied logger is used.
 func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 	const (
 		whollyMsg    = "docker hub listing wholly failed"
@@ -464,38 +570,10 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		}
 	})
 
-	t.Run("partial_error_logs_partially", func(t *testing.T) {
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Query().Get("page") {
-			case "", "1":
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"results": []map[string]any{{"name": "a1", "pull_count": 1}},
-					"next":    "page2",
-				})
-			default:
-				w.WriteHeader(http.StatusNotFound) // page 2 fails
-			}
-		})
-		mux.HandleFunc("GET /v2/repositories/o/a1/tags/", tagCountHandler(1))
-		srv := httptest.NewTestServer(t, mux)
-
-		logger, buf := captureLogger()
-		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-		c.Collect(t.Context(), wildcard)
-
-		if !strings.Contains(buf.String(), partiallyMsg) {
-			t.Errorf("Collect with a partial listing failure did not log %q; logs:\n%s", partiallyMsg, buf.String())
-		}
-		if strings.Contains(buf.String(), whollyMsg) {
-			t.Errorf("Collect with a partial listing failure logged %q (want partially, not wholly); logs:\n%s", whollyMsg, buf.String())
-		}
-	})
-
 	t.Run("listing_ok_silent", func(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}, "next": ""})
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": ""})
 		})
 		srv := httptest.NewTestServer(t, mux)
 

@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/collect"
-	configpkg "github.com/cplieger/registry-stats/v2/internal/config"
+	"github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/webhttp/v2"
@@ -22,6 +22,7 @@ import (
 
 // mainFakeSource is a canned collect.Source for driving runCollect.
 type mainFakeSource struct {
+	onCollect     func()
 	src           registry.ID
 	entries       []registry.Entry
 	listingFailed bool
@@ -30,6 +31,9 @@ type mainFakeSource struct {
 func (f *mainFakeSource) Source() registry.ID { return f.src }
 
 func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, bool) {
+	if f.onCollect != nil {
+		f.onCollect()
+	}
 	return f.entries, len(f.entries), f.listingFailed
 }
 
@@ -40,15 +44,15 @@ func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(orig) })
 
 	raw := "bad\n" + strings.Repeat("x", 4096)
-	warning := configpkg.Warning{
+	warning := config.Warning{
 		Msg: "config warning",
 		Attrs: []slog.Attr{
 			slog.String("value", raw),
 			slog.Int("requested", 7),
-			slog.Group("group", slog.String("nested", "raw\nvalue")),
+			slog.String("expected", "owner/repo or owner/*"),
 		},
 	}
-	logWarnings([]configpkg.Warning{warning})
+	logWarnings([]config.Warning{warning})
 
 	var record map[string]any
 	if err := json.NewDecoder(buf).Decode(&record); err != nil {
@@ -67,12 +71,8 @@ func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
 	if got := record["requested"]; got != float64(7) {
 		t.Errorf("warning requested = %#v, want 7", got)
 	}
-	group, ok := record["group"].(map[string]any)
-	if !ok {
-		t.Fatalf("warning group = %#v, want object", record["group"])
-	}
-	if got := group["nested"]; got != "raw\nvalue" {
-		t.Errorf("warning group nested = %#v, want raw newline value", got)
+	if got := record["expected"]; got != "owner/repo or owner/*" {
+		t.Errorf("warning expected = %#v, want the second string attr intact", got)
 	}
 	if got := warning.Attrs[0].Value.String(); got != raw {
 		t.Errorf("logWarnings mutated source attr = %q, want original value", got)
@@ -89,50 +89,80 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 		listingFailed: false,
 	}
 	gh := &mainFakeSource{src: registry.GHCR, listingFailed: true} // no entries, unhealthy
-	cfg := &configpkg.Config{
+	cfg := &config.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
 		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New()); !got {
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New(), &mainFakeMarker{}, &webhttp.Ready{}); !got {
 		t.Error("runCollect() = false, want true (DockerHub produced data; partial success stays healthy)")
 	}
 }
 
-func TestMarkCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
+func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	source := &mainFakeSource{
 		src:           registry.DockerHub,
 		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7, TagCount: new(2)}},
 		listingFailed: false,
 	}
-	cfg := &configpkg.Config{
+	cfg := &config.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
 	}
 	m := obs.New()
 	marker := &mainFakeMarker{}
 	ready := &webhttp.Ready{}
 
-	markCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
+	runCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
 	if !marker.Healthy() {
-		t.Error("markCollect first cycle left marker unhealthy, want healthy")
+		t.Error("runCollect first cycle left marker unhealthy, want healthy")
 	}
 	if !ready.Ready() {
-		t.Error("markCollect first cycle left readiness false, want true")
+		t.Error("runCollect first cycle left readiness false, want true")
 	}
 
 	source.entries = nil
 	source.listingFailed = true
-	markCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
+	runCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
 
 	if marker.Healthy() {
-		t.Error("markCollect failed cycle left marker healthy, want unhealthy")
+		t.Error("runCollect failed cycle left marker healthy, want unhealthy")
 	}
 	if !ready.Ready() {
-		t.Error("markCollect failed cycle cleared latched readiness")
+		t.Error("runCollect failed cycle cleared latched readiness")
 	}
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if body := rec.Body.String(); strings.Contains(body, `owner="o",registry="dockerhub",repo="app"`) {
-		t.Errorf("markCollect failed cycle left prior image series in metrics:\n%s", body)
+		t.Errorf("runCollect failed cycle left prior image series in metrics:\n%s", body)
+	}
+}
+
+// TestRunCollect_cancelledCyclePublishesNothing pins both publication guards:
+// a cancelled cycle moves neither health signal and publishes no image label.
+func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	source := &mainFakeSource{
+		onCollect:     cancel,
+		src:           registry.DockerHub,
+		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7}},
+		listingFailed: false,
+	}
+	cfg := &config.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
+	m := obs.New()
+	marker := &mainFakeMarker{}
+	ready := &webhttp.Ready{}
+
+	runCollect(ctx, cfg, []collect.Source{source}, m, marker, ready)
+
+	if marker.Healthy() {
+		t.Error("cancelled cycle set the marker healthy, want untouched")
+	}
+	if ready.Ready() {
+		t.Error("cancelled cycle set readiness, want untouched")
+	}
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rec.Body.String(); strings.Contains(body, `repo="app"`) {
+		t.Errorf("cancelled cycle published an image series:\n%s", body)
 	}
 }
 
@@ -150,12 +180,12 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 		entries:       []registry.Entry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
 		listingFailed: false,
 	}
-	cfg := &configpkg.Config{
+	cfg := &config.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
 		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
 	}
 	m := obs.New()
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m); !got {
+	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m, &mainFakeMarker{}, &webhttp.Ready{}); !got {
 		t.Fatal("runCollect() = false, want true")
 	}
 
@@ -193,7 +223,7 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
 	t.Cleanup(func() { slog.SetDefault(orig) })
 
-	logConfig(&configpkg.Config{})
+	logConfig(&config.Config{})
 
 	if !strings.Contains(buf.String(), "no repos configured") {
 		t.Errorf("logConfig with no repos did not emit the expected ERROR; logs:\n%s", buf.String())
@@ -207,7 +237,7 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 	m := obs.New()
 
-	cfg := &configpkg.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
+	cfg := &config.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
 	sources := []collect.Source{
 		&mainFakeSource{src: registry.DockerHub},
 		&mainFakeSource{src: registry.GHCR},
@@ -232,7 +262,7 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
 	}
 
-	runCollect(t.Context(), cfg, sources, m)
+	runCollect(t.Context(), cfg, sources, m, &mainFakeMarker{}, &webhttp.Ready{})
 	w = httptest.NewRecorder()
 	m.Handler()(w, r)
 	body = w.Body.String()

@@ -1,0 +1,134 @@
+# Recommended alert rules for registry-stats. Prometheus / Mimir ruler (PromQL)
+# rule group: these five rules (RegistryStatsTargetDown,
+# RegistryStatsTargetAbsent, RegistryStatsCollectStalled,
+# RegistryStatsSourceDegraded, RegistryStatsPullCountRegressed) read series from
+# /metrics, so scrape it and evaluate them with Prometheus or the Mimir ruler.
+# Each rule below documents its own series prerequisites and no-series case. The
+# scrape `job` label is yours; the examples assume job="registry-stats".
+#
+# Three further conditions leave no series to key on, so they are LogQL and live
+# in alerts/logql.yaml: a collect cycle that loses images still returns a healthy
+# verdict, and every condition that leaves no series still leaves a log line.
+#
+# Load each half into its own ruler: neither ruler parses the other's
+# expressions. Firing alerts from both deliver through your Alertmanager like
+# any other Prometheus alert. Thresholds, the `for:` windows, and the severity
+# labels are starting points.
+groups:
+  - name: registry-stats
+    rules:
+      # Two arms, because neither covers the other. `up == 0` catches a target
+      # that is configured and failing, and keeps its labels so the alert names
+      # which instance. `absent(up{...})` catches a target that stopped EXISTING
+      # (a dropped scrape target, a removed scrape config, a deleted Kubernetes
+      # pod or ServiceMonitor) where `up` has no series and `up == 0` can never
+      # match.
+      #
+      # Use an EXACT job matcher, not a regex. A regex form
+      # (absent(up{job=~".*x.*"} == 1)) asks whether ANY matching target is up,
+      # so one healthy replica masks every failed one, and its synthetic result
+      # carries no job label to route or group on.
+      - alert: RegistryStatsTargetDown
+        expr: up{job="registry-stats"} == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats exporter down"
+          description: >
+            No successful scrape of registry-stats for 15m while the target is
+            still configured, so image-pull dashboards go stale and every
+            other PromQL rule here is blind. The scrape itself is failing:
+            container down, wrong port, or network. Check
+            `docker logs registry-stats` and your Alloy or Prometheus scrape.
+            The `job` label is whatever you set in your scrape config.
+      - alert: RegistryStatsTargetAbsent
+        expr: absent(up{job="registry-stats"})
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats has no scrape target at all"
+          description: >
+            There is no up{job="registry-stats"} series, so registry-stats is
+            not merely failing to scrape but is no longer a configured target:
+            a dropped scrape target, a removed scrape config, or a deleted
+            Kubernetes pod or ServiceMonitor. Every other PromQL rule here is
+            blind.
+      # Detection range SHORT, `for:` long, and that order is load-bearing.
+      # The intuitive form (increase(...[3h]) == 0 under a short `for:`) reads
+      # true as soon as a freshly started counter has two samples at the same
+      # value, so it fires about 30m after every container start and clears at
+      # the first scheduled cycle. Measuring absence over 15m and requiring it
+      # to hold for 3h fires 3h after the LAST completed cycle instead, and a
+      # restart resets the pending timer at its own startup cycle.
+      #
+      # Set `for:` to about three POLL_INTERVAL_HOURS. In one-shot mode
+      # (POLL_INTERVAL_HOURS=0) the counter advances exactly once by design, so
+      # drop this rule: there is no recurring cycle to miss.
+      - alert: RegistryStatsCollectStalled
+        expr: sum by (job, instance) (increase(registrystats_collects_total[15m])) == 0
+        for: 3h
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats has not completed a collect cycle in 3h"
+          description: >
+            registrystats_collects_total has not advanced for 3h while the
+            exporter is up (the default POLL_INTERVAL_HOURS is 1). The exporter
+            keeps serving its last values but no longer polls Docker Hub or
+            GHCR. Check `docker logs registry-stats` for scrape or listing
+            errors. This rule cannot fire when no repos are configured at all:
+            the counter has no series then, so RegistryStatsConfigRejected
+            owns that case.
+      # The app's own per-source verdict. registry-stats increments
+      # collect_errors_total once for a cycle in which that source failed a
+      # MAJORITY of its repos, or lost an owner listing outright, so one
+      # increment means EITHER most of that registry's repos failed or one
+      # wildcard owner's listing was lost outright - the log says which, and
+      # how many owners. A minority failure deliberately does not move this
+      # counter, which is what RegistryStatsCollectionIncomplete covers.
+      #
+      # Both per-source counters are pre-minted at zero for every configured
+      # source at process start, so increase() has an earlier sample to
+      # subtract from and the single-failure case, the one worth knowing about,
+      # fires. A source with no configured refs has no series at all, so this
+      # cannot fire for a registry the deployment never polls.
+      - alert: RegistryStatsSourceDegraded
+        expr: increase(registrystats_collect_errors_total[3h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats collection failing for {{ $labels.source }}"
+          description: >
+            registrystats_collect_errors_total advanced for this source: a
+            collect cycle either failed for most of its repos or lost a
+            wildcard owner listing outright. Whichever it was, those repos stop
+            appearing on /metrics until a later cycle succeeds - the other
+            configured owners are unaffected and their series keep updating, so
+            read the log for the owner rather than assuming the whole registry.
+            Check `docker logs registry-stats` for the per-repo reason: a rate
+            limit, an HTTP failure, or a page-format change.
+      # registrystats_image_pulls_total is exported as a GAUGE despite the
+      # `_total` suffix, so range queries on it use `delta()` (as
+      # grafana-dashboard.json:214 does) and never `rate()`/`increase()`, whose
+      # counter-reset correction inflates the result across exactly the downward
+      # restatement this rule detects.
+      - alert: RegistryStatsPullCountRegressed
+        expr: registrystats_image_pulls_total < max_over_time(registrystats_image_pulls_total[2d])
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "registry-stats pull count regressed for {{ $labels.registry }}/{{ $labels.owner }}/{{ $labels.repo }}"
+          description: >
+            registrystats_image_pulls_total for this image is LOWER than its
+            highest value over the last 2 days. A failed scrape is skipped
+            rather than exported as zero, so a drop means either a scrape
+            produced a wrong count without erroring (the silent-wrong-count
+            corner of the GHCR download-count parsing heuristic in
+            internal/ghcr/scraper.go) or the registry itself restated the
+            total. Check `docker logs registry-stats` for the affected repo;
+            if GitHub changed its package-page markup, the download-count parser
+            needs updating.
