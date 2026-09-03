@@ -555,7 +555,7 @@ func parseDownloads(html string) (int64, error) {
 // markerText returns the first plausible "Total downloads" occurrence and
 // the number found. A plausible occurrence's next non-whitespace byte begins
 // the element's closing tag.
-func markerText(html string) (idx int, n int) {
+func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
 	for at := 0; ; {
 		i := strings.Index(html[at:], marker)

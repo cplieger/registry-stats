@@ -291,4 +291,3 @@ func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
 		t.Errorf("repos[0] = %+v, want owner/good with 2 pulls", repos[0])
 	}
 }
-
