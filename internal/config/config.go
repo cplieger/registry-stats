@@ -12,7 +12,6 @@ import (
 	"cmp"
 	"errors"
 	"log/slog"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -146,10 +145,9 @@ func Load() (Config, []Warning) {
 }
 
 // parseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
-// pairs. GHCR repository tokens may contain percent-encoded nested names;
-// Docker Hub names remain one segment. Invalid entries are skipped and
-// reported as warnings. Each accepted ref is canonicalized to lower case,
-// because neither registry distinguishes repository case.
+// pairs. Invalid entries are skipped and reported with the rule that refused
+// them. Each accepted ref is canonicalized to lower case because neither
+// registry distinguishes repository case.
 func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	if s == "" {
 		return nil, nil
@@ -162,40 +160,17 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 		if p == "" {
 			continue
 		}
-		owner, repo, ok := strings.Cut(p, "/")
-		if !ok || owner == "" || repo == "" {
+		ref, err := resolveRef(reg, p)
+		if err != nil {
 			warns = append(warns, Warning{
-				Msg: "skipping invalid repo ref",
+				Msg: "skipping unusable repo ref",
 				Attrs: []slog.Attr{
 					slog.String("input", p),
-					slog.String("expected", "owner/repo or owner/*"),
+					slog.String("reason", err.Error()),
 				},
 			})
 			continue
 		}
-
-		repoName, reason := repo, ""
-		if !urlsafe.IsSafeURLSegment(owner) {
-			reason = "owner not a safe URL segment"
-		} else {
-			repoName, reason = resolveRepoName(reg, owner, repo)
-		}
-		if reason != "" {
-			warns = append(warns, Warning{
-				Msg: "skipping repo ref with unsafe characters",
-				Attrs: []slog.Attr{
-					slog.String("input", p),
-					slog.String("reason", reason),
-				},
-			})
-			continue
-		}
-
-		owner = strings.ToLower(owner)
-		if repoName != "*" {
-			repoName = strings.ToLower(repoName)
-		}
-		ref := registry.RepoRef{Owner: owner, Repo: repoName}
 		if seen[ref] {
 			continue
 		}
@@ -205,37 +180,38 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	return refs, warns
 }
 
-// resolveRepoName validates one token's repository half for reg and returns
-// the canonical repository name. A non-empty reason names the refusing rule.
-func resolveRepoName(reg registry.ID, owner, repo string) (name, reason string) {
+// resolveRef returns the canonical lower-case ref because neither registry
+// distinguishes repository case. A non-nil error names the refusing rule and
+// is not a sentinel.
+func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
+	owner, repo, ok := strings.Cut(token, "/")
+	if !ok || owner == "" || repo == "" {
+		return registry.RepoRef{}, errors.New("not owner/repo or owner/*")
+	}
+	if !urlsafe.IsSafeURLSegment(owner) {
+		return registry.RepoRef{}, errors.New("owner not a safe URL segment")
+	}
+	name, err := repoName(reg, owner, repo)
+	if err != nil {
+		return registry.RepoRef{}, err
+	}
+	return registry.RepoRef{
+		Owner: strings.ToLower(owner),
+		Repo:  strings.ToLower(name),
+	}, nil
+}
+
+// repoName accepts a wildcard for either registry, one safe segment for Docker
+// Hub, and a decoded safe package name for GHCR.
+func repoName(reg registry.ID, owner, repo string) (string, error) {
 	if repo == "*" {
-		return repo, ""
+		return repo, nil
 	}
 	if reg != registry.GHCR {
 		if !urlsafe.IsSafeURLSegment(repo) {
-			return "", "repository not a safe URL segment"
+			return "", errors.New("repository not a safe URL segment")
 		}
-		return repo, ""
+		return repo, nil
 	}
-	name, ok := urlsafe.PackageName(owner, repo)
-	if ok {
-		return name, ""
-	}
-	return "", ghcrRefusalReason(owner, repo)
-}
-
-// ghcrRefusalReason names the rule PackageName refused. It does not decide
-// acceptance and is called only after PackageName returns false.
-func ghcrRefusalReason(owner, repo string) string {
-	name, err := url.PathUnescape(repo)
-	switch {
-	case strings.Contains(repo, "/"):
-		return "raw slash; percent-encode nested names"
-	case err != nil:
-		return "invalid percent-escape"
-	case len(owner)+1+len(name) > urlsafe.MaxSegmentBytes:
-		return "repository name over 255 bytes"
-	default:
-		return "path element not a safe URL segment"
-	}
+	return urlsafe.PackageName(owner, repo)
 }

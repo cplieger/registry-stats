@@ -80,8 +80,7 @@ func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
 }
 
 // TestRunCollect_partialSuccessStaysHealthy pins the health-marker contract:
-// when one registry produces data and the other fails, runCollect still
-// returns true so the marker stays healthy.
+// when one registry produces data and the other fails, the marker stays healthy.
 func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	dh := &mainFakeSource{
 		src:           registry.DockerHub,
@@ -93,15 +92,17 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 		DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}},
 		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New(), &mainFakeMarker{}, &webhttp.Ready{}); !got {
-		t.Error("runCollect() = false, want true (DockerHub produced data; partial success stays healthy)")
+	marker := &mainFakeMarker{}
+	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New(), marker, &webhttp.Ready{})
+	if !marker.Healthy() {
+		t.Error("runCollect partial success left marker unhealthy, want healthy")
 	}
 }
 
 func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	source := &mainFakeSource{
 		src:           registry.DockerHub,
-		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7, TagCount: new(2)}},
+		entries:       []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7}},
 		listingFailed: false,
 	}
 	cfg := &config.Config{
@@ -172,7 +173,7 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	dh := &mainFakeSource{
 		src:           registry.DockerHub,
-		entries:       []registry.Entry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234, TagCount: new(2)}},
+		entries:       []registry.Entry{{Owner: "cplieger", Repo: "subflux", Pulls: 1234}},
 		listingFailed: false,
 	}
 	gh := &mainFakeSource{
@@ -185,8 +186,10 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
 	}
 	m := obs.New()
-	if got := runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m, &mainFakeMarker{}, &webhttp.Ready{}); !got {
-		t.Fatal("runCollect() = false, want true")
+	marker := &mainFakeMarker{}
+	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m, marker, &webhttp.Ready{})
+	if !marker.Healthy() {
+		t.Error("runCollect image publication left marker unhealthy, want healthy")
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -196,7 +199,6 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 
 	want := []string{
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
-		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 2`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
 		`registrystats_collect_duration_seconds_count 1`,
 	}
@@ -212,6 +214,53 @@ type mainFakeMarker struct{ healthy bool }
 
 func (m *mainFakeMarker) Set(h bool)    { m.healthy = h }
 func (m *mainFakeMarker) Healthy() bool { return m.healthy }
+
+// mainBlockingMarker parks inside Set so a test can observe the
+// publication critical section from outside while a cycle is in it.
+type mainBlockingMarker struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *mainBlockingMarker) Set(bool) {
+	close(m.entered)
+	<-m.release
+}
+
+// TestRunCollect_holdsPubAcrossPublication pins the serialization
+// preDrain depends on: a cycle publishes its outcome under pub, so the
+// shutdown readiness clear cannot land between the cycle's context
+// check and ready.Set(true) and be overwritten by it.
+func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
+	source := &mainFakeSource{
+		src:     registry.DockerHub,
+		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7}},
+	}
+	cfg := &config.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
+	ready := &webhttp.Ready{}
+	marker := &mainBlockingMarker{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		runCollect(t.Context(), cfg, []collect.Source{source}, obs.New(), marker, ready)
+		close(done)
+	}()
+	<-marker.entered
+
+	if pub.TryLock() {
+		pub.Unlock()
+		t.Error("runCollect published without holding pub; a shutdown readiness clear can interleave")
+	}
+
+	close(marker.release)
+	<-done
+	if !ready.Ready() {
+		t.Error("runCollect cycle left readiness false, want true")
+	}
+}
 
 // TestLogConfig_noReposLogsError: with zero repos configured, logConfig must
 // emit the operator-facing "no repos configured" ERROR warning that the

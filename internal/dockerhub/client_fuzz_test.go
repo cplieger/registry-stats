@@ -30,10 +30,9 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
 // parser. Invariant: every entry carries exactly the requested owner, a
-// non-empty repo name, and a non-negative pull count — so a crafted
-// listing response cannot smuggle a foreign owner into the label set,
-// inject an unsafe path segment into the tags URL, or land a negative
-// value in a cumulative counter.
+// non-empty safe repo name, and a non-negative pull count, so a crafted
+// listing response cannot smuggle a foreign owner into the label set or land
+// an unsafe name or negative value in a cumulative counter.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
@@ -60,31 +59,6 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 			if r.Pulls < 0 {
 				t.Errorf("parseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
 			}
-		}
-	})
-}
-
-// FuzzDockerHubTagCountUnmarshal drives the production tag-count parser.
-// Invariant: a nil error implies a non-negative count, so a response
-// without a usable count can never reach the image_tags gauge. The
-// {"results":[{}]} seed carries over from the deleted tag-page parser's
-// committed corpus.
-func FuzzDockerHubTagCountUnmarshal(f *testing.F) {
-	f.Add([]byte(`{"count":164,"next":"page2","results":[{"name":"latest","digest":"sha256:abc"}]}`))
-	f.Add([]byte(`{"count":0,"next":"","results":[]}`))
-	f.Add([]byte(`{"count":-1}`))
-	f.Add([]byte(`{"results":[{}]}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(`not json`))
-	f.Add([]byte(``))
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := parseTagCount(data)
-		if err != nil {
-			return
-		}
-		if n < 0 {
-			t.Errorf("parseTagCount(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }

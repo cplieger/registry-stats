@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,7 +32,7 @@ var (
 	// Callers compare via errors.Is to distinguish parse drift from transport
 	// errors.
 	errHTMLFormatChanged = errors.New("GHCR HTML format changed")
-	errEmptyListing     = errors.New("GHCR package listing was empty")
+	errEmptyListing      = errors.New("GHCR package listing was empty")
 )
 
 const htmlWhitespace = " \t\n\f\r"
@@ -40,8 +41,9 @@ const htmlWhitespace = " \t\n\f\r"
 // response is a format signal, not legitimate content.
 const ghcrBodyCap = 2 << 20
 
-// maxListingCandidates bounds matching link occurrences plus charset refusals
-// per page, counted before dedup; the largest measured page carried 30 candidates.
+// maxListingCandidates bounds matching link occurrences plus refused
+// candidates per page, counted before dedup; the largest measured page
+// carried 30 candidates.
 const maxListingCandidates = 100
 
 // maxListingPages bounds how many pages of one owner's packages listing a
@@ -52,6 +54,13 @@ const maxListingPages = 10
 // PRESENCE stops the loop: were the class renamed, the loop degrades to
 // one extra fetch and a clean stop instead of silent truncation.
 const lastPageMarker = "next_page disabled"
+
+// maxRefusalSampleBytes bounds both the retained page slice and the sanitized
+// log attribute. Both caps are needed because invalid UTF-8 expands when
+// runesafe.SanitizeSingleLineBounded replaces it.
+const maxRefusalSampleBytes = 128
+
+var rawTextElements = []string{"script", "style", "textarea", "title"}
 
 // ownerKind is the account form an owner's packages are read through.
 // GitHub paginates a user's listing under /<owner>?tab=packages and an
@@ -116,11 +125,13 @@ func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (strin
 	return string(body), nil
 }
 
-// refusals summarises rejected package names. Sample retains at most 128
-// bytes and does not share the listing page's backing array.
+// refusals summarises listing candidates parsePackageList could not use:
+// a path outside an href value, an unterminated href value, or a name
+// urlsafe.PackageName rejects. Sample is the first candidate, bounded by
+// maxRefusalSampleBytes and detached from the listing page.
 type refusals struct {
-	Count  int
 	Sample string
+	Count  int
 }
 
 // merge folds another page's refusals in, keeping the first non-empty sample.
@@ -129,6 +140,16 @@ func (r refusals) merge(other refusals) refusals {
 		r.Sample = other.Sample
 	}
 	r.Count += other.Count
+	return r
+}
+
+// refuse counts one rejected candidate, keeping the first informative sample
+// bounded and detached from the page.
+func (r refusals) refuse(candidate string) refusals {
+	if r.Sample == "" {
+		r.Sample = strings.Clone(runesafe.CapBytes(candidate, maxRefusalSampleBytes))
+	}
+	r.Count++
 	return r
 }
 
@@ -154,7 +175,7 @@ func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) 
 	switch {
 	case orgErr == nil && len(orgNames) > 0:
 		return orgNames, orgRefused, nil
-	case orgErr == nil || isNotFound(orgErr):
+	case orgErr == nil || (len(orgNames) == 0 && isNotFound(orgErr)):
 		return nil, orgRefused, emptyListingError(owner)
 	default:
 		return orgNames, orgRefused, orgErr
@@ -167,7 +188,8 @@ func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) 
 func (c *Client) partialListing(ctx context.Context, owner string, page int, names []string, refused refusals, err error) ([]string, refusals, error) {
 	if len(names) > 0 && ctx.Err() == nil {
 		c.opts.Logger.Warn("ghcr owner listing partially failed",
-			"owner", owner, "packages", len(names), "page", page, "error", err)
+			"owner", owner, "packages", len(names), "page", page,
+			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 	}
 	return names, refused, err
 }
@@ -207,13 +229,13 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 			added++
 		}
 		if added == 0 {
-			if pageRefused.Count > 0 {
+			if len(pageNames) == 0 && pageRefused.Count > 0 {
 				return c.partialListing(ctx, owner, page, names, refused,
 					fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page))
 			}
 			return names, refused, nil
 		}
-		if strings.Contains(html, lastPageMarker) {
+		if lastPageMarkerPresent(html) {
 			return names, refused, nil
 		}
 	}
@@ -238,12 +260,216 @@ func isNotFound(err error) bool {
 	return false
 }
 
+func markupTagEnd(html string, start int) (int, bool) {
+	var quote byte
+	for i := start + 1; i < len(html); i++ {
+		switch {
+		case quote != 0 && html[i] == quote:
+			quote = 0
+		case quote == 0 && (html[i] == '\'' || html[i] == '"'):
+			quote = html[i]
+		case quote == 0 && html[i] == '>':
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func rawTextElementAt(html string, start int) (string, bool) {
+	if start >= len(html) || html[start] != '<' {
+		return "", false
+	}
+	rest := html[start+1:]
+	for _, name := range rawTextElements {
+		if len(rest) <= len(name) || !strings.EqualFold(rest[:len(name)], name) {
+			continue
+		}
+		if strings.ContainsRune(htmlWhitespace+">/", rune(rest[len(name)])) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func rawTextClose(html string, start int, name string) (closeStart, next int, ok bool) {
+	closing := "</" + name
+	for cursor := start; cursor < len(html); {
+		i := strings.IndexByte(html[cursor:], '<')
+		if i < 0 {
+			return 0, 0, false
+		}
+		at := cursor + i
+		afterName := at + len(closing)
+		if afterName < len(html) && strings.EqualFold(html[at:afterName], closing) &&
+			strings.ContainsRune(htmlWhitespace+">/", rune(html[afterName])) {
+			return at, afterName, true
+		}
+		cursor = at + 1
+	}
+	return 0, 0, false
+}
+
+// maskNonMarkup replaces comment and raw-text content with spaces byte for
+// byte, so recognizers see markup while their indexes still address html.
+func maskNonMarkup(html string) string {
+	masked := []byte(html)
+	for cursor := 0; cursor < len(html); {
+		i := strings.IndexByte(html[cursor:], '<')
+		if i < 0 {
+			break
+		}
+		open := cursor + i
+		if strings.HasPrefix(html[open:], "<!--") {
+			contentStart := open + len("<!--")
+			closeOffset := strings.Index(html[contentStart:], "-->")
+			if closeOffset < 0 {
+				for j := contentStart; j < len(masked); j++ {
+					masked[j] = ' '
+				}
+				break
+			}
+			closeStart := contentStart + closeOffset
+			for j := contentStart; j < closeStart; j++ {
+				masked[j] = ' '
+			}
+			cursor = closeStart + len("-->")
+			continue
+		}
+
+		tagEnd, ok := markupTagEnd(html, open)
+		if !ok {
+			break
+		}
+		name, rawText := rawTextElementAt(html, open)
+		if !rawText {
+			cursor = tagEnd + 1
+			continue
+		}
+		contentStart := tagEnd + 1
+		closeStart, next, found := rawTextClose(html, contentStart, name)
+		if !found {
+			closeStart = len(html)
+			next = len(html)
+		}
+		for j := contentStart; j < closeStart; j++ {
+			masked[j] = ' '
+		}
+		cursor = next
+	}
+	return string(masked)
+}
+
+func quotedAttributeIs(html string, end int, name string) (byte, bool) {
+	for _, quote := range []byte{'"', '\''} {
+		suffix := name + "=" + string(quote)
+		start := end - len(suffix)
+		if start <= 0 || html[start:end] != suffix {
+			continue
+		}
+		if html[start-1] == '<' || strings.ContainsRune(htmlWhitespace, rune(html[start-1])) {
+			return quote, true
+		}
+	}
+	return 0, false
+}
+
+func hrefAttribute(html string, end int) (byte, bool) {
+	return quotedAttributeIs(html, end, "href")
+}
+
+func readAttribute(tag string, start int) (name, value string, next int, ok bool) {
+	attrs := strings.TrimLeft(tag[start:], htmlWhitespace)
+	start = len(tag) - len(attrs)
+	if attrs == "" || attrs == "/" {
+		return "", "", len(tag), true
+	}
+
+	nameEnd := strings.IndexAny(attrs, "="+htmlWhitespace)
+	if nameEnd <= 0 {
+		return "", "", 0, false
+	}
+	name = attrs[:nameEnd]
+	attrs = strings.TrimLeft(attrs[nameEnd:], htmlWhitespace)
+	if attrs == "" || attrs[0] != '=' {
+		return "", "", 0, false
+	}
+	attrs = strings.TrimLeft(attrs[1:], htmlWhitespace)
+	if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
+		return "", "", 0, false
+	}
+	valueStart := len(tag) - len(attrs) + 1
+	quote, validName := quotedAttributeIs(tag, valueStart, name)
+	if !validName || quote != attrs[0] {
+		return "", "", 0, false
+	}
+	attrs = attrs[1:]
+	valueEnd := strings.IndexByte(attrs, quote)
+	if valueEnd < 0 {
+		return "", "", 0, false
+	}
+	value = attrs[:valueEnd]
+	next = len(tag) - len(attrs) + valueEnd + 1
+	if next < len(tag) && !strings.ContainsRune(htmlWhitespace+"/", rune(tag[next])) {
+		return "", "", 0, false
+	}
+	return name, value, next, true
+}
+
+func containsMarkerFields(value string) bool {
+	fields := strings.Fields(value)
+	for _, marker := range strings.Fields(lastPageMarker) {
+		if !slices.Contains(fields, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+// lastPageMarkerPresent reports whether a start tag's class token list carries
+// every token in lastPageMarker. Text and unrelated attributes cannot answer it.
+func lastPageMarkerPresent(html string) bool {
+	html = maskNonMarkup(html)
+	for cursor := 0; cursor < len(html); {
+		i := strings.IndexByte(html[cursor:], '<')
+		if i < 0 {
+			return false
+		}
+		open := cursor + i
+		tagEnd, ok := markupTagEnd(html, open)
+		if !ok {
+			return false
+		}
+		cursor = tagEnd + 1
+		if open+1 >= tagEnd || strings.ContainsRune("/!?", rune(html[open+1])) {
+			continue
+		}
+
+		tag := html[open:tagEnd]
+		attrAt := strings.IndexAny(tag, htmlWhitespace+"/")
+		if attrAt < 0 {
+			continue
+		}
+		for {
+			name, value, next, valid := readAttribute(tag, attrAt)
+			if !valid || name == "" {
+				break
+			}
+			if name == "class" && containsMarkerFields(value) {
+				return true
+			}
+			attrAt = next
+		}
+	}
+	return false
+}
+
 // parsePackageList extracts package names from one page of an owner's
 // packages listing. The registered owner casing is response data, so the
 // prefix is matched without transforming untrusted HTML. Zero names is not
 // an error here: what it means depends on the page number, which only the
 // caller knows.
 func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
+	html = maskNonMarkup(html)
 	prefix := linkPrefix(kind, owner)
 	root := "/users/"
 	if kind == orgOwner {
@@ -265,17 +491,9 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 			continue
 		}
 
-		var quote byte
-		switch {
-		case strings.HasSuffix(html[:at], `href="`):
-			quote = '"'
-		case strings.HasSuffix(html[:at], `href='`):
-			quote = '\''
-		default:
-			if refused.Sample == "" {
-				refused.Sample = strings.Clone(html[at : at+min(len(prefix), 128)])
-			}
-			refused.Count++
+		quote, ok := hrefAttribute(html, at)
+		if !ok {
+			refused = refused.refuse(html[at : at+len(prefix)])
 			cursor = at + len(root)
 			continue
 		}
@@ -283,23 +501,16 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 		nameStart := at + len(prefix)
 		nameEnd := strings.IndexByte(html[nameStart:], quote)
 		if nameEnd == -1 {
-			raw := html[nameStart:]
-			if refused.Sample == "" {
-				refused.Sample = strings.Clone(raw[:min(len(raw), 128)])
-			}
-			refused.Count++
+			refused = refused.refuse(html[nameStart:])
 			break
 		}
 		nameEnd += nameStart
 		raw := html[nameStart:nameEnd]
 		cursor = nameEnd
 
-		name, ok := urlsafe.PackageName(owner, raw)
-		if !ok {
-			if refused.Sample == "" {
-				refused.Sample = strings.Clone(raw[:min(len(raw), 128)])
-			}
-			refused.Count++
+		name, err := urlsafe.PackageName(owner, raw)
+		if err != nil {
+			refused = refused.refuse(raw)
 			continue
 		}
 		names = append(names, strings.Clone(name))
@@ -330,6 +541,7 @@ func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, owner, pkg strin
 // deliberately not meaningful: GitHub reflows whitespace without breaking
 // this.
 func parseDownloads(html string) (int64, error) {
+	html = maskNonMarkup(html)
 	markerIdx := markerText(html)
 	if markerIdx == -1 {
 		return 0, errHTMLFormatChanged
@@ -342,7 +554,7 @@ func parseDownloads(html string) (int64, error) {
 	}
 	afterMarker := rest[markerEnd+1:]
 	countIdx := markerEnd + 1 + len(afterMarker) - len(strings.TrimLeft(afterMarker, htmlWhitespace))
-	if countIdx >= len(rest) || !strings.HasPrefix(rest[countIdx:], "<h3") {
+	if !strings.HasPrefix(rest[countIdx:], "<h3") {
 		return 0, errHTMLFormatChanged
 	}
 	afterName := rest[countIdx+len("<h3"):]
@@ -381,7 +593,7 @@ func markerText(html string) int {
 			return -1
 		}
 		i += at
-		rest := strings.TrimLeft(html[i+len(marker):], " \t\r\n")
+		rest := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
 		if strings.HasPrefix(rest, "<") {
 			return i
 		}
@@ -398,38 +610,15 @@ func markerText(html string) int {
 // function cannot fully account for is worse than no count, and the caller
 // reports the refusal as format drift.
 func titleAttribute(tag string) (string, bool) {
-	attrs := tag[len("<h3"):]
 	var title string
 	found := false
-	for {
-		attrs = strings.TrimLeft(attrs, htmlWhitespace)
-		if attrs == "" || attrs == "/" {
+	for cursor := len("<h3"); ; {
+		name, value, next, ok := readAttribute(tag, cursor)
+		if !ok {
+			return "", false
+		}
+		if name == "" {
 			return title, found
-		}
-
-		nameEnd := strings.IndexAny(attrs, "="+htmlWhitespace)
-		if nameEnd <= 0 {
-			return "", false
-		}
-		name := attrs[:nameEnd]
-		attrs = strings.TrimLeft(attrs[nameEnd:], htmlWhitespace)
-		if attrs == "" || attrs[0] != '=' {
-			return "", false
-		}
-		attrs = strings.TrimLeft(attrs[1:], htmlWhitespace)
-		if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
-			return "", false
-		}
-		quote := attrs[0]
-		attrs = attrs[1:]
-		valueEnd := strings.IndexByte(attrs, quote)
-		if valueEnd == -1 {
-			return "", false
-		}
-		value := attrs[:valueEnd]
-		attrs = attrs[valueEnd+1:]
-		if attrs != "" && !strings.ContainsRune(htmlWhitespace+"/", rune(attrs[0])) {
-			return "", false
 		}
 		if name == "title" {
 			if found {
@@ -438,6 +627,7 @@ func titleAttribute(tag string) (string, bool) {
 			title = value
 			found = true
 		}
+		cursor = next
 	}
 }
 
@@ -455,11 +645,10 @@ func (c *Client) expandWildcard(
 ) (out []registry.RepoRef, listingWhollyFailed bool) {
 	names, refused, err := c.scrapePackageList(ctx, p, ref.Owner)
 	if refused.Count > 0 {
-		// Bounded at the emit site: the sample is a raw scraped string, and
-		// 128 bytes is above any legitimate GHCR package name.
-		c.opts.Logger.Debug("ghcr listing refused package names with unsafe characters",
+		// A refused candidate is omitted every cycle, so report it at the default level.
+		c.opts.Logger.Warn("ghcr listing refused package candidates",
 			"owner", ref.Owner, "refused", refused.Count,
-			"sample", runesafe.SanitizeSingleLineBounded(refused.Sample, 128))
+			"sample", runesafe.SanitizeSingleLineBounded(refused.Sample, maxRefusalSampleBytes))
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -472,10 +661,12 @@ func (c *Client) expandWildcard(
 		wholly := len(names) == 0
 		if wholly {
 			if errors.Is(err, errHTMLFormatChanged) && !errors.Is(err, errEmptyListing) {
-				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err,
+				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
+					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256),
 					"report_at", "https://github.com/cplieger/registry-stats/issues")
 			} else {
-				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner, "error", err)
+				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
+					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			}
 		}
 		return c.appendPackages(names, ref.Owner, seen, packages), wholly
@@ -494,10 +685,13 @@ func (*Client) appendPackages(
 ) []registry.RepoRef {
 	for _, name := range names {
 		ref := registry.RepoRef{Owner: owner, Repo: name}
-		if seen[ref] {
+		// Keep the registry spelling in the request and label, but fold the
+		// key to match config's canonical explicit refs.
+		key := registry.RepoRef{Owner: owner, Repo: strings.ToLower(name)}
+		if seen[key] {
 			continue
 		}
-		seen[ref] = true
+		seen[key] = true
 		packages = append(packages, ref)
 	}
 	return packages
@@ -505,9 +699,9 @@ func (*Client) appendPackages(
 
 // buildPackageList expands wildcard refs (owner/*) by scraping the owner's
 // packages listing, then appends explicit refs unless already covered by a
-// wildcard. Config folds every ref to lower case, so the two passes cannot
-// disagree about one package. listingWhollyFailed is true when any owner's
-// listing errored with no names.
+// wildcard. Wildcard keys are folded to the config-canonical explicit spelling,
+// so a case-preserving listing still covers its explicit twin.
+// listingWhollyFailed is true when any owner's listing errored with no names.
 func (c *Client) buildPackageList(
 	ctx context.Context,
 	p *pacer,

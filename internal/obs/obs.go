@@ -23,9 +23,7 @@ type Metrics struct {
 	httpDuration    *metrics.Histogram
 	collectDuration *metrics.Histogram
 	imagePulls      *metrics.LabeledGauge
-	imageTags       *metrics.LabeledGauge
 	prevPulls       map[[3]string]bool
-	prevTags        map[[3]string]bool
 	setMu           sync.Mutex
 }
 
@@ -52,12 +50,12 @@ func New() *Metrics {
 			"http_request_duration_seconds",
 			"HTTP request latency",
 		),
-		// APIBuckets, not the default: a cycle polling two registries behind a
-		// 30s per-request timeout would land every sample in DefaultBuckets' +Inf.
+		// GHCR requests are paced 2-5s apart and both registry readers are sequential,
+		// so these bounds span sub-second cycles through one default poll interval.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",
-			metrics.WithBuckets(metrics.APIBuckets()),
+			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600}),
 		),
 		// _total on a gauge is a deliberate deviation: the name is the published
 		// series, and metrics/v4's Counter has no Set, so the per-cycle
@@ -67,18 +65,12 @@ func New() *Metrics {
 			"Total pull count per image",
 			[]string{"registry", "owner", "repo"},
 		),
-		imageTags: metrics.NewLabeledGauge(
-			"image_tags",
-			"Number of tags per image",
-			[]string{"registry", "owner", "repo"},
-		),
 	}
 	m.registry.MustRegister(
 		m.httpRequests,
 		m.collectsTotal,
 		m.collectErrors,
 		m.imagePulls,
-		m.imageTags,
 		m.httpDuration,
 		m.collectDuration,
 	)
@@ -106,49 +98,44 @@ func (m *Metrics) ObserveCollectDuration(d time.Duration) {
 	m.collectDuration.Observe(d.Seconds())
 }
 
-// ImageMetric holds per-image gauge data set after each collect cycle. A nil
-// Tags means no tag count was measured this cycle and clears any tags series
-// the image had; a pointed-to zero is a measured zero and is emitted.
+// ImageMetric holds per-image gauge data set after each collect cycle.
+// Registry, Owner and Repo must be distinct after Prometheus label
+// sanitization: metrics/v4 replaces invalid UTF-8 in a label value,
+// so two triples that differ only outside the ASCII allowlist would
+// share one emitted series and the per-cycle diff would delete it.
+// Producers guarantee this via urlsafe.
 type ImageMetric struct {
 	Registry string // "dockerhub" or "ghcr"
 	Owner    string
 	Repo     string
 	Pulls    int64
-	Tags     *int
 }
 
 // SetImage replaces the image gauge data for one collect cycle. Current values
 // are Set in place and departed series dropped one by one rather than Reset+Set,
 // so a series present in both this cycle and the last is never missing from a
 // concurrent scrape: it reads either value. A scrape overlapping the update may
-// still straddle it, reading some series one cycle stale, and where a cycle
-// replaces the whole set it can miss the family entirely.
+// still straddle it, reading some series one cycle stale. It may also miss a
+// family entirely: metrics/v4 snapshots a family's label keys and releases the
+// lock before reading their values, so a scrape whose snapshot predates a
+// whole-set replacement finds every snapshotted key deleted and emits no samples
+// at all.
 func (m *Metrics) SetImage(images []ImageMetric) {
 	m.setMu.Lock()
 	defer m.setMu.Unlock()
 
 	pulls := make(map[[3]string]bool, len(images))
-	tags := make(map[[3]string]bool, len(images))
 	for _, image := range images {
 		key := [3]string{image.Registry, image.Owner, image.Repo}
 		m.imagePulls.Set(float64(image.Pulls), image.Registry, image.Owner, image.Repo)
 		pulls[key] = true
-		if image.Tags != nil {
-			m.imageTags.Set(float64(*image.Tags), image.Registry, image.Owner, image.Repo)
-			tags[key] = true
-		}
 	}
 	for key := range m.prevPulls {
 		if !pulls[key] {
 			m.imagePulls.Delete(key[0], key[1], key[2])
 		}
 	}
-	for key := range m.prevTags {
-		if !tags[key] {
-			m.imageTags.Delete(key[0], key[1], key[2])
-		}
-	}
-	m.prevPulls, m.prevTags = pulls, tags
+	m.prevPulls = pulls
 }
 
 // RecordHTTP records one HTTP request.

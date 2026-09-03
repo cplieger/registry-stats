@@ -2,14 +2,16 @@
 package urlsafe
 
 import (
+	"errors"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
 )
 
-// MaxSegmentBytes bounds one URL path segment. A caller walking a
-// multi-element name bounds each element, not the total; PackageName owns
-// the whole-name bound.
+// MaxSegmentBytes bounds one decoded URL path segment. PackageName uses it
+// to bound the whole decoded owner/name reference. It does not bound the
+// percent-escaped form a caller may encode into one segment.
 const MaxSegmentBytes = 255
 
 // safeSegment is an allowlist so unrecognized input is rejected by default.
@@ -24,25 +26,25 @@ func IsSafeURLSegment(s string) bool {
 	return safeSegment.MatchString(s)
 }
 
-// PackageName decodes GHCR's one-token spelling of a package name and
-// reports whether it is safe to put in a URL path and a metric label.
-// A raw '/' means the token is not that spelling: after the split it
-// reads as a separator the per-element gate cannot see.
-func PackageName(owner, token string) (name string, ok bool) {
+// PackageName decodes GHCR's one-token spelling of a package name. The
+// decoded name may contain '/'-separated path elements. A caller placing it
+// back into one URL path segment must encode it with url.PathEscape. Errors
+// name the refusing rule for callers to report and are not sentinels.
+func PackageName(owner, token string) (name string, err error) {
 	if strings.Contains(token, "/") {
-		return "", false
+		return "", errors.New("raw slash; percent-encode nested names")
 	}
-	name, err := url.PathUnescape(token)
-	if err != nil || name == "" {
-		return "", false
+	name, err = url.PathUnescape(token)
+	if err != nil {
+		return "", errors.New("invalid percent-escape")
 	}
 	if len(owner)+1+len(name) > MaxSegmentBytes {
-		return "", false
+		return "", fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)
 	}
 	for part := range strings.SplitSeq(name, "/") {
 		if !IsSafeURLSegment(part) {
-			return "", false
+			return "", errors.New("path element not a safe URL segment")
 		}
 	}
-	return name, true
+	return name, nil
 }

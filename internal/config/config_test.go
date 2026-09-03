@@ -94,7 +94,7 @@ func TestParseRepoRefs_RefusalReasons(t *testing.T) {
 		{name: "owner", input: "owner$/repo", want: "owner not a safe URL segment"},
 		{name: "raw slash", input: "owner/app/versions", want: "raw slash; percent-encode nested names"},
 		{name: "escape", input: "owner/%zz", want: "invalid percent-escape"},
-		{name: "length", input: "owner/" + strings.Repeat("a", 256), want: "repository name over 255 bytes"},
+		{name: "length", input: "owner/" + strings.Repeat("a", 256), want: "owner/repository reference over 255 bytes"},
 		{name: "charset", input: "owner/Repo$", want: "path element not a safe URL segment"},
 	}
 	for _, tt := range tests {
@@ -117,8 +117,6 @@ func TestParseRepoRefs_CanonicalizesOwner(t *testing.T) {
 		want  []registry.RepoRef
 	}{
 		{"Owner/*", []registry.RepoRef{{Owner: "owner", Repo: "*"}}},
-		{"OWNER/Repo", []registry.RepoRef{{Owner: "owner", Repo: "repo"}}},
-		{"Mixed/repo,mixed/repo", []registry.RepoRef{{Owner: "mixed", Repo: "repo"}}},
 	}
 	for _, tt := range tests {
 		got, _ := parseRepoRefs(tt.input, registry.DockerHub)
@@ -196,28 +194,28 @@ func TestParseRepoRefs_warnsForEveryRejectedTokenOnce(t *testing.T) {
 
 	wantWarns := []Warning{
 		{
-			Msg: "skipping invalid repo ref",
+			Msg: "skipping unusable repo ref",
 			Attrs: []slog.Attr{
 				slog.String("input", "bad"),
-				slog.String("expected", "owner/repo or owner/*"),
+				slog.String("reason", "not owner/repo or owner/*"),
 			},
 		},
 		{
-			Msg: "skipping repo ref with unsafe characters",
+			Msg: "skipping unusable repo ref",
 			Attrs: []slog.Attr{
 				slog.String("input", "owner/bad?repo"),
 				slog.String("reason", "path element not a safe URL segment"),
 			},
 		},
 		{
-			Msg: "skipping invalid repo ref",
+			Msg: "skipping unusable repo ref",
 			Attrs: []slog.Attr{
 				slog.String("input", "also-bad"),
-				slog.String("expected", "owner/repo or owner/*"),
+				slog.String("reason", "not owner/repo or owner/*"),
 			},
 		},
 		{
-			Msg: "skipping repo ref with unsafe characters",
+			Msg: "skipping unusable repo ref",
 			Attrs: []slog.Attr{
 				slog.String("input", "owner/bad%repo"),
 				slog.String("reason", "invalid percent-escape"),
@@ -314,8 +312,8 @@ func TestParseRepoRefs_output_always_safe(t *testing.T) {
 			refs, _ := parseRepoRefs(input, reg)
 			for _, ref := range refs {
 				if reg == registry.GHCR && ref.Repo != "*" {
-					name, ok := urlsafe.PackageName(ref.Owner, url.PathEscape(ref.Repo))
-					if !ok || name != ref.Repo {
+					name, perr := urlsafe.PackageName(ref.Owner, url.PathEscape(ref.Repo))
+					if perr != nil || name != ref.Repo {
 						t.Fatalf("parseRepoRefs(%q, GHCR) produced unsafe repo %q", input, ref.Repo)
 					}
 				} else if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {

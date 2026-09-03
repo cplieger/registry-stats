@@ -21,15 +21,12 @@ import (
 // wildcard owner listing that failed without yielding any usable refs.
 type Source interface {
 	Source() registry.ID
-	Collect(
-		ctx context.Context,
-		refs []registry.RepoRef,
-	) (entries []registry.Entry, attempted int, listingFailed bool)
+	Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool)
 }
 
-// Options configures a single Run. Metrics and RefsFor are required, and no
-// two Sources may report the same registry.ID: Run keys both the ref lookup
-// and the metric label on it. A nil Logger falls back to slog.Default.
+// Options configures a single Run. Metrics, RefsFor and Logger are
+// required, and no two Sources may report the same registry.ID: Run
+// keys both the ref lookup and the metric label on it.
 type Options struct {
 	Metrics *obs.Metrics
 	Logger  *slog.Logger
@@ -43,22 +40,23 @@ type Options struct {
 // caller owns the health marker and derives it from the returned set. A
 // cancelled cycle stops early and returns what it collected, with no error,
 // so a caller that publishes the set must check ctx.Err() first.
-func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
+func Run(ctx context.Context, opts Options) []obs.ImageMetric {
+	var images []obs.ImageMetric
+
 	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 
 	start := time.Now()
 	logger.Info("starting collection")
-	degraded := false
-	invokedAnySource := false
+	var degraded bool
+	var invokedAnySource bool
 
 	for _, src := range opts.Sources {
 		if ctx.Err() != nil {
-			// A dead context must not mint a per-source cycle that performs
-			// no work: collects_total is the denominator RegistryStatsCollectStalled
-			// reads.
+			// Stop before invoking a further source on a dead context: an
+			// advance in collects_total is the completed-cycle signal
+			// RegistryStatsCollectStalled reads. A source cancelled after
+			// this check still mints its sample; only a shutdown can do
+			// that, so the stall rule's 3h window is unaffected.
 			break
 		}
 		refs := opts.RefsFor(src.Source())
@@ -75,7 +73,7 @@ func Run(ctx context.Context, opts Options) (images []obs.ImageMetric) {
 
 	if ctx.Err() != nil {
 		logger.Warn("collection interrupted",
-			"error", ctx.Err(), "images", len(images))
+			"error", ctx.Err(), "collected", len(images))
 		return images
 	}
 
@@ -134,7 +132,6 @@ func collectSource(
 			Owner:    e.Owner,
 			Repo:     e.Repo,
 			Pulls:    e.Pulls,
-			Tags:     e.TagCount,
 		})
 	}
 	return images, srcHealthy

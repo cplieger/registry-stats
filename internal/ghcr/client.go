@@ -60,14 +60,10 @@ func (c *Client) Source() registry.ID { return registry.GHCR }
 // expanded through the owner's packages listing before scraping; explicit
 // refs are scraped as-is. A package whose scrape fails is NOT appended, so
 // a transient error cannot inject a false zero into the exposed gauge.
-// Successful entries leave TagCount nil because GHCR exposes no tag count.
 // attempted counts per-package scrape attempts; a package a shutdown
 // interrupted counts as neither attempt nor failure. listingFailed reports
 // a wildcard listing that failed without yielding any usable package names.
-func (c *Client) Collect(
-	ctx context.Context,
-	refs []registry.RepoRef,
-) (entries []registry.Entry, attempted int, listingFailed bool) {
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool) {
 	p := &pacer{delay: c.pacingDelay}
 	pkgParseFailures := 0
 	packages, listingWhollyFailed := c.buildPackageList(ctx, p, refs)
@@ -107,7 +103,8 @@ func (c *Client) Collect(
 // cancelled cycle did not complete.
 func (c *Client) logInterrupted(collected, remaining int, err error) {
 	c.opts.Logger.Warn("ghcr collection interrupted by context cancellation",
-		"collected", collected, "remaining", remaining, "error", err)
+		"collected", collected, "remaining", remaining,
+		"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 }
 
 // pacer spaces consecutive GHCR requests inside one Collect. The first
@@ -124,14 +121,7 @@ func (p *pacer) wait(ctx context.Context) error {
 		p.started = true
 		return nil
 	}
-	timer := time.NewTimer(p.delay())
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return httpx.SleepCtx(ctx, p.delay())
 }
 
 // pacingDelay returns the inter-request delay for GHCR requests: the
@@ -160,8 +150,10 @@ func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoR
 	downloads, err := c.scrapeDownloads(ctx, p, ref.Owner, ref.Repo)
 	if err != nil {
 		if ctx.Err() != nil {
-			c.opts.Logger.Debug("ghcr scrape cancelled", "package", ref.Owner+"/"+ref.Repo,
-				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			// Shutdown cancelled the scrape; Collect's interruption WARN is
+			// the cycle's one record. This branch exists to keep the
+			// scrape-failed WARN, which alerts/logql.yaml keys on, from
+			// firing on every SIGTERM landing mid-scrape.
 			return registry.Entry{}, err
 		}
 		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo,

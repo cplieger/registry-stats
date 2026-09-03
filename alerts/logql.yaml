@@ -20,10 +20,8 @@
 # labels are starting points.
 #
 # These rules assume the default LOG_LEVEL=info.
-# RegistryStatsCollectionIncomplete keys on named incomplete-set lines, so
-# LOG_LEVEL=error silences all but `tag count parse failed`; that member is an
-# ERROR and also reports under RegistryStatsError. RegistryStatsConfigRejected
-# keeps working at every LOG_LEVEL for the config-parse half: those skip warnings
+# LOG_LEVEL=error silences RegistryStatsCollectionIncomplete because every
+# named incomplete-set line is below ERROR. RegistryStatsConfigRejected keeps working at every LOG_LEVEL for the config-parse half: those skip warnings
 # are emitted once per start BEFORE the configured level is applied, and the
 # no-repos state also logs at ERROR. Its two every-cycle members, `no repos
 # configured` and `no images found for the configured refs`, come from the
@@ -48,7 +46,7 @@ groups:
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `no repos configured|no images found for the configured refs|skipping invalid repo ref|skipping repo ref with unsafe characters|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped` [1h]
+            |~ `no repos configured|no images found for the configured refs|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped` [1h]
           )) > 0
         for: 0m
         labels:
@@ -107,34 +105,36 @@ groups:
       # registrystats_collect_errors_total never moves and every PromQL rule in
       # alerts/promql.yaml stays quiet. `ghcr scrape failed` is the per-package
       # line; a minority of GHCR packages failing removes their image series.
-      # The two tag-count failure lines keep the Docker Hub image series but
-      # omit its tag series; one of the two, `tag count parse failed`, is logged
-      # at ERROR, so that member keeps reporting at every level. Enumerated
-      # rather than keyed on level=WARN, because the WARN stream also carries
-      # the liveness-marker transition `health state changed healthy=false`,
-      # which every container start emits once as it clears a marker inherited
-      # from its predecessor. A MAJORITY of package failures, and a listing that
-      # fails WHOLLY, both flip the source unhealthy, so
+      # `ghcr listing refused package candidates` catches the nil-error case where a
+      # listing returns usable refs but omits published candidates, which no counter
+      # can see. On a wholly failed listing or page-cap path, the same line
+      # accompanies another member that already fires; because the condition is
+      # greater than zero, the extra match cannot change whether this rule fires.
+      # Enumerated rather than keyed on level=WARN, because the WARN stream also
+      # carries the liveness-marker transition `health state changed
+      # healthy=false`, which every container start emits once as it clears a
+      # marker inherited from its predecessor. A MAJORITY of package failures,
+      # and a listing that fails WHOLLY, both flip the source unhealthy, so
       # RegistryStatsSourceDegraded owns them through
-      # registrystats_collect_errors_total; the MINORITY and tag-count cases are
-      # what this rule exists for.
+      # registrystats_collect_errors_total; the MINORITY and refused-candidate cases
+      # are what this rule exists for.
       - alert: RegistryStatsCollectionIncomplete
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `hit page cap|listing partially failed|ghcr scrape failed|tag count fetch failed|tag count parse failed` [2h]
+            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed` [2h]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "registry-stats cycle exported an incomplete set of image or tag series"
+          summary: "registry-stats cycle exported an incomplete set of image series"
           description: >
-            A collect cycle exported an incomplete set of image or tag series:
-            an owner listing stopped at its page cap or lost a page, a
-            minority of GHCR packages failed to scrape, or a Docker Hub repo's
-            tag count could not be read. The affected image
-            or tag series are absent from /metrics for that cycle while every
-            PromQL rule stays quiet, so the dashboard can show incomplete data.
-            Track fewer packages or raise POLL_INTERVAL_HOURS if the rate
-            limiting repeats.
+            A collect cycle exported an incomplete set of image series: a
+            Docker Hub owner publishes more repositories than an unauthenticated
+            listing can enumerate, a GHCR owner listing hit its page cap or lost
+            a page, GHCR refused one or more published package-link candidates, or a
+            minority of GHCR packages failed to scrape. The affected image
+            series are absent from /metrics for that cycle while every PromQL
+            rule stays quiet. Read the container logs for the affected owner or
+            repo.

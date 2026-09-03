@@ -50,6 +50,10 @@ func downloadsHTML(count string) string {
 	return `<span>Total downloads</span><h3 title="` + count + `">` + count + `</h3>`
 }
 
+func lastPageHTML() string {
+	return `<div class="` + lastPageMarker + `">Next</div>`
+}
+
 func TestClient_Name(t *testing.T) {
 	c := NewClient(http.DefaultClient, Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	if got := c.Source().String(); got != "ghcr" {
@@ -105,6 +109,40 @@ func TestParseDownloads_FindsMarkerText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseDownloads(tt.html)
+			if err != nil || got != tt.want {
+				t.Errorf("parseDownloads(%q) = (%d, %v), want (%d, nil)", tt.html, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDownloads_IgnoresRawText(t *testing.T) {
+	tests := []struct {
+		name    string
+		html    string
+		want    int64
+		wantErr bool
+	}{
+		{
+			name: "script marker before real marker",
+			html: `<script>const count = "<span>Total downloads</span><h3 title='777'>777</h3>";</script>` + downloadsHTML("42"),
+			want: 42,
+		},
+		{
+			name:    "script marker only",
+			html:    `<script>const count = "<span>Total downloads</span><h3 title='777'>777</h3>";</script>`,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDownloads(tt.html)
+			if tt.wantErr {
+				if !errors.Is(err, errHTMLFormatChanged) {
+					t.Errorf("parseDownloads(%q) error = %v, want errHTMLFormatChanged", tt.html, err)
+				}
+				return
+			}
 			if err != nil || got != tt.want {
 				t.Errorf("parseDownloads(%q) = (%d, %v), want (%d, nil)", tt.html, got, err, tt.want)
 			}
@@ -199,8 +237,40 @@ func TestParsePackageList_Valid(t *testing.T) {
 func TestParsePackageList_OnlyReadsHrefValues(t *testing.T) {
 	html := `<!-- /users/owner/packages/container/package/phantom -->`
 	got, refused := parsePackageList(html, "owner", userOwner)
-	if len(got) != 0 || refused.Count == 0 {
-		t.Errorf("parsePackageList(comment) = (%v, %+v), want no names and a refusal", got, refused)
+	if len(got) != 0 || refused.Count != 0 {
+		t.Errorf("parsePackageList(comment) = (%v, %+v), want no names or refusals", got, refused)
+	}
+}
+
+func TestParsePackageList_IgnoresRawText(t *testing.T) {
+	html := `<script>const link = '<a href="/users/owner/packages/container/package/phantom">';</script>`
+	got, refused := parsePackageList(html, "owner", userOwner)
+	if len(got) != 0 || refused.Count != 0 {
+		t.Errorf("parsePackageList(script) = (%v, %+v), want no names or refusals", got, refused)
+	}
+}
+
+func TestParsePackageList_PreservesMarkupAfterQuotedAttributeValue(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+	}{
+		{
+			name: "raw-text opener",
+			html: `<div data-x="<script>"></div><a href="/users/owner/packages/container/package/pkg">pkg</a>`,
+		},
+		{
+			name: "comment opener",
+			html: `<div data-x="<!--"></div><a href="/users/owner/packages/container/package/pkg">pkg</a>`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, refused := parsePackageList(tt.html, "owner", userOwner)
+			if !slices.Equal(got, []string{"pkg"}) || refused.Count != 0 {
+				t.Errorf("parsePackageList(%q) = (%v, %+v), want ([pkg], no refusals)", tt.html, got, refused)
+			}
+		})
 	}
 }
 
@@ -289,6 +359,11 @@ func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
 			html:        `<div data-targets="` + prefix + `a ` + prefix + `b">`,
 			wantRefused: 2,
 		},
+		{
+			name:        "attribute name ending in href",
+			html:        `<div data-href="` + prefix + `a">`,
+			wantRefused: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -300,9 +375,6 @@ func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
 	}
 }
 
-// TestParsePackageList_Empty pins that the parse core reports zero names
-// and nothing else: whether an empty page means an empty owner or markup
-// drift depends on which page it is, which only the page loop knows.
 func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 	prefix := "/users/NVIDIA/packages/container/package/"
 	tests := []struct {
@@ -330,8 +402,8 @@ func TestParsePackageList_BoundsRefusalSample(t *testing.T) {
 	if len(got) != 0 || refused.Count != 1 {
 		t.Fatalf("parsePackageList(overlong name) = (%v, %+v), want one refusal", got, refused)
 	}
-	if refused.Sample != strings.Repeat("a", 128) {
-		t.Errorf("refused.Sample = %q (%d bytes), want first 128 bytes", refused.Sample, len(refused.Sample))
+	if refused.Sample != strings.Repeat("a", maxRefusalSampleBytes) {
+		t.Errorf("refused.Sample = %q (%d bytes), want first %d bytes", refused.Sample, len(refused.Sample), maxRefusalSampleBytes)
 	}
 }
 
@@ -346,6 +418,13 @@ func TestParsePackageList_RefusalSampleDoesNotRetainPage(t *testing.T) {
 	sampleStart := uintptr(unsafe.Pointer(unsafe.StringData(refused.Sample)))
 	if sampleStart >= pageStart && sampleStart < pageStart+uintptr(len(html)) {
 		t.Error("parsePackageList refusal sample shares the listing page's backing array")
+	}
+
+	candidateStart := strings.Index(html, "%zz")
+	direct := (refusals{}).refuse(html[candidateStart:])
+	directStart := uintptr(unsafe.Pointer(unsafe.StringData(direct.Sample)))
+	if directStart >= pageStart && directStart < pageStart+uintptr(len(html)) {
+		t.Error("refusals.refuse sample shares the candidate page's backing array")
 	}
 }
 
@@ -516,7 +595,7 @@ func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "app") + lastPageMarker))
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "app") + lastPageHTML()))
 	})
 	mux.HandleFunc("GET /users/owner/packages/container/package/app", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("7")))
@@ -694,9 +773,10 @@ func listingClient(t *testing.T, h http.Handler, logger *slog.Logger) *Client {
 // carries GitHub's own last-page marker or adds no new name.
 func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 	tests := []struct {
-		name  string
-		pages map[string]string
-		want  []string
+		name      string
+		pages     map[string]string
+		want      []string
+		wantPages int
 	}{
 		{
 			name: "stops on the positive last-page marker",
@@ -704,7 +784,34 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 				"1": packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b"),
 				"2": packageLink(userOwner, "owner", "c") + `<div class="next_page disabled">Next</div>`,
 			},
-			want: []string{"a", "b", "c"},
+			want:      []string{"a", "b", "c"},
+			wantPages: 2,
+		},
+		{
+			name: "stops on reversed last-page class tokens",
+			pages: map[string]string{
+				"1": packageLink(userOwner, "owner", "a") + `<div class="disabled paginate next_page">Next</div>`,
+			},
+			want:      []string{"a"},
+			wantPages: 1,
+		},
+		{
+			name: "ordinary text does not stop pagination",
+			pages: map[string]string{
+				"1": packageLink(userOwner, "owner", "a") + `<p>next_page disabled</p>`,
+				"2": packageLink(userOwner, "owner", "b") + `<div class="next_page disabled">Next</div>`,
+			},
+			want:      []string{"a", "b"},
+			wantPages: 2,
+		},
+		{
+			name: "unrelated attribute does not stop pagination",
+			pages: map[string]string{
+				"1": packageLink(userOwner, "owner", "a") + `<div data-state="next_page disabled"></div>`,
+				"2": packageLink(userOwner, "owner", "b") + `<div class="next_page disabled">Next</div>`,
+			},
+			want:      []string{"a", "b"},
+			wantPages: 2,
 		},
 		{
 			name: "stops on a page that adds no name",
@@ -713,7 +820,8 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 				"2": packageLink(userOwner, "owner", "b"),
 				"3": `<html>no package links</html>`,
 			},
-			want: []string{"a", "b"},
+			want:      []string{"a", "b"},
+			wantPages: 3,
 		},
 	}
 	for _, tt := range tests {
@@ -742,6 +850,9 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			if asked["1"] != 1 {
 				t.Errorf("page 1 requested %d times, want 1 (the redirecting form would re-fetch it)", asked["1"])
 			}
+			if len(asked) != tt.wantPages {
+				t.Errorf("listing requested %d pages, want %d", len(asked), tt.wantPages)
+			}
 		})
 	}
 }
@@ -753,7 +864,7 @@ func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 			for i := range count {
 				html.WriteString(packageLink(userOwner, "owner", fmt.Sprintf("p%d", i)))
 			}
-			html.WriteString(lastPageMarker)
+			html.WriteString(lastPageHTML())
 			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(html.String()))
 			}), testsupport.QuietLogger())
@@ -924,6 +1035,36 @@ func TestClient_ScrapePackageList_OrganizationLaterPageFailureIsPartial(t *testi
 	}
 }
 
+func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
+	})
+	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc")))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /users/owner/packages/container/package/svc", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(downloadsHTML("17")))
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+
+	entries, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	if attempted != 1 || listingFailed {
+		t.Errorf("Collect with organization page-2 404 = (attempted %d, listingFailed %v), want (1, false)", attempted, listingFailed)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Collect with organization page-2 404 returned %d entries, want 1", len(entries))
+	}
+	if entries[0].Owner != "owner" || entries[0].Repo != "svc" || entries[0].Pulls != 17 {
+		t.Errorf("Collect with organization page-2 404 entry = %+v, want owner/svc with 17 pulls", entries[0])
+	}
+}
+
 func TestClient_ScrapePackageList_OrganizationFirstPageFailureKeepsUserSummary(t *testing.T) {
 	orgCalls := 0
 	mux := http.NewServeMux()
@@ -1007,7 +1148,7 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	huge := strings.Repeat("%", 4096)
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<a href="` + linkPrefix(userOwner, "owner") + huge + `">bad</a>` +
-			packageLink(userOwner, "owner", "good") + lastPageMarker))
+			packageLink(userOwner, "owner", "good") + lastPageHTML()))
 	}), capturingLogger(&buf))
 
 	packages, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})

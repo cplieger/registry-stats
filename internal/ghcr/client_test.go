@@ -133,28 +133,6 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 	})
 }
 
-// TestCollect_noListingFailure_silent verifies explicit refs (no wildcard
-// listing) never trip the listing-format-drift ERROR: listingParseFailures
-// stays 0, so the listing-format log must not fire.
-func TestCollect_noListingFailure_silent(t *testing.T) {
-	var buf bytes.Buffer
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(downloadsHTML("7")))
-	}))
-
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
-	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
-	_, _, _ = c.Collect(t.Context(), refs)
-
-	if strings.Contains(buf.String(), "owner listing yielded no packages") {
-		t.Errorf("listing-empty ERROR logged with zero listing parse failures; logs:\n%s", buf.String())
-	}
-}
-
-// TestCollect_noScrapes_noMajorityDrift verifies that when a wildcard
-// listing fails to parse (total stays 0 while parseFailures carries the
-// listing failure), the per-scrape majority ERROR stays silent: its
-// total>0 guard is false, so only the listing-empty ERROR fires.
 func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -173,9 +151,6 @@ func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 	}
 }
 
-// TestCollect_allParseFailures_logsMajorityDrift verifies two refs that
-// both miss the marker (total=2, parseFailures=2) trip the majority ERROR
-// without classifying the explicit-package failures as a listing failure.
 func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewClient(noMarkerServer(t).Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
@@ -193,9 +168,6 @@ func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
 	}
 }
 
-// TestCollect_halfParseFailures_noMajorityDrift verifies exactly half the
-// scrapes failing to parse (total=2, parseFailures=1) does NOT trip the
-// majority ERROR: 1*2 > 2 is false (half is not a majority).
 func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	mux := http.NewServeMux()

@@ -21,42 +21,6 @@ func shortRetry() []httpx.GetOption {
 	return []httpx.GetOption{httpx.WithBaseDelay(time.Millisecond)}
 }
 
-// TestParseTagCount: a present, non-negative count is returned; malformed
-// JSON, a missing count, and a negative count are all errors so a
-// reshaped response can never flow a bogus value into the image_tags
-// gauge.
-func TestParseTagCount(t *testing.T) {
-	tests := []struct {
-		name      string
-		data      string
-		want      int
-		wantErr   bool
-		wantShape bool
-	}{
-		{"real shape", `{"count":164,"next":"p2","results":[{"name":"latest"}]}`, 164, false, false},
-		{"zero tags", `{"count":0,"next":"","results":[]}`, 0, false, false},
-		{"missing count", `{"next":"","results":[]}`, 0, true, true},
-		{"negative count", `{"count":-1}`, 0, true, true},
-		{"duplicate count", `{"count":1,"count":2}`, 0, true, true},
-		{"malformed json", `not json`, 0, true, true},
-		{"empty input", ``, 0, true, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseTagCount([]byte(tt.data))
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseTagCount(%q) error = %v, wantErr %v", tt.data, err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("parseTagCount(%q) = %d, want %d", tt.data, got, tt.want)
-			}
-			if gotShape := shapeChanged(err); gotShape != tt.wantShape {
-				t.Errorf("shapeChanged(parseTagCount(%q)) = %v, want %v", tt.data, gotShape, tt.wantShape)
-			}
-		})
-	}
-}
-
 func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	pageRequests := 0
 	mux := http.NewServeMux()
@@ -83,12 +47,15 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
-	repos, err := c.listRepos(t.Context(), "o")
+	repos, advertised, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
 	}
 	if len(repos) != 2 {
 		t.Fatalf("listRepos() = %d repos, want 2", len(repos))
+	}
+	if advertised != 2 {
+		t.Errorf("listRepos() advertised = %d, want 2", advertised)
 	}
 	if repos[0].Owner != "o" || repos[0].Repo != "a1" || repos[0].Pulls != 10 {
 		t.Errorf("repos[0] = %+v, want o/a1 with 10 pulls", repos[0])
@@ -98,9 +65,6 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 	if pageRequests != 2 {
 		t.Errorf("page requests = %d, want 2", pageRequests)
-	}
-	if logs := buf.String(); strings.Contains(logs, "hit page cap") {
-		t.Errorf("listRepos() logged a page-cap warning after normal pagination; logs:\n%s", logs)
 	}
 }
 
@@ -112,24 +76,11 @@ func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
 	}))
 
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry()})
-	if got := c.tagCount(t.Context(), "o", "a"); got != nil {
-		t.Errorf("tagCount on a failing server = %v, want nil", got)
-	}
-}
-
-func tagCountHandler(count int) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"count":   count,
-			"next":    "",
-			"results": []map[string]any{{"name": "latest"}},
-		})
-	}
+	c.Collect(t.Context(), []registry.RepoRef{{Owner: "o", Repo: "a"}})
 }
 
 func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
-	// Filter by exact URL: the mux pattern /v2/repositories/o/ would
-	// otherwise also match nested paths like /v2/repositories/o/a/tags/.
+	// Count only exact owner-listing requests toward the page cap.
 	ownerPages := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +94,6 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 			})
 			return
 		}
-		tagCountHandler(1)(w, r)
 	})
 	srv := httptest.NewTestServer(t, mux)
 
@@ -159,11 +109,11 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	if attempted != 10 {
 		t.Errorf("attempted = %d, want 10 distinct repos (update if maxOwnerPages changes)", attempted)
 	}
-	const message = "docker hub owner listing hit page cap; results may be truncated"
 	logs := buf.String()
-	if !strings.Contains(logs, `msg="`+message+`"`) ||
-		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "max_pages=10") {
-		t.Errorf("Collect at the page cap did not log %q with owner=o and max_pages=10; logs:\n%s", message, logs)
+	if !strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
+		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=10") ||
+		!strings.Contains(logs, "advertised=1000") {
+		t.Errorf("Collect stopping at the page cap did not report 10 of 1000 collected; logs:\n%s", logs)
 	}
 }
 
@@ -296,10 +246,10 @@ func TestParseRepoListPage_refusesPastElementCap(t *testing.T) {
 	}
 }
 
-// TestParseRepoListPage_dropsUnsafeName asserts the security guard: a
-// listing name carrying URL metacharacters (a slash here) is a
-// path/query-injection vector into the tags URL built from it, so it
-// must be dropped while safe names on the same page survive.
+// TestParseRepoListPage_dropsUnsafeName asserts the repository-name guard: a
+// listing name carrying URL metacharacters does not satisfy the allowlist for
+// published repo labels, so it must be dropped while safe names on the same
+// page survive.
 func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
 	data := []byte(`{"count":2,"next":"","results":[{"name":"bad/traversal","pull_count":1},{"name":"good","pull_count":2}]}`)
 	repos, _, _, err := parseRepoListPage(data, "owner")

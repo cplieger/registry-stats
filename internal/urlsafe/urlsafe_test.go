@@ -69,10 +69,9 @@ func TestPackageName(t *testing.T) {
 		owner string
 		token string
 		want  string
-		ok    bool
 	}{
-		{name: "nested", owner: "owner", token: "helm-charts%2Fgrafana-operator", want: "helm-charts/grafana-operator", ok: true},
-		{name: "at whole-name bound", owner: "owner", token: atBound, want: atBound, ok: true},
+		{name: "nested", owner: "owner", token: "helm-charts%2Fgrafana-operator", want: "helm-charts/grafana-operator"},
+		{name: "at whole-name bound", owner: "owner", token: atBound, want: atBound},
 		{name: "over whole-name bound", owner: "owner", token: overBound},
 		{name: "many short elements", owner: "owner", token: strings.Repeat("a%2F", 126) + "a"},
 		{name: "raw slash", owner: "owner", token: "app/versions"},
@@ -80,9 +79,9 @@ func TestPackageName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := PackageName(tt.owner, tt.token)
-			if got != tt.want || ok != tt.ok {
-				t.Errorf("PackageName(%q, %q) = (%q, %v), want (%q, %v)", tt.owner, tt.token, got, ok, tt.want, tt.ok)
+			got, err := PackageName(tt.owner, tt.token)
+			if got != tt.want || (err != nil) != (tt.want == "") {
+				t.Errorf("PackageName(%q, %q) = (%q, %v), want %q", tt.owner, tt.token, got, err, tt.want)
 			}
 		})
 	}

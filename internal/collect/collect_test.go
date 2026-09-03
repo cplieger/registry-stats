@@ -61,7 +61,7 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{
-		{Owner: "owner", Repo: "app", Pulls: 42, TagCount: new(2)},
+		{Owner: "owner", Repo: "app", Pulls: 42},
 	}
 	dh.attempted = 1
 	dh.listingFailed = false
@@ -86,7 +86,7 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 		},
 	})
 	want := []obs.ImageMetric{
-		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42, Tags: new(2)},
+		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42},
 		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500},
 	}
 	if !reflect.DeepEqual(images, want) {
@@ -98,6 +98,30 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	}
 	if len(gh.lastRefs) != 1 || gh.lastRefs[0].Repo != "pkg" {
 		t.Errorf("gh.lastRefs = %+v, want [{owner pkg}]", gh.lastRefs)
+	}
+}
+
+func TestRun_success_logs_lifecycle(t *testing.T) {
+	src := newFakeDockerHub()
+	src.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	src.attempted = 1
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
+		Sources: []collect.Source{src},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		},
+	})
+
+	logs := buf.String()
+	started := strings.Index(logs, `level=INFO msg="starting collection"`)
+	completed := strings.Index(logs, `level=INFO msg="collection complete" images=1 duration=`)
+	if started < 0 || completed < 0 || started >= completed {
+		t.Errorf("Run() lifecycle logs = %q, want ordered start and completion with images=1 and duration", logs)
 	}
 }
 
@@ -388,7 +412,7 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	collect.Run(ctx, collect.Options{
+	images := collect.Run(ctx, collect.Options{
 		Metrics: obs.New(),
 		Sources: []collect.Source{dh},
 		Logger:  logger,
@@ -397,9 +421,16 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 		},
 	})
 
+	if len(images) != 1 {
+		t.Errorf("Run(cancelled non-empty source) returned %d images, want 1", len(images))
+	}
 	logs := buf.String()
 	if !strings.Contains(logs, `level=WARN msg="collection interrupted"`) {
 		t.Errorf("Run(cancelled non-empty source) logs = %q, want interruption record", logs)
+	}
+	hasInterruptedCount := strings.Contains(logs, "images=1") || strings.Contains(logs, "collected=1")
+	if !hasInterruptedCount {
+		t.Errorf("Run(cancelled non-empty source) logs = %q, want interruption count 1", logs)
 	}
 	if strings.Contains(logs, `msg="partial collection failure`) {
 		t.Errorf("Run(cancelled non-empty source) logs = %q, do not want partial-failure record", logs)
@@ -482,11 +513,41 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 	})
 }
 
+func TestRun_degraded_cycle_names_failing_source(t *testing.T) {
+	serving := newFakeDockerHub()
+	serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	serving.attempted = 1
+
+	failed := newFakeGHCR()
+	failed.attempted = 1
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
+		Sources: []collect.Source{serving, failed},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+		},
+	})
+
+	logs := buf.String()
+	unhealthy := strings.Index(logs, `msg="source reported unhealthy" source=ghcr`)
+	partial := strings.Index(logs, `msg="partial collection failure"`)
+	if unhealthy < 0 || partial < 0 || unhealthy >= partial {
+		t.Errorf("Run() degraded-cycle logs = %q, want GHCR unhealthy record before partial-failure summary", logs)
+	}
+	if strings.Contains(logs, `msg="source reported unhealthy" source=dockerhub`) {
+		t.Errorf("Run() degraded-cycle logs attribute failure to serving Docker Hub source: %q", logs)
+	}
+}
+
 // TestRun_unhealthy_source_still_serves_entries pins that an unhealthy
 // source's data survives the stamp.
 func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 	dh := newFakeDockerHub()
-	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 7, TagCount: new(3)}}
+	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 7}}
 	dh.attempted = 2
 	dh.listingFailed = true
 
@@ -504,7 +565,7 @@ func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 		},
 	})
 
-	want := obs.ImageMetric{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 7, Tags: new(3)}
+	want := obs.ImageMetric{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 7}
 	if len(images) != 1 {
 		t.Fatalf("images = %+v, want one record from the unhealthy source", images)
 	}
@@ -515,24 +576,5 @@ func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 	if !strings.Contains(logs, `msg="source reported unhealthy"`) ||
 		!strings.Contains(logs, `succeeded=1`) || !strings.Contains(logs, `attempted=2`) {
 		t.Errorf("Run() unhealthy source log missing succeeded=1 attempted=2; logs:\n%s", logs)
-	}
-}
-
-func TestRun_defaults_logger(t *testing.T) {
-	// Verify Run does not panic when Logger is nil; it should fall back to
-	// slog.Default().
-	ctx := t.Context()
-	dh := newFakeDockerHub()
-	dh.entries = []registry.Entry{{Owner: "o", Repo: "a", Pulls: 1}}
-	dh.attempted = 1
-	dh.listingFailed = false
-
-	images := collect.Run(ctx, collect.Options{
-		Metrics: obs.New(),
-		Sources: []collect.Source{dh},
-		RefsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "a"}} },
-	})
-	if len(images) != 1 {
-		t.Fatalf("Run() = %+v, want one record", images)
 	}
 }

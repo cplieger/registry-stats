@@ -36,10 +36,19 @@ const warnValueBytes = 128
 var pub sync.Mutex
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "health" {
-		// The serving process reports configuration warnings; the frequent probe stays silent.
-		interval, _ := config.PollInterval()
-		health.RunProbe(health.DefaultPath, health.WithMaxAge(3*interval))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "health":
+			// The serving process reports configuration warnings; the frequent probe stays silent.
+			interval, _ := config.PollInterval()
+			health.RunProbe(health.DefaultPath, health.WithMaxAge(3*interval))
+		default:
+			// slogx first: the stdlib default handler emits no level=ERROR field, which
+			// is what the shipped log rules match on.
+			slogx.Setup(slogx.Options{})
+			slog.Error("unknown command", "command", os.Args[1], "supported", "health")
+			os.Exit(2)
+		}
 	}
 
 	if err := run(); err != nil {
@@ -114,14 +123,11 @@ func run() error {
 		})
 	}
 
-	markStopping := func() {
+	preDrain := func(context.Context) {
+		slog.Info("shutting down", "cause", context.Cause(ctx))
 		pub.Lock()
 		defer pub.Unlock()
 		ready.Set(false)
-	}
-	preDrain := func(context.Context) {
-		slog.Info("shutting down", "cause", context.Cause(ctx))
-		markStopping()
 	}
 
 	// Start this waiter before teardown so AwaitDone can observe a completed cycle.
@@ -136,14 +142,12 @@ func run() error {
 			slog.Warn("collect goroutines did not finish before shutdown deadline")
 		}
 	}
-	onShutdown := func(shutdownCtx context.Context) { waitForCollect(shutdownCtx) }
 	serveExit := func(shutdownCtx context.Context) {
 		stop()
-		markStopping()
 		waitForCollect(shutdownCtx)
 	}
 
-	return webhttp.Run(ctx, srv, ln, onShutdown,
+	return webhttp.Run(ctx, srv, ln, waitForCollect,
 		webhttp.WithShutdownGrace(10*time.Second),
 		webhttp.WithPreDrain(preDrain),
 		webhttp.WithServeExit(serveExit))
@@ -162,8 +166,7 @@ func logWarnings(warns []config.Warning) {
 	}
 }
 
-// runCollect executes one cycle, publishes its outcome and reports whether
-// it collected an image.
+// runCollect executes one cycle and publishes its outcome.
 func runCollect(
 	ctx context.Context,
 	cfg *config.Config,
@@ -171,7 +174,7 @@ func runCollect(
 	m *obs.Metrics,
 	marker healthSignal,
 	ready *webhttp.Ready,
-) bool {
+) {
 	start := time.Now()
 	images := collectpkg.Run(ctx, collectpkg.Options{
 		Metrics: m,
@@ -183,11 +186,12 @@ func runCollect(
 
 	pub.Lock()
 	defer pub.Unlock()
-	// A cancelled cycle publishes nothing: SetImage deletes every label key
-	// absent from this pass; readiness is preDrain's once shutdown starts,
-	// and the marker's removal is Cleanup's.
+	// This gate withholds the label set and both health signals: SetImage deletes
+	// every label key absent from this pass, readiness is preDrain's once shutdown
+	// starts, and the marker's removal is Cleanup's. The duration sample above it is
+	// deliberately not withheld — a truncated cycle still spent that wall time.
 	if ctx.Err() != nil {
-		return len(images) > 0
+		return
 	}
 	m.SetImage(images)
 	ok := len(images) > 0
@@ -195,7 +199,6 @@ func runCollect(
 	if ok {
 		ready.Set(true)
 	}
-	return ok
 }
 
 func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {

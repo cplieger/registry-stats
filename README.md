@@ -16,7 +16,7 @@ Track how many times your container images are pulled, with a ready-made Grafana
 When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded, but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
 
 - **Prometheus metrics** (`/metrics`): pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
-- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to automatically discover and track all public repos for an owner. Wildcards are resolved on each poll cycle, so newly published images are picked up automatically.
+- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to discover public repos on each poll. Docker Hub wildcards collect up to 198 repositories per owner: its unauthenticated API refuses offsets of 100 or more, so Registry Stats reads two pages of 99. Each poll logs the collected and advertised counts.
 
 ### Why this design
 
@@ -65,7 +65,7 @@ services:
 
 | Variable | Description | Default | Required |
 | --- | --- | --- | --- |
-| `DOCKERHUB_REPOS` | Comma-separated list of Docker Hub repositories to track. Use `owner/repo` for specific repos or `owner/*` to auto-discover all public repos for an owner (for example `myuser/*,otheruser/specific-app`) | _(unset)_ | No |
+| `DOCKERHUB_REPOS` | Comma-separated Docker Hub repositories. Use `owner/repo` for one repo or `owner/*` for up to 198 public repos per owner; the unauthenticated API serves two pages of 99 before it refuses offset 100 | _(unset)_ | No |
 | `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
 | `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
@@ -94,7 +94,6 @@ Docker healthcheck runs the `health` subcommand against the marker file, not thi
 Prometheus text format metrics. Includes:
 
 - `registrystats_image_pulls_total{registry,owner,repo}`: current pull count per image
-- `registrystats_image_tags{registry,owner,repo}`: tag count per image
 - `registrystats_http_requests_total{method,path,status}`: HTTP request counters
 - `registrystats_http_request_duration_seconds`: request latency histogram
 - `registrystats_collects_total{source}`: collect runs per source, successful and failed
@@ -154,13 +153,13 @@ three `POLL_INTERVAL_HOURS`, and drop the rule in one-shot mode
 
 `RegistryStatsCollectionIncomplete` is the counterpart to
 `RegistryStatsSourceDegraded` on the axis the counters cannot reach. A cycle
-counts as healthy while most repos succeed, so a rate limit or a truncated owner
-listing takes images off `/metrics` without moving
-`registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info` default for
-that rule and for `RegistryStatsConfigRejected`'s every-cycle members: they key
-on `WARN` lines. `RegistryStatsConfigRejected` still catches a bad ref at any
-level, because config-parse warnings are emitted before the configured level
-applies.
+counts as healthy while most repos succeed, so a rate limit, a truncated owner
+listing, or refused GHCR package names can take images off `/metrics` without
+moving `registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info`
+default for that rule and for `RegistryStatsConfigRejected`'s every-cycle
+members: they key on `WARN` lines. `RegistryStatsConfigRejected` still catches
+a bad ref at any level, because config-parse warnings are emitted before the
+configured level applies.
 
 Thresholds and the `for:` windows are starting points. The scrape `job` label is
 yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
@@ -171,7 +170,7 @@ uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, so the first two health lines of every boot are `WARN health state changed healthy=false` followed by `INFO health state changed healthy=true`; the WARN is routine start-up, not a failed cycle, even though a cycle that collects nothing logs the same record. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within three poll intervals, so a wedged collect loop gets restarted (a cycle that legitimately runs longer than that — a rate-limited registry, say — trips the same deadline). An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, so the first two health lines of every boot are `WARN health state changed healthy=false` followed by `INFO health state changed healthy=true`; the WARN is routine start-up, not a failed cycle, even though a cycle that collects nothing logs the same record. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within three poll intervals. Under the example compose (`restart: unless-stopped`), that marks the container unhealthy without restarting it because Docker restart policies act on process exit, not health status. Configure your monitoring to act on the signal. An orchestrator that replaces unhealthy tasks, such as Swarm or a Kubernetes liveness probe, restarts the container. A cycle that legitimately runs longer than three intervals trips the same deadline. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 

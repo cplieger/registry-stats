@@ -23,6 +23,9 @@ func FuzzParseDownloads(f *testing.F) {
 	f.Add(`<span>Total downloads</span><h3 title="12345>`)
 	f.Add("")
 	f.Fuzz(func(t *testing.T, html string) {
+		if got := len(maskNonMarkup(html)); got != len(html) {
+			t.Fatalf("len(maskNonMarkup(%q)) = %d, want %d", html, got, len(html))
+		}
 		count, err := parseDownloads(html)
 		if err == nil && count < 0 {
 			t.Errorf("parseDownloads(%q) = %d with nil error, want non-negative", html, count)
@@ -46,16 +49,16 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Fuzz(func(t *testing.T, html, owner string) {
 		pkgs, refused := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
-			canonical, ok := urlsafe.PackageName(owner, url.PathEscape(name))
-			if !ok || canonical != name {
+			canonical, err := urlsafe.PackageName(owner, url.PathEscape(name))
+			if err != nil || canonical != name {
 				t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
 			}
 		}
-		if len(refused.Sample) > 128 {
-			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most 128", html, owner, len(refused.Sample))
+		if len(refused.Sample) > maxRefusalSampleBytes {
+			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most %d", html, owner, len(refused.Sample), maxRefusalSampleBytes)
 		}
-		if refused.Count > 0 && len(refused.Sample) < 128 {
-			if _, ok := urlsafe.PackageName(owner, refused.Sample); ok {
+		if refused.Count > 0 && len(refused.Sample) < maxRefusalSampleBytes {
+			if _, err := urlsafe.PackageName(owner, refused.Sample); err == nil {
 				t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe package token", html, owner, refused.Sample)
 			}
 		}
