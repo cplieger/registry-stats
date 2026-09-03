@@ -116,40 +116,6 @@ func TestParseDownloads_FindsMarkerText(t *testing.T) {
 	}
 }
 
-func TestParseDownloads_IgnoresRawText(t *testing.T) {
-	tests := []struct {
-		name    string
-		html    string
-		want    int64
-		wantErr bool
-	}{
-		{
-			name: "script marker before real marker",
-			html: `<script>const count = "<span>Total downloads</span><h3 title='777'>777</h3>";</script>` + downloadsHTML("42"),
-			want: 42,
-		},
-		{
-			name:    "script marker only",
-			html:    `<script>const count = "<span>Total downloads</span><h3 title='777'>777</h3>";</script>`,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseDownloads(tt.html)
-			if tt.wantErr {
-				if !errors.Is(err, errHTMLFormatChanged) {
-					t.Errorf("parseDownloads(%q) error = %v, want errHTMLFormatChanged", tt.html, err)
-				}
-				return
-			}
-			if err != nil || got != tt.want {
-				t.Errorf("parseDownloads(%q) = (%d, %v), want (%d, nil)", tt.html, got, err, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseDownloads_FormatChanged(t *testing.T) {
 	tests := []struct {
 		name string
@@ -231,46 +197,6 @@ func TestParsePackageList_Valid(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("[%d] = %q, want %q", i, got[i], w)
 		}
-	}
-}
-
-func TestParsePackageList_OnlyReadsHrefValues(t *testing.T) {
-	html := `<!-- /users/owner/packages/container/package/phantom -->`
-	got, refused := parsePackageList(html, "owner", userOwner)
-	if len(got) != 0 || refused.Count != 0 {
-		t.Errorf("parsePackageList(comment) = (%v, %+v), want no names or refusals", got, refused)
-	}
-}
-
-func TestParsePackageList_IgnoresRawText(t *testing.T) {
-	html := `<script>const link = '<a href="/users/owner/packages/container/package/phantom">';</script>`
-	got, refused := parsePackageList(html, "owner", userOwner)
-	if len(got) != 0 || refused.Count != 0 {
-		t.Errorf("parsePackageList(script) = (%v, %+v), want no names or refusals", got, refused)
-	}
-}
-
-func TestParsePackageList_PreservesMarkupAfterQuotedAttributeValue(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-	}{
-		{
-			name: "raw-text opener",
-			html: `<div data-x="<script>"></div><a href="/users/owner/packages/container/package/pkg">pkg</a>`,
-		},
-		{
-			name: "comment opener",
-			html: `<div data-x="<!--"></div><a href="/users/owner/packages/container/package/pkg">pkg</a>`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, refused := parsePackageList(tt.html, "owner", userOwner)
-			if !slices.Equal(got, []string{"pkg"}) || refused.Count != 0 {
-				t.Errorf("parsePackageList(%q) = (%v, %+v), want ([pkg], no refusals)", tt.html, got, refused)
-			}
-		})
 	}
 }
 

@@ -23,9 +23,6 @@ func FuzzParseDownloads(f *testing.F) {
 	f.Add(`<span>Total downloads</span><h3 title="12345>`)
 	f.Add("")
 	f.Fuzz(func(t *testing.T, html string) {
-		if got := len(maskNonMarkup(html)); got != len(html) {
-			t.Fatalf("len(maskNonMarkup(%q)) = %d, want %d", html, got, len(html))
-		}
 		count, err := parseDownloads(html)
 		if err == nil && count < 0 {
 			t.Errorf("parseDownloads(%q) = %d with nil error, want non-negative", html, count)

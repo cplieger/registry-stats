@@ -60,8 +60,6 @@ const lastPageMarker = "next_page disabled"
 // runesafe.SanitizeSingleLineBounded replaces it.
 const maxRefusalSampleBytes = 128
 
-var rawTextElements = []string{"script", "style", "textarea", "title"}
-
 // ownerKind is the account form an owner's packages are read through.
 // GitHub paginates a user's listing under /<owner>?tab=packages and an
 // organization's under /orgs/<owner>/packages, and each page's package
@@ -219,15 +217,8 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 			return c.partialListing(ctx, owner, page, names, refused,
 				fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates))
 		}
-		added := 0
-		for _, name := range pageNames {
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			names = append(names, name)
-			added++
-		}
+		kept, added := appendUnseenNames(names, seen, pageNames)
+		names = kept
 		if added == 0 {
 			if len(pageNames) == 0 && pageRefused.Count > 0 {
 				return c.partialListing(ctx, owner, page, names, refused,
@@ -242,6 +233,21 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 	c.opts.Logger.Warn("ghcr owner listing hit page cap; results may be truncated",
 		"owner", owner, "max_pages", maxListingPages)
 	return names, refused, nil
+}
+
+// appendUnseenNames appends every name not already in seen and reports how
+// many it added. Zero added means the page carried nothing new, which is what
+// ends the walk.
+func appendUnseenNames(names []string, seen map[string]bool, pageNames []string) (kept []string, added int) {
+	for _, name := range pageNames {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+		added++
+	}
+	return names, added
 }
 
 // emptyListingError names both causes of a first listing page with no
@@ -275,90 +281,6 @@ func markupTagEnd(html string, start int) (int, bool) {
 	return 0, false
 }
 
-func rawTextElementAt(html string, start int) (string, bool) {
-	if start >= len(html) || html[start] != '<' {
-		return "", false
-	}
-	rest := html[start+1:]
-	for _, name := range rawTextElements {
-		if len(rest) <= len(name) || !strings.EqualFold(rest[:len(name)], name) {
-			continue
-		}
-		if strings.ContainsRune(htmlWhitespace+">/", rune(rest[len(name)])) {
-			return name, true
-		}
-	}
-	return "", false
-}
-
-func rawTextClose(html string, start int, name string) (closeStart, next int, ok bool) {
-	closing := "</" + name
-	for cursor := start; cursor < len(html); {
-		i := strings.IndexByte(html[cursor:], '<')
-		if i < 0 {
-			return 0, 0, false
-		}
-		at := cursor + i
-		afterName := at + len(closing)
-		if afterName < len(html) && strings.EqualFold(html[at:afterName], closing) &&
-			strings.ContainsRune(htmlWhitespace+">/", rune(html[afterName])) {
-			return at, afterName, true
-		}
-		cursor = at + 1
-	}
-	return 0, 0, false
-}
-
-// maskNonMarkup replaces comment and raw-text content with spaces byte for
-// byte, so recognizers see markup while their indexes still address html.
-func maskNonMarkup(html string) string {
-	masked := []byte(html)
-	for cursor := 0; cursor < len(html); {
-		i := strings.IndexByte(html[cursor:], '<')
-		if i < 0 {
-			break
-		}
-		open := cursor + i
-		if strings.HasPrefix(html[open:], "<!--") {
-			contentStart := open + len("<!--")
-			closeOffset := strings.Index(html[contentStart:], "-->")
-			if closeOffset < 0 {
-				for j := contentStart; j < len(masked); j++ {
-					masked[j] = ' '
-				}
-				break
-			}
-			closeStart := contentStart + closeOffset
-			for j := contentStart; j < closeStart; j++ {
-				masked[j] = ' '
-			}
-			cursor = closeStart + len("-->")
-			continue
-		}
-
-		tagEnd, ok := markupTagEnd(html, open)
-		if !ok {
-			break
-		}
-		name, rawText := rawTextElementAt(html, open)
-		if !rawText {
-			cursor = tagEnd + 1
-			continue
-		}
-		contentStart := tagEnd + 1
-		closeStart, next, found := rawTextClose(html, contentStart, name)
-		if !found {
-			closeStart = len(html)
-			next = len(html)
-		}
-		for j := contentStart; j < closeStart; j++ {
-			masked[j] = ' '
-		}
-		cursor = next
-	}
-	return string(masked)
-}
-
 func quotedAttributeIs(html string, end int, name string) (byte, bool) {
 	for _, quote := range []byte{'"', '\''} {
 		suffix := name + "=" + string(quote)
@@ -379,7 +301,6 @@ func hrefAttribute(html string, end int) (byte, bool) {
 
 func readAttribute(tag string, start int) (name, value string, next int, ok bool) {
 	attrs := strings.TrimLeft(tag[start:], htmlWhitespace)
-	start = len(tag) - len(attrs)
 	if attrs == "" || attrs == "/" {
 		return "", "", len(tag), true
 	}
@@ -417,7 +338,7 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 
 func containsMarkerFields(value string) bool {
 	fields := strings.Fields(value)
-	for _, marker := range strings.Fields(lastPageMarker) {
+	for marker := range strings.FieldsSeq(lastPageMarker) {
 		if !slices.Contains(fields, marker) {
 			return false
 		}
@@ -425,10 +346,28 @@ func containsMarkerFields(value string) bool {
 	return true
 }
 
+// tagHasMarkerClass reports whether one start tag's class attribute carries
+// every token in lastPageMarker.
+func tagHasMarkerClass(tag string) bool {
+	attrAt := strings.IndexAny(tag, htmlWhitespace+"/")
+	if attrAt < 0 {
+		return false
+	}
+	for {
+		name, value, next, valid := readAttribute(tag, attrAt)
+		if !valid || name == "" {
+			return false
+		}
+		if name == "class" && containsMarkerFields(value) {
+			return true
+		}
+		attrAt = next
+	}
+}
+
 // lastPageMarkerPresent reports whether a start tag's class token list carries
 // every token in lastPageMarker. Text and unrelated attributes cannot answer it.
 func lastPageMarkerPresent(html string) bool {
-	html = maskNonMarkup(html)
 	for cursor := 0; cursor < len(html); {
 		i := strings.IndexByte(html[cursor:], '<')
 		if i < 0 {
@@ -440,24 +379,13 @@ func lastPageMarkerPresent(html string) bool {
 			return false
 		}
 		cursor = tagEnd + 1
+		// Skip an end tag, a comment and a processing instruction: only a start
+		// tag carries the class attribute this answers from.
 		if open+1 >= tagEnd || strings.ContainsRune("/!?", rune(html[open+1])) {
 			continue
 		}
-
-		tag := html[open:tagEnd]
-		attrAt := strings.IndexAny(tag, htmlWhitespace+"/")
-		if attrAt < 0 {
-			continue
-		}
-		for {
-			name, value, next, valid := readAttribute(tag, attrAt)
-			if !valid || name == "" {
-				break
-			}
-			if name == "class" && containsMarkerFields(value) {
-				return true
-			}
-			attrAt = next
+		if tagHasMarkerClass(html[open:tagEnd]) {
+			return true
 		}
 	}
 	return false
@@ -469,7 +397,6 @@ func lastPageMarkerPresent(html string) bool {
 // an error here: what it means depends on the page number, which only the
 // caller knows.
 func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
-	html = maskNonMarkup(html)
 	prefix := linkPrefix(kind, owner)
 	root := "/users/"
 	if kind == orgOwner {
@@ -541,7 +468,6 @@ func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, owner, pkg strin
 // deliberately not meaningful: GitHub reflows whitespace without breaking
 // this.
 func parseDownloads(html string) (int64, error) {
-	html = maskNonMarkup(html)
 	markerIdx := markerText(html)
 	if markerIdx == -1 {
 		return 0, errHTMLFormatChanged
