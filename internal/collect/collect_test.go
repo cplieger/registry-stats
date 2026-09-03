@@ -125,7 +125,7 @@ func TestRun_success_logs_lifecycle(t *testing.T) {
 	}
 }
 
-// TestRun_records_counters_only_for_invoked_sources pins the denominator the
+// TestRun_records_counters_only_for_invoked_sources pins the counters the
 // shipped RegistryStatsCollectStalled and RegistryStatsSourceDegraded rules
 // read: a source with no configured refs moves neither counter, and an
 // invoked unhealthy source moves both.
@@ -358,9 +358,8 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 // return, but the orchestrator neither counts it as a collection error nor
 // says it was degraded, so no shipped rule fires on a shutdown. The
 // accounting is asymmetric: the invoked source still mints its own
-// collects_total sample, the RegistryStatsCollectStalled denominator, while
-// the dead context stops the loop so no later source mints one for a cycle
-// it never performed.
+// collects_total sample, while the dead context stops the loop so no later
+// source mints one for a cycle it never performed.
 func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	m := obs.New()
 

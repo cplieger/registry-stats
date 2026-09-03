@@ -134,6 +134,7 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 		{"two title attributes", `<span>Total downloads</span><h3 title="1" title="2">2</h3>`},
 		{"attribute name ending in title", `<span>Total downloads</span><h3 data-title="9">27.8K</h3>`},
 		{"element name beginning with h3", `<span>Total downloads</span><h3x title="9">27.8K</h3x>`},
+		{"two download-count markers", downloadsHTML("1") + downloadsHTML("2")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -720,6 +721,23 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			},
 			want:      []string{"a", "b", "c"},
 			wantPages: 2,
+		},
+		{
+			name: "stops on a last-page marker at the page cap",
+			pages: map[string]string{
+				"1":  packageLink(userOwner, "owner", "p1"),
+				"2":  packageLink(userOwner, "owner", "p2"),
+				"3":  packageLink(userOwner, "owner", "p3"),
+				"4":  packageLink(userOwner, "owner", "p4"),
+				"5":  packageLink(userOwner, "owner", "p5"),
+				"6":  packageLink(userOwner, "owner", "p6"),
+				"7":  packageLink(userOwner, "owner", "p7"),
+				"8":  packageLink(userOwner, "owner", "p8"),
+				"9":  packageLink(userOwner, "owner", "p9"),
+				"10": packageLink(userOwner, "owner", "p10") + lastPageHTML(),
+			},
+			want:      []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"},
+			wantPages: maxListingPages,
 		},
 		{
 			name: "stops on reversed last-page class tokens",

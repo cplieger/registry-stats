@@ -42,7 +42,7 @@ func New(d Deps) *http.Server {
 	handler := webhttp.Chain(mux,
 		webhttp.Logging(
 			webhttp.WithLogger(d.Logger),
-			webhttp.WithLogLevel(accessLogLevel),
+			webhttp.ProbeLogLevel("/api/health", "/metrics"),
 			webhttp.WithRecordRouteMetric(d.Metrics.RecordHTTP),
 		),
 		webhttp.Recoverer(webhttp.WithRecoverLogger(d.Logger)),
@@ -57,15 +57,4 @@ func New(d Deps) *http.Server {
 		webhttp.WithIdleTimeout(defaultIdleTimeout),
 		webhttp.WithErrorLog(slog.NewLogLogger(d.Logger.Handler(), slog.LevelError)),
 	)
-}
-
-// accessLogLevel keeps routine scrape traffic at Debug while retaining failed requests.
-func accessLogLevel(_ *http.Request, status int) slog.Level {
-	switch {
-	case status >= 500:
-		return slog.LevelError
-	case status >= 400:
-		return slog.LevelWarn
-	}
-	return slog.LevelDebug
 }

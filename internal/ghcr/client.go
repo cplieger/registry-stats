@@ -66,13 +66,13 @@ func (c *Client) Source() registry.ID { return registry.GHCR }
 func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool) {
 	p := &pacer{delay: c.pacingDelay}
 	pkgParseFailures := 0
-	packages, listingWhollyFailed := c.buildPackageList(ctx, p, refs)
+	packages, listingFailed := c.buildPackageList(ctx, p, refs)
 
 	for _, ref := range packages {
 		stat, err := c.scrapePackage(ctx, p, ref)
 		if err != nil && ctx.Err() != nil {
 			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
-			return entries, attempted, listingWhollyFailed
+			return entries, attempted, listingFailed
 		}
 
 		attempted++
@@ -96,7 +96,7 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries 
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
-	return entries, attempted, listingWhollyFailed
+	return entries, attempted, listingFailed
 }
 
 // logInterrupted records the packages already collected and the ones a

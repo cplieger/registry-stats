@@ -49,6 +49,8 @@ const attrValue = "value"
 // caller that emits them owns capping and sanitizing them first
 // (runesafe.SanitizeSingleLineCapped).
 type Warning struct {
+	// Rewording a Msg silently disarms any alerts/logql.yaml rule matching
+	// it: RegistryStatsConfigRejected matches three of the five below.
 	Msg   string
 	Attrs []slog.Attr
 }

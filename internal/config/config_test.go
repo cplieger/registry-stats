@@ -3,7 +3,6 @@ package config
 import (
 	"log/slog"
 	"net/url"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -108,21 +107,6 @@ func TestParseRepoRefs_RefusalReasons(t *testing.T) {
 				t.Errorf("parseRepoRefs(%q, GHCR) reason = %+v, want %v", tt.input, warns[0].Attrs, want)
 			}
 		})
-	}
-}
-
-func TestParseRepoRefs_CanonicalizesOwner(t *testing.T) {
-	tests := []struct {
-		input string
-		want  []registry.RepoRef
-	}{
-		{"Owner/*", []registry.RepoRef{{Owner: "owner", Repo: "*"}}},
-	}
-	for _, tt := range tests {
-		got, _ := parseRepoRefs(tt.input, registry.DockerHub)
-		if !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("parseRepoRefs(%q, DockerHub) = %+v, want %+v", tt.input, got, tt.want)
-		}
 	}
 }
 

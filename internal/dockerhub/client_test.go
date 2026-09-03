@@ -319,19 +319,19 @@ func TestClient_Collect_WildcardListingFailureIsSticky(t *testing.T) {
 }
 
 // TestClient_Collect_PartialExplicitFailureLogsRepo covers the explicit-ref
-// state no other test reaches: exactly half the attempts fail, while the
-// listing-failure fact stays false and the per-repo ERROR records the omitted
-// repo. level=ERROR is what alerts/logql.yaml keys on.
+// state no other test reaches: exactly half the attempts fail while the
+// listing-failure fact stays false. alerts/logql.yaml matches both records.
 func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    int
 		body      string
+		wantLevel string
 		wantMsg   string
 		absentMsg string
 	}{
-		{"fetch_failure", http.StatusNotFound, "", "docker hub fetch failed", "docker hub parse failed"},
-		{"parse_failure", http.StatusOK, "not json", "docker hub parse failed", "docker hub fetch failed"},
+		{"fetch_failure", http.StatusNotFound, "", "WARN", "docker hub fetch failed", "docker hub parse failed"},
+		{"parse_failure", http.StatusOK, "not json", "ERROR", "docker hub parse failed", "docker hub fetch failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -360,9 +360,9 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 				t.Errorf("Collect partial %s entry = %+v, want good/app with 42 pulls", tt.name, entries[0])
 			}
 			logs := buf.String()
-			if !strings.Contains(logs, "level=ERROR") || !strings.Contains(logs, `msg="`+tt.wantMsg+`"`) ||
+			if !strings.Contains(logs, "level="+tt.wantLevel) || !strings.Contains(logs, `msg="`+tt.wantMsg+`"`) ||
 				!strings.Contains(logs, "repo=bad/app") || !strings.Contains(logs, "error=") {
-				t.Errorf("Collect partial %s did not log ERROR %q with repo and error; logs:\n%s", tt.name, tt.wantMsg, logs)
+				t.Errorf("Collect partial %s did not log %s %q with repo and error; logs:\n%s", tt.name, tt.wantLevel, tt.wantMsg, logs)
 			}
 			if strings.Contains(logs, `msg="`+tt.absentMsg+`"`) {
 				t.Errorf("Collect partial %s logged wrong branch %q; logs:\n%s", tt.name, tt.absentMsg, logs)

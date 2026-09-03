@@ -68,6 +68,34 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 }
 
+func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+		if (page-1)*size >= 100 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"pagination offset too large for anonymous requests"}`))
+			return
+		}
+		if page == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "results": []map[string]any{{"name": "a", "pull_count": 1}}, "next": "page2"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "results": []map[string]any{{"name": "b", "pull_count": 2}}, "next": ""})
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if err != nil {
+		t.Fatalf("listRepos(two-page anonymous owner): %v", err)
+	}
+	if len(repos) != 2 || advertised != 2 {
+		t.Errorf("listRepos(two-page anonymous owner) = (%d repos, advertised %d), want (2, 2)", len(repos), advertised)
+	}
+}
+
 // TestClient_NilLogger_DoesNotPanic verifies a Client built with a nil
 // logger falls back to a usable default.
 func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
@@ -263,3 +291,4 @@ func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
 		t.Errorf("repos[0] = %+v, want owner/good with 2 pulls", repos[0])
 	}
 }
+

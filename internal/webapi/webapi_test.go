@@ -106,19 +106,21 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 	}
 }
 
-// TestAccessLogLevel_byStatus pins the app's level POLICY (fed to
-// webhttp.WithLogLevel): 2xx/3xx at DEBUG (scrape-quiet), 4xx at WARN, 5xx
-// at ERROR, observed through the composed webhttp.Logging middleware.
+// TestAccessLogLevel_byStatus pins the probe preset's contract: a probe path
+// logs at DEBUG on success, WARN on a 4xx, and ERROR on a 5xx; any other path
+// stays at INFO.
 func TestAccessLogLevel_byStatus(t *testing.T) {
 	tests := []struct {
 		name      string
+		path      string
 		status    int
 		wantLevel string
 	}{
-		{"2xx logs at debug", http.StatusOK, "level=DEBUG"},
-		{"3xx logs at debug", http.StatusMovedPermanently, "level=DEBUG"},
-		{"4xx logs at warn", http.StatusNotFound, "level=WARN"},
-		{"5xx logs at error", http.StatusInternalServerError, "level=ERROR"},
+		{"2xx probe logs at debug", "/metrics", http.StatusOK, "level=DEBUG"},
+		{"3xx probe logs at debug", "/metrics", http.StatusMovedPermanently, "level=DEBUG"},
+		{"4xx probe logs at warn", "/api/health", http.StatusNotFound, "level=WARN"},
+		{"5xx probe logs at error", "/api/health", http.StatusInternalServerError, "level=ERROR"},
+		{"unmatched path stays at info", "/wp-login.php", http.StatusNotFound, "level=INFO"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,18 +130,18 @@ func TestAccessLogLevel_byStatus(t *testing.T) {
 				w.WriteHeader(tt.status)
 			})
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			webhttp.Logging(
 				webhttp.WithLogger(logger),
-				webhttp.WithLogLevel(accessLogLevel),
+				webhttp.ProbeLogLevel("/api/health", "/metrics"),
 			)(next).ServeHTTP(rec, req)
 
 			logs := buf.String()
 			if !strings.Contains(logs, "msg=http") {
-				t.Fatalf("status %d: no access-log line emitted, got %q", tt.status, logs)
+				t.Fatalf("path %q status %d: no access-log line emitted, got %q", tt.path, tt.status, logs)
 			}
 			if !strings.Contains(logs, tt.wantLevel) {
-				t.Errorf("status %d: access-log level = %q, want %q", tt.status, logs, tt.wantLevel)
+				t.Errorf("path %q status %d: access-log level = %q, want %q", tt.path, tt.status, logs, tt.wantLevel)
 			}
 		})
 	}

@@ -34,7 +34,11 @@ func FuzzParseDownloads(f *testing.F) {
 // Invariants: (1) every "/"-separated element of a returned name is
 // non-empty and passes IsSafeURLSegment, so a crafted page cannot smuggle
 // path traversal into downstream URL construction; (2) a reported refusal
-// sample is bounded, and an untruncated sample is itself a refused raw name.
+// sample is bounded, and on a page too short for any candidate to reach the
+// cap the sample is itself a refused raw name. The precondition is the PAGE
+// length, not the sample length: CapBytes backs the cut off to a rune start,
+// so a truncated sample can be shorter than the cap and is then a prefix of
+// the candidate rather than the candidate.
 func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/app1">app1</a>`, "owner")
 	f.Add(`<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`, "o")
@@ -54,7 +58,7 @@ func FuzzParsePackageList(f *testing.F) {
 		if len(refused.Sample) > maxRefusalSampleBytes {
 			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most %d", html, owner, len(refused.Sample), maxRefusalSampleBytes)
 		}
-		if refused.Count > 0 && len(refused.Sample) < maxRefusalSampleBytes {
+		if refused.Count > 0 && len(html) <= maxRefusalSampleBytes {
 			if _, err := urlsafe.PackageName(owner, refused.Sample); err == nil {
 				t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe package token", html, owner, refused.Sample)
 			}

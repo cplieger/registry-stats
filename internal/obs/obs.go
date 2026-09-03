@@ -28,6 +28,9 @@ type Metrics struct {
 }
 
 // New constructs an isolated metrics registry.
+// The names below are the published series: grafana-dashboard.json and
+// alerts/{promql,logql}.yaml read them as literal text and nothing links the two,
+// so a rename here empties a panel or a rule silently.
 func New() *Metrics {
 	m := &Metrics{
 		registry: metrics.NewRegistry("registrystats"),
@@ -77,7 +80,9 @@ func New() *Metrics {
 	return m
 }
 
-// MintCollectSources pre-mints the two per-source collect counters at zero.
+// MintCollectSources pre-mints the two per-source collect counters at zero, so
+// each configured source has a series from process start and a PromQL
+// increase() over its first failure has an earlier sample to subtract from.
 func (m *Metrics) MintCollectSources(sources []string) {
 	for _, source := range sources {
 		m.collectsTotal.Add(0, source)
@@ -101,7 +106,7 @@ func (m *Metrics) ObserveCollectDuration(d time.Duration) {
 // ImageMetric holds per-image gauge data set after each collect cycle.
 // Registry, Owner and Repo must be distinct after Prometheus label
 // sanitization: metrics/v4 replaces invalid UTF-8 in a label value,
-// so two triples that differ only outside the ASCII allowlist would
+// so two triples that differ only in bytes that are not valid UTF-8 would
 // share one emitted series and the per-cycle diff would delete it.
 // Producers guarantee this via urlsafe.
 type ImageMetric struct {
@@ -113,13 +118,10 @@ type ImageMetric struct {
 
 // SetImage replaces the image gauge data for one collect cycle. Current values
 // are Set in place and departed series dropped one by one rather than Reset+Set,
-// so a series present in both this cycle and the last is never missing from a
-// concurrent scrape: it reads either value. A scrape overlapping the update may
-// still straddle it, reading some series one cycle stale. It may also miss a
-// family entirely: metrics/v4 snapshots a family's label keys and releases the
-// lock before reading their values, so a scrape whose snapshot predates a
-// whole-set replacement finds every snapshotted key deleted and emits no samples
-// at all.
+// so a series present in both cycles is never missing from a concurrent scrape.
+// A scrape overlapping the update may still read some series one cycle stale, or
+// miss a family entirely: metrics/v4's LabeledGauge reads a family's label keys
+// and their values under separate locks.
 func (m *Metrics) SetImage(images []ImageMetric) {
 	m.setMu.Lock()
 	defer m.setMu.Unlock()

@@ -78,6 +78,8 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	}
 
 	if len(images) == 0 {
+		// Rewording either WARN below silently disarms
+		// RegistryStatsConfigRejected (alerts/logql.yaml).
 		switch {
 		case !invokedAnySource:
 			logger.Warn("no repos configured")
