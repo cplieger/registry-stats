@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"net/url"
 	"slices"
@@ -295,10 +296,6 @@ func quotedAttributeIs(html string, end int, name string) (byte, bool) {
 	return 0, false
 }
 
-func hrefAttribute(html string, end int) (byte, bool) {
-	return quotedAttributeIs(html, end, "href")
-}
-
 func readAttribute(tag string, start int) (name, value string, next int, ok bool) {
 	attrs := strings.TrimLeft(tag[start:], htmlWhitespace)
 	if attrs == "" || attrs == "/" {
@@ -346,45 +343,92 @@ func containsMarkerFields(value string) bool {
 	return true
 }
 
+// startTags yields each start tag's text, from its '<' through the byte
+// before its closing '>'. End tags, comments and processing instructions are
+// skipped, and markupTagEnd tracks quoted attribute values so a '>' inside a
+// value does not end the tag early. Both page readers walk markup through
+// this, which is what stops either of them reading page text, a comment body
+// or another attribute's value as an attribute of its own.
+// nextStartTag reads the markup at or after cursor. emit is true only for a
+// start tag; next is where scanning resumes; ok is false at end of input.
+//
+// A '<' whose tag end cannot be found advances by ONE BYTE rather than ending
+// the walk, and that is the load-bearing line: GitHub serves an XSS canary
+// comment of bare quotes (`<!-- '"` + "`" + ` -->`) two thirds of the way down a listing
+// page, markupTagEnd reads those as an attribute quote that never closes, and
+// abandoning the page there hid every package link 31 KB further on. Skipping
+// the byte costs one comment and recovers the rest of the document, so no
+// separate comment parser is needed.
+func nextStartTag(html string, cursor int) (tag string, next int, emit, ok bool) {
+	i := strings.IndexByte(html[cursor:], '<')
+	if i < 0 {
+		return "", 0, false, false
+	}
+	open := cursor + i
+	tagEnd, found := markupTagEnd(html, open)
+	if !found {
+		return "", open + 1, false, true
+	}
+	if open+1 >= tagEnd || strings.ContainsRune("/!?", rune(html[open+1])) {
+		return "", tagEnd + 1, false, true
+	}
+	return html[open:tagEnd], tagEnd + 1, true, true
+}
+
+func startTags(html string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for cursor := 0; cursor < len(html); {
+			tag, next, emit, ok := nextStartTag(html, cursor)
+			if !ok {
+				return
+			}
+			cursor = next
+			if emit && !yield(tag) {
+				return
+			}
+		}
+	}
+}
+
+// tagAttributes yields one start tag's name="value" pairs. The walk stops at
+// the first pair readAttribute cannot account for — a bare attribute, an
+// unquoted value, a malformed pair — because a tag this cannot fully read is
+// a tag whose remaining attributes are not knowable.
+func tagAttributes(tag string) iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		at := strings.IndexAny(tag, htmlWhitespace+"/")
+		if at < 0 {
+			return
+		}
+		for {
+			name, value, next, ok := readAttribute(tag, at)
+			if !ok || name == "" {
+				return
+			}
+			if !yield(name, value) {
+				return
+			}
+			at = next
+		}
+	}
+}
+
 // tagHasMarkerClass reports whether one start tag's class attribute carries
 // every token in lastPageMarker.
 func tagHasMarkerClass(tag string) bool {
-	attrAt := strings.IndexAny(tag, htmlWhitespace+"/")
-	if attrAt < 0 {
-		return false
-	}
-	for {
-		name, value, next, valid := readAttribute(tag, attrAt)
-		if !valid || name == "" {
-			return false
-		}
+	for name, value := range tagAttributes(tag) {
 		if name == "class" && containsMarkerFields(value) {
 			return true
 		}
-		attrAt = next
 	}
+	return false
 }
 
 // lastPageMarkerPresent reports whether a start tag's class token list carries
 // every token in lastPageMarker. Text and unrelated attributes cannot answer it.
 func lastPageMarkerPresent(html string) bool {
-	for cursor := 0; cursor < len(html); {
-		i := strings.IndexByte(html[cursor:], '<')
-		if i < 0 {
-			return false
-		}
-		open := cursor + i
-		tagEnd, ok := markupTagEnd(html, open)
-		if !ok {
-			return false
-		}
-		cursor = tagEnd + 1
-		// Skip an end tag, a comment and a processing instruction: only a start
-		// tag carries the class attribute this answers from.
-		if open+1 >= tagEnd || strings.ContainsRune("/!?", rune(html[open+1])) {
-			continue
-		}
-		if tagHasMarkerClass(html[open:tagEnd]) {
+	for tag := range startTags(html) {
+		if tagHasMarkerClass(tag) {
 			return true
 		}
 	}
@@ -392,55 +436,30 @@ func lastPageMarkerPresent(html string) bool {
 }
 
 // parsePackageList extracts package names from one page of an owner's
-// packages listing. The registered owner casing is response data, so the
-// prefix is matched without transforming untrusted HTML. Zero names is not
-// an error here: what it means depends on the page number, which only the
-// caller knows.
+// packages listing. A name is taken only from the value of a real href
+// attribute on a start tag, so page text, a comment body and an unrelated
+// attribute that merely contains the link's bytes are not candidates. The
+// registered owner casing is response data, so the prefix is matched without
+// transforming untrusted HTML. Zero names is not an error here: what it means
+// depends on the page number, which only the caller knows.
 func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 	prefix := linkPrefix(kind, owner)
-	root := "/users/"
-	if kind == orgOwner {
-		root = "/orgs/"
-	}
 	var names []string
 	var refused refusals
-	for cursor := 0; cursor < len(html); {
-		i := strings.Index(html[cursor:], root)
-		if i == -1 {
-			break
+	for tag := range startTags(html) {
+		for name, value := range tagAttributes(tag) {
+			if !strings.EqualFold(name, "href") || len(value) < len(prefix) ||
+				!strings.EqualFold(value[:len(prefix)], prefix) {
+				continue
+			}
+			raw := value[len(prefix):]
+			pkg, err := urlsafe.PackageName(owner, raw)
+			if err != nil {
+				refused = refused.refuse(raw)
+				continue
+			}
+			names = append(names, strings.Clone(pkg))
 		}
-		at := cursor + i
-		if at+len(prefix) > len(html) || !strings.EqualFold(html[at:at+len(prefix)], prefix) {
-			// The root self-overlaps only at its trailing slash, where the prefix
-			// would begin mid-path rather than at a link, so skipping it whole
-			// cannot pass over a candidate addressing this owner.
-			cursor = at + len(root)
-			continue
-		}
-
-		quote, ok := hrefAttribute(html, at)
-		if !ok {
-			refused = refused.refuse(html[at : at+len(prefix)])
-			cursor = at + len(root)
-			continue
-		}
-
-		nameStart := at + len(prefix)
-		nameEnd := strings.IndexByte(html[nameStart:], quote)
-		if nameEnd == -1 {
-			refused = refused.refuse(html[nameStart:])
-			break
-		}
-		nameEnd += nameStart
-		raw := html[nameStart:nameEnd]
-		cursor = nameEnd
-
-		name, err := urlsafe.PackageName(owner, raw)
-		if err != nil {
-			refused = refused.refuse(raw)
-			continue
-		}
-		names = append(names, strings.Clone(name))
 	}
 	return names, refused
 }

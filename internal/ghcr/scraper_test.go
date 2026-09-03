@@ -262,6 +262,12 @@ func TestParsePackageList_RefusesUnsafeDecodedNames(t *testing.T) {
 	}
 }
 
+// A candidate is the value of a real href attribute. An unsafe name inside one
+// is refused and counted; bytes that merely LOOK like a package link — in a
+// non-href attribute, or in an attribute whose name only ends in "href" — are
+// not candidates at all, so they yield neither a name nor a refusal. A page
+// made only of those reaches the caller as an empty listing, which
+// emptyListingError reports as format drift.
 func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
 	prefix := linkPrefix(userOwner, "owner")
 	tests := []struct {
@@ -283,12 +289,12 @@ func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
 		{
 			name:        "non-link attribute candidates",
 			html:        `<div data-targets="` + prefix + `a ` + prefix + `b">`,
-			wantRefused: 2,
+			wantRefused: 0,
 		},
 		{
 			name:        "attribute name ending in href",
 			html:        `<div data-href="` + prefix + `a">`,
-			wantRefused: 1,
+			wantRefused: 0,
 		},
 	}
 	for _, tt := range tests {
@@ -597,9 +603,11 @@ func TestFetchHTML_OverCap_IsFormatChanged(t *testing.T) {
 }
 
 // TestParsePackageList_SkipsMalformedAndEmptyNames covers two malformed
-// GHCR package-link candidates: a prefix with no closing delimiter ends
-// the scan with one refusal, while an empty name is refused without
-// aborting the scan, so a later valid link on the same line is still parsed.
+// GHCR package-link candidates: a tag whose href has no closing delimiter is
+// not a readable start tag, so it yields no packages and no refusal and the
+// caller reports the page as an empty listing; an empty name inside a real
+// href is refused without aborting the walk, so a later valid link on the
+// same line is still parsed.
 func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -612,7 +620,7 @@ func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 			name:        "prefix with no closing delimiter yields no packages",
 			html:        `<a href="/users/owner/packages/container/package/app1`,
 			owner:       "owner",
-			wantRefused: 1,
+			wantRefused: 0,
 		},
 		{
 			name:        "empty name is refused and a later valid link still parses",
@@ -1088,5 +1096,37 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	}
 	if len(logs) > 1024 {
 		t.Errorf("one refused 4096-byte name produced a %d-byte log; want the sample bounded", len(logs))
+	}
+}
+
+// A comment body is not attributes. GitHub serves an XSS canary comment of
+// bare quotes two thirds of the way down a listing page; reading those as
+// attribute quotes made the tag walk consume every remaining byte, so every
+// package link after it went missing and the page read as an empty listing.
+func TestParsePackageList_CommentBodyDoesNotSwallowLaterLinks(t *testing.T) {
+	canary := `<!-- '"` + "`" + ` --><!-- </textarea></xmp> -->`
+	html := canary + packageLink(userOwner, "owner", "app1")
+	got, refused := parsePackageList(html, "owner", userOwner)
+	if !slices.Equal(got, []string{"app1"}) || refused.Count != 0 {
+		t.Errorf("parsePackageList(canary comment + link) = (%v, %+v), want ([app1], no refusals)", got, refused)
+	}
+}
+
+// The same canary must not blind the end-of-listing check, which walks the
+// same tags: a marker after the comment has to still be found.
+func TestLastPageMarkerPresent_FoundAfterCommentBody(t *testing.T) {
+	canary := `<!-- '"` + "`" + ` -->`
+	if !lastPageMarkerPresent(canary + `<a class="` + lastPageMarker + `" href="#">next</a>`) {
+		t.Error("lastPageMarkerPresent(canary comment + marker tag) = false, want true")
+	}
+}
+
+// An unreadable tag must cost only itself: a '<' whose tag end cannot be
+// found is skipped, not treated as the end of the page.
+func TestParsePackageList_UnreadableTagDoesNotEndTheWalk(t *testing.T) {
+	html := `<div x="unclosed` + packageLink(userOwner, "owner", "app1")
+	got, _ := parsePackageList(html, "owner", userOwner)
+	if !slices.Equal(got, []string{"app1"}) {
+		t.Errorf("parsePackageList(unreadable tag + link) = %v, want [app1]", got)
 	}
 }
