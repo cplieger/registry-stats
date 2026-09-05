@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -642,9 +643,11 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			asked := map[string]int{}
+			ecosystems := map[string]int{}
 			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				page := r.URL.Query().Get("page")
 				asked[page]++
+				ecosystems[r.URL.Query().Get("ecosystem")]++
 				_, _ = w.Write([]byte(tt.pages[page]))
 			}), capturingLogger(&buf))
 
@@ -666,6 +669,10 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			}
 			if len(asked) != tt.wantPages {
 				t.Errorf("listing requested %d pages, want %d", len(asked), tt.wantPages)
+			}
+			wantEcosystems := map[string]int{"container": len(asked)}
+			if !maps.Equal(ecosystems, wantEcosystems) {
+				t.Errorf("ecosystems %v, want %v", ecosystems, wantEcosystems)
 			}
 		})
 	}
@@ -793,9 +800,10 @@ func TestClient_ScrapePackageList_AdvertisedTotalVanishingIsPartial(t *testing.T
 func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 	var buf bytes.Buffer
 	pages := 0
+	advertisedPages := maxListingPages + 5
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
-		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page")) + totalPagesHTML(25)))
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page")) + totalPagesHTML(advertisedPages)))
 	}), capturingLogger(&buf))
 
 	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
@@ -807,9 +815,10 @@ func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 	}
 	logs := buf.String()
 	wantPages := fmt.Sprintf("max_pages=%d", maxListingPages)
+	wantAdvertised := fmt.Sprintf("advertised_pages=%d", advertisedPages)
 	if !strings.Contains(logs, "hit page cap") || !strings.Contains(logs, wantPages) ||
-		!strings.Contains(logs, "advertised_pages=25") {
-		t.Errorf("a truncated listing did not warn with the page cap, %s, and advertised_pages=25; logs:\n%s", wantPages, logs)
+		!strings.Contains(logs, wantAdvertised) {
+		t.Errorf("a truncated listing did not warn with the page cap, %s, and %s; logs:\n%s", wantPages, wantAdvertised, logs)
 	}
 }
 

@@ -233,7 +233,6 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	}
 }
 
-
 func TestMintCollectSources_mintsBothCountersForEverySource(t *testing.T) {
 	m := New()
 	m.MintCollectSources([]string{"dockerhub", "ghcr"})

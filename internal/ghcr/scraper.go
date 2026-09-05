@@ -47,9 +47,9 @@ const ghcrBodyCap = 2 << 20
 // carried 30 candidates.
 const maxListingCandidates = 100
 
-// maxListingPages bounds how many pages of one owner's packages listing a
-// cycle reads.
-const maxListingPages = 10
+// maxListingPages bounds a listing that keeps serving new package names.
+// Fifty is a round limit above the largest measured total of 23 pages.
+const maxListingPages = 50
 
 // advertisedPagesAttr is the only value that can prove the walk read every
 // page GitHub says exists. It is absent for a single-page listing.
@@ -72,14 +72,16 @@ const (
 )
 
 // listingURL builds the listing URL for one owner kind and 1-based page.
+// The ecosystem filter makes data-total-pages countable because an unfiltered
+// total includes package types these container links do not enumerate.
 // The user form is what /users/<owner>/packages redirects to, and the
 // redirect drops the query — requesting the redirecting form would make
 // every page re-fetch page 1.
 func listingURL(kind ownerKind, owner string, page int) string {
 	if kind == orgOwner {
-		return fmt.Sprintf("https://github.com/orgs/%s/packages?page=%d", owner, page)
+		return fmt.Sprintf("https://github.com/orgs/%s/packages?ecosystem=container&page=%d", owner, page)
 	}
-	return fmt.Sprintf("https://github.com/%s?tab=packages&page=%d", owner, page)
+	return fmt.Sprintf("https://github.com/%s?tab=packages&ecosystem=container&page=%d", owner, page)
 }
 
 // linkPrefix is the package-link prefix a listing page of this kind carries.
@@ -230,17 +232,8 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 				fmt.Errorf("%w: listing page %d advertises %d pages against %d earlier", errHTMLFormatChanged, page, pageTotal, advertised))
 		}
 		if added == 0 {
-			if pageRefused.Count > 0 {
-				return c.partialListing(ctx, owner, page, names, refused,
-					fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page))
-			}
-			if len(pageNames) > 0 {
-				return c.partialListing(ctx, owner, page, names, refused,
-					fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames)))
-			}
-			if page < advertised {
-				return c.partialListing(ctx, owner, page, names, refused,
-					fmt.Errorf("%w: listing page %d of the %d advertised served no package names", errHTMLFormatChanged, page, advertised))
+			if err := emptyPageError(page, advertised, pageNames, pageRefused); err != nil {
+				return c.partialListing(ctx, owner, page, names, refused, err)
 			}
 			return names, refused, nil
 		}
@@ -251,6 +244,20 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 	c.opts.Logger.Warn("ghcr owner listing hit page cap; results truncated",
 		"owner", owner, "max_pages", maxListingPages, "advertised_pages", advertised)
 	return names, refused, nil
+}
+
+// emptyPageError names why a listing page that added no new name is a format
+// change, or returns nil when the page is the listing's clean end.
+func emptyPageError(page, advertised int, pageNames []string, pageRefused refusals) error {
+	switch {
+	case pageRefused.Count > 0:
+		return fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page)
+	case len(pageNames) > 0:
+		return fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames))
+	case page < advertised:
+		return fmt.Errorf("%w: listing page %d of the %d advertised served no package names", errHTMLFormatChanged, page, advertised)
+	}
+	return nil
 }
 
 // appendUnseenNames appends every name not already in seen and reports how
@@ -452,24 +459,18 @@ func tagAttributes(tag string) iter.Seq2[string, string] {
 // response data, so the prefix is matched without transforming untrusted HTML.
 // Zero names is not an error here because its meaning depends on the page
 // number, which only the caller knows.
-func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals, int) {
+func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, advertised int) {
 	prefix := linkPrefix(kind, owner)
-	var names []string
-	var refused refusals
-	advertised := 0
 	for tag := range startTags(html) {
 		for name, value := range tagAttributes(tag) {
-			if strings.EqualFold(name, advertisedPagesAttr) {
-				if pages, err := strconv.Atoi(strings.Trim(value, htmlWhitespace)); err == nil && pages > 0 {
-					advertised = pages
-				}
+			if pages := advertisedPages(name, value); pages > 0 {
+				advertised = pages
 				continue
 			}
-			if !strings.EqualFold(name, "href") || len(value) < len(prefix) ||
-				!strings.EqualFold(value[:len(prefix)], prefix) {
+			raw, isPackage := packageHref(name, value, prefix)
+			if !isPackage {
 				continue
 			}
-			raw := value[len(prefix):]
 			pkg, err := urlsafe.PackageName(owner, raw)
 			if err != nil {
 				refused = refused.refuse(raw)
@@ -479,6 +480,28 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals, i
 		}
 	}
 	return names, refused, advertised
+}
+
+// advertisedPages reports a positive page total, or zero for another
+// attribute or an unusable count.
+func advertisedPages(name, value string) int {
+	if !strings.EqualFold(name, advertisedPagesAttr) {
+		return 0
+	}
+	pages, err := strconv.Atoi(strings.Trim(value, htmlWhitespace))
+	if err != nil || pages < 1 {
+		return 0
+	}
+	return pages
+}
+
+// packageHref reports the package segment carried under prefix.
+func packageHref(name, value, prefix string) (segment string, isPackage bool) {
+	if !strings.EqualFold(name, "href") || len(value) < len(prefix) ||
+		!strings.EqualFold(value[:len(prefix)], prefix) {
+		return "", false
+	}
+	return value[len(prefix):], true
 }
 
 // scrapeDownloads fetches a single package page and returns its total

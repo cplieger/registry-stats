@@ -219,9 +219,9 @@ func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
 // activeSources returns the sources with at least one configured
 // ref and their metric names. One pass, so a source cannot be
 // invoked without having been pre-minted.
-func activeSources(cfg *config.Config, sources []collectpkg.Source) ([]collectpkg.Source, []string) {
-	active := make([]collectpkg.Source, 0, len(sources))
-	names := make([]string, 0, len(sources))
+func activeSources(cfg *config.Config, sources []collectpkg.Source) (active []collectpkg.Source, names []string) {
+	active = make([]collectpkg.Source, 0, len(sources))
+	names = make([]string, 0, len(sources))
 	for _, src := range sources {
 		source := src.Source()
 		if len(refsFor(cfg, source)) == 0 {

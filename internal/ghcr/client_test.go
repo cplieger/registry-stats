@@ -369,4 +369,3 @@ func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 		}
 	})
 }
-
