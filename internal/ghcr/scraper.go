@@ -558,9 +558,10 @@ func parseDownloads(html string) (int64, error) {
 // markerText returns the first plausible "Total downloads" occurrence and
 // the number found. A plausible occurrence is bounded on both sides the way
 // element text is: the previous non-whitespace byte closes a start tag and the
-// next ones begin the element's closing tag. Nothing tracks markup context, so
-// the pair of boundaries is what keeps marker-shaped bytes inside a comment or
-// a script body from being read as the marker.
+// next ones begin the element's closing tag. Nothing tracks markup context, so a
+// comment or script body shaped that way is counted too; parseDownloads' refusal
+// of any count but one, and of anything but an <h3 title>, is what stops it being
+// read as the count.
 func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
 	for at := 0; ; {

@@ -125,10 +125,13 @@ func TestClient_Collect_AllExplicitFailuresAreNotListingFailure(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
-	entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+	entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
+	}
+	if fetched != 0 {
+		t.Errorf("fetched = %d, want 0 (every explicit fetch failed)", fetched)
 	}
 	if len(entries) != 0 {
 		t.Errorf("entries len = %d, want 0 (all fetches failed)", len(entries))
@@ -354,10 +357,10 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 			logger, buf := captureLogger()
 			c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 			refs := []registry.RepoRef{{Owner: "bad", Repo: "app"}, {Owner: "good", Repo: "app"}}
-			entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+			entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
 
-			if attempted != 2 || listingFailed {
-				t.Errorf("Collect partial %s = (attempted=%d, listingFailed=%v), want (2, false)", tt.name, attempted, listingFailed)
+			if fetched != 1 || attempted != 2 || listingFailed {
+				t.Errorf("Collect partial %s = (fetched=%d, attempted=%d, listingFailed=%v), want (1, 2, false)", tt.name, fetched, attempted, listingFailed)
 			}
 			if len(entries) != 1 {
 				t.Fatalf("Collect partial %s returned %d entries, want 1", tt.name, len(entries))
@@ -422,8 +425,11 @@ func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 
 	logger, buf := captureLogger()
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-	entries, _, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
+	entries, fetched, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
+	if fetched != 0 {
+		t.Errorf("fetched = %d, want 0 (the cancelled fetch yielded no entry)", fetched)
+	}
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1 (the ref was tried)", attempted)
 	}

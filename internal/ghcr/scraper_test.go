@@ -847,6 +847,28 @@ func TestClient_ScrapePackageList_RefusedOnlyPageFailsClosed(t *testing.T) {
 	}
 }
 
+// TestClient_ScrapePackageList_RepeatedPageIsPartial pins the stalled-walk
+// arm: a later page that re-serves only already-collected names is a partial
+// listing, so the names already read come back with errHTMLFormatChanged and
+// the WARN literal alerts/logql.yaml keys on.
+func TestClient_ScrapePackageList_RepeatedPageIsPartial(t *testing.T) {
+	var buf bytes.Buffer
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b")))
+	}), capturingLogger(&buf))
+
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged for a page that re-served collected names", err)
+	}
+	if !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("scrapePackageList = %v, want the first page's names kept alongside the error", got)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "listing partially failed") {
+		t.Errorf("a repeated page did not warn with the `listing partially failed` literal; logs:\n%s", logs)
+	}
+}
+
 // TestClient_ScrapePackageList_PageCapWarnsOnTruncation pins the WARN an
 // operator's alert keys on: with names still arriving when the bound bites,
 // the listing is truncated and warns with the literal alerts/logql.yaml matches.
