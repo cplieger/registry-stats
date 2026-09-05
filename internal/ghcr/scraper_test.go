@@ -146,6 +146,14 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 	}
 }
 
+func TestParseDownloads_CommentTextIsNotMarkup(t *testing.T) {
+	const html = `<!-- Total downloads </span><h3 title="999"> -->`
+	count, err := parseDownloads(html)
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Errorf("parseDownloads(comment-only marker) = (%d, %v), want errHTMLFormatChanged", count, err)
+	}
+}
+
 // TestParseDownloads_UsesAssociatedCountElement pins that the count is the
 // marker's own element rather than another titled element nearby.
 func TestParseDownloads_UsesAssociatedCountElement(t *testing.T) {
@@ -463,7 +471,7 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "mypkg"}}
-	entries, _, listingFailed := c.Collect(t.Context(), refs)
+	entries, _, _, listingFailed := c.Collect(t.Context(), refs)
 
 	if listingFailed {
 		t.Error("listingFailed = true, want false")
@@ -509,7 +517,7 @@ func TestCollect_WildcardMock(t *testing.T) {
 	client := srv.Client()
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, _, listingFailed := c.Collect(ctx, refs)
+	entries, _, _, listingFailed := c.Collect(ctx, refs)
 
 	if listingFailed {
 		t.Error("listingFailed = true, want false")
@@ -536,7 +544,7 @@ func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 
-	entries, attempted, listingFailed := c.Collect(t.Context(), cfg.GHCRRepos)
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), cfg.GHCRRepos)
 	if listingFailed || attempted != 1 || len(entries) != 1 {
 		t.Errorf("Collect(canonicalized wildcard and explicit ref) = (%d entries, attempted %d, listingFailed %v), want (1, 1, false)", len(entries), attempted, listingFailed)
 	}
@@ -559,26 +567,6 @@ func TestScrapeDownloads_EscapesNestedName(t *testing.T) {
 	}
 	if path != "/users/owner/packages/container/package/helm-charts%2Fgrafana-operator" {
 		t.Errorf("scrapeDownloads path = %q, want nested name escaped once", path)
-	}
-}
-
-// TestCollect_AllFailuresAreNotListingFailure verifies that package-scrape
-// failures do not set the source-private wildcard-listing fact.
-func TestCollect_AllFailuresAreNotListingFailure(t *testing.T) {
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-
-	client := srv.Client()
-	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
-	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}}
-	entries, _, listingFailed := c.Collect(t.Context(), refs)
-
-	if listingFailed {
-		t.Error("expected listingFailed=false when all scrapes fail")
-	}
-	if len(entries) != 0 {
-		t.Fatalf("expected 0 entries (failures skipped), got %d", len(entries))
 	}
 }
 
@@ -705,7 +693,7 @@ func listingClient(t *testing.T, h http.Handler, logger *slog.Logger) *Client {
 // TestClient_ScrapePackageList_PaginatesOwnerListing pins the page loop: an
 // owner listing longer than one page is read to its end and the names are
 // unioned in listing order, and the read stops clean — no WARN — when a page
-// carries GitHub's own last-page marker or adds no new name.
+// carries GitHub's own last-page marker or no package link.
 func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -766,7 +754,7 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			wantPages: 2,
 		},
 		{
-			name: "stops on a page that adds no name",
+			name: "stops on a page with no package link",
 			pages: map[string]string{
 				"1": packageLink(userOwner, "owner", "a"),
 				"2": packageLink(userOwner, "owner", "b"),
@@ -928,7 +916,7 @@ func TestClient_Collect_cancelledListingIsNotListingFailure(t *testing.T) {
 		<-r.Context().Done()
 	}), capturingLogger(&buf))
 
-	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	entries, _, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if len(entries) != 0 || attempted != 0 || listingFailed {
 		t.Errorf("Collect(cancelled listing) = (%d entries, attempted %d, listingFailed %v), want (0, 0, false)",
 			len(entries), attempted, listingFailed)
@@ -950,7 +938,11 @@ func TestClient_ScrapePackageList_ReadsOrganizationForm(t *testing.T) {
 	mux.HandleFunc("GET /myorg", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
 	})
-	mux.HandleFunc("GET /orgs/myorg/packages", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /orgs/myorg/packages", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") != "1" {
+			_, _ = w.Write([]byte(`<html>no package links</html>`))
+			return
+		}
 		_, _ = w.Write([]byte(`<a href="/orgs/myorg/packages/container/package/svc">svc</a>`))
 	})
 	c := listingClient(t, mux, testsupport.QuietLogger())
@@ -961,6 +953,28 @@ func TestClient_ScrapePackageList_ReadsOrganizationForm(t *testing.T) {
 	}
 	if !slices.Equal(got, []string{"svc"}) {
 		t.Errorf("scrapePackageList = %v, want the organization's packages", got)
+	}
+}
+
+func TestClient_ScrapePackageList_MergesUserFormRefusals(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "bad/nested") + lastPageHTML()))
+	})
+	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc") + lastPageHTML()))
+	})
+	c := listingClient(t, mux, testsupport.QuietLogger())
+
+	got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	if err != nil {
+		t.Fatalf("scrapePackageList: %v", err)
+	}
+	if !slices.Equal(got, []string{"svc"}) {
+		t.Errorf("scrapePackageList = %v, want [svc]", got)
+	}
+	if refused.Count != 1 || refused.Sample != "bad/nested" {
+		t.Errorf("scrapePackageList refusals = %+v, want one refusal sampled as bad/nested", refused)
 	}
 }
 
@@ -1005,7 +1019,7 @@ func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 
-	entries, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if attempted != 1 || listingFailed {
 		t.Errorf("Collect with organization page-2 404 = (attempted %d, listingFailed %v), want (1, false)", attempted, listingFailed)
 	}

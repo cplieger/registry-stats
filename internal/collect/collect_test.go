@@ -23,6 +23,7 @@ type fakeSource struct {
 	// orchestrator plumbs RefsFor(Source()) through correctly.
 	entries       []registry.Entry
 	lastRefs      []registry.RepoRef
+	fetched       int
 	attempted     int
 	source        registry.ID
 	listingFailed bool
@@ -39,12 +40,12 @@ func (f *fakeSource) Source() registry.ID { return f.source }
 func (f *fakeSource) Collect(
 	_ context.Context,
 	refs []registry.RepoRef,
-) ([]registry.Entry, int, bool) {
+) ([]registry.Entry, int, int, bool) {
 	f.lastRefs = refs
 	if f.cancel != nil {
 		f.cancel()
 	}
-	return f.entries, f.attempted, f.listingFailed
+	return f.entries, f.fetched, f.attempted, f.listingFailed
 }
 
 // newFakeDockerHub and newFakeGHCR build fakeSources whose Source() matches
@@ -63,11 +64,13 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	dh.entries = []registry.Entry{
 		{Owner: "owner", Repo: "app", Pulls: 42},
 	}
+	dh.fetched = 1
 	dh.attempted = 1
 	dh.listingFailed = false
 
 	gh := newFakeGHCR()
 	gh.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 500}}
+	gh.fetched = 1
 	gh.attempted = 1
 	gh.listingFailed = false
 
@@ -104,6 +107,7 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 func TestRun_success_logs_lifecycle(t *testing.T) {
 	src := newFakeDockerHub()
 	src.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	src.fetched = 1
 	src.attempted = 1
 
 	var buf bytes.Buffer
@@ -134,11 +138,13 @@ func TestRun_records_counters_only_for_invoked_sources(t *testing.T) {
 
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	dh.fetched = 1
 	dh.attempted = 1
 	dh.listingFailed = false
 
 	gh := newFakeGHCR()
 	gh.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 2}}
+	gh.fetched = 1
 	gh.attempted = 1
 	gh.listingFailed = true
 
@@ -197,20 +203,23 @@ func TestRun_derivesSourceHealthFromResults(t *testing.T) {
 	tests := []struct {
 		name          string
 		entries       int
+		fetched       int
 		attempted     int
 		listingFailed bool
 		wantHealthy   bool
 	}{
 		{name: "zero_attempts", wantHealthy: true},
 		{name: "all_failed", attempted: 3},
-		{name: "majority_failed", entries: 1, attempted: 3},
-		{name: "exactly_half_failed", entries: 1, attempted: 2, wantHealthy: true},
-		{name: "all_succeeded", entries: 2, attempted: 2, wantHealthy: true},
-		{name: "listing_failed", entries: 2, attempted: 2, listingFailed: true},
+		{name: "majority_failed", entries: 1, fetched: 1, attempted: 3},
+		{name: "exactly_half_failed", entries: 1, fetched: 1, attempted: 2, wantHealthy: true},
+		{name: "all_succeeded", entries: 2, fetched: 2, attempted: 2, wantHealthy: true},
+		{name: "wildcard_rows_do_not_absorb_failures", entries: 25, fetched: 1, attempted: 3},
+		{name: "listing_failed", entries: 2, fetched: 2, attempted: 2, listingFailed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := newFakeDockerHub()
+			src.fetched = tt.fetched
 			src.attempted = tt.attempted
 			src.listingFailed = tt.listingFailed
 			for range tt.entries {
@@ -230,8 +239,8 @@ func TestRun_derivesSourceHealthFromResults(t *testing.T) {
 
 			unhealthy := strings.Contains(buf.String(), `msg="source reported unhealthy"`)
 			if unhealthy == tt.wantHealthy {
-				t.Errorf("Run(entries=%d, attempted=%d, listingFailed=%v) healthy = %v, want %v; logs:\n%s",
-					tt.entries, tt.attempted, tt.listingFailed, !unhealthy, tt.wantHealthy, buf.String())
+				t.Errorf("Run(entries=%d, fetched=%d, attempted=%d, listingFailed=%v) healthy = %v, want %v; logs:\n%s",
+					tt.entries, tt.fetched, tt.attempted, tt.listingFailed, !unhealthy, tt.wantHealthy, buf.String())
 			}
 		})
 	}
@@ -406,6 +415,7 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 	t.Cleanup(cancel)
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	dh.fetched = 1
 	dh.attempted = 1
 	dh.cancel = cancel
 
@@ -439,35 +449,11 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 	}
 }
 
-func TestRun_partial_success_returns_records_with_degraded_flag(t *testing.T) {
-	ctx := t.Context()
-	dh := newFakeDockerHub()
-	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
-	dh.attempted = 1
-	dh.listingFailed = false
-
-	// GHCR has refs but returns no entries and flags unhealthy. The
-	// cycle still serves data because DockerHub produced some.
-	gh := newFakeGHCR()
-	gh.attempted = 2
-
-	images := collect.Run(ctx, collect.Options{
-		Metrics: obs.New(),
-		Sources: []collect.Source{dh, gh},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(source registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "o", Repo: "r"}}
-		},
-	})
-	if len(images) != 1 {
-		t.Errorf("images = %+v, want the one DockerHub record served", images)
-	}
-}
-
 func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.T) {
 	t.Run("degraded_cycle", func(t *testing.T) {
 		serving := newFakeDockerHub()
 		serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+		serving.fetched = 1
 		serving.attempted = 1
 
 		failed := newFakeGHCR()
@@ -493,6 +479,7 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 	t.Run("healthy_cycle", func(t *testing.T) {
 		serving := newFakeDockerHub()
 		serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+		serving.fetched = 1
 		serving.attempted = 1
 
 		var buf bytes.Buffer
@@ -515,6 +502,7 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 func TestRun_degraded_cycle_names_failing_source(t *testing.T) {
 	serving := newFakeDockerHub()
 	serving.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	serving.fetched = 1
 	serving.attempted = 1
 
 	failed := newFakeGHCR()
@@ -547,6 +535,7 @@ func TestRun_degraded_cycle_names_failing_source(t *testing.T) {
 func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 7}}
+	dh.fetched = 1
 	dh.attempted = 2
 	dh.listingFailed = true
 

@@ -17,9 +17,8 @@ import (
 // TestNew_readinessEndpoint pins the wiring of GET /api/health onto webhttp's
 // readiness gate through New's full middleware chain: 200 {"status":"ok"} when
 // the injected Ready view reports ready, and 503 {"status":"unready"} when it
-// does not — including a nil view, which New defaults to a not-ready gate
-// rather than panicking. This is the HTTP serving-readiness gate, distinct from
-// the container file-marker liveness probe.
+// does not. This is the HTTP serving-readiness gate, distinct from the
+// container file-marker liveness probe.
 func TestNew_readinessEndpoint(t *testing.T) {
 	readyTrue := &webhttp.Ready{}
 	readyTrue.Set(true)
@@ -32,7 +31,6 @@ func TestNew_readinessEndpoint(t *testing.T) {
 	}{
 		{"ready view returns 200 ok", readyTrue, http.StatusOK, "ok"},
 		{"unready view returns 503 unready", &webhttp.Ready{}, http.StatusServiceUnavailable, "unready"},
-		{"nil view returns 503 unready", nil, http.StatusServiceUnavailable, "unready"},
 	}
 
 	for _, tt := range tests {
@@ -66,7 +64,7 @@ func TestNew_readinessEndpoint(t *testing.T) {
 // IdleTimeout are deliberately not asserted: webhttp supplies non-zero
 // defaults not part of this package's contract.
 func TestNew_boundsRequestReadAndWrite(t *testing.T) {
-	srv := New(Deps{Metrics: obs.New(), Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: testsupport.QuietLogger()})
 
 	if srv.ReadTimeout <= 0 {
 		t.Errorf("New().ReadTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.ReadTimeout)
@@ -103,47 +101,6 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 	}
 	if got := h.Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("Strict-Transport-Security = %q, want empty (HSTS off)", got)
-	}
-}
-
-// TestAccessLogLevel_byStatus pins the probe preset's contract: a probe path
-// logs at DEBUG on success, WARN on a 4xx, and ERROR on a 5xx; any other path
-// stays at INFO.
-func TestAccessLogLevel_byStatus(t *testing.T) {
-	tests := []struct {
-		name      string
-		path      string
-		status    int
-		wantLevel string
-	}{
-		{"2xx probe logs at debug", "/metrics", http.StatusOK, "level=DEBUG"},
-		{"3xx probe logs at debug", "/metrics", http.StatusMovedPermanently, "level=DEBUG"},
-		{"4xx probe logs at warn", "/api/health", http.StatusNotFound, "level=WARN"},
-		{"5xx probe logs at error", "/api/health", http.StatusInternalServerError, "level=ERROR"},
-		{"unmatched path stays at info", "/wp-login.php", http.StatusNotFound, "level=INFO"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tt.status)
-			})
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-			webhttp.Logging(
-				webhttp.WithLogger(logger),
-				webhttp.ProbeLogLevel("/api/health", "/metrics"),
-			)(next).ServeHTTP(rec, req)
-
-			logs := buf.String()
-			if !strings.Contains(logs, "msg=http") {
-				t.Fatalf("path %q status %d: no access-log line emitted, got %q", tt.path, tt.status, logs)
-			}
-			if !strings.Contains(logs, tt.wantLevel) {
-				t.Errorf("path %q status %d: access-log level = %q, want %q", tt.path, tt.status, logs, tt.wantLevel)
-			}
-		})
 	}
 }
 

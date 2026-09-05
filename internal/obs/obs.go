@@ -4,17 +4,16 @@ package obs
 import (
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/cplieger/metrics/v4"
 	"github.com/cplieger/webhttp/v2"
 )
 
-// Metrics records and serves registry-stats metrics. Every method is safe for
-// concurrent use: the metric values synchronize themselves and setMu covers the
-// per-cycle label bookkeeping, so the HTTP goroutines and the collect loop
-// share one value.
+// Metrics records and serves registry-stats metrics. Recording and serving are
+// safe for concurrent use: the metric values synchronize themselves. SetImage is
+// the one exception -- it owns the per-cycle label bookkeeping and takes a single
+// writer, which is the collect loop.
 type Metrics struct {
 	registry        *metrics.Registry
 	httpRequests    *metrics.LabeledCounter
@@ -24,7 +23,6 @@ type Metrics struct {
 	collectDuration *metrics.Histogram
 	imagePulls      *metrics.LabeledGauge
 	prevPulls       map[[3]string]bool
-	setMu           sync.Mutex
 }
 
 // New constructs an isolated metrics registry.
@@ -123,9 +121,6 @@ type ImageMetric struct {
 // miss a family entirely: metrics/v4's LabeledGauge reads a family's label keys
 // and their values under separate locks.
 func (m *Metrics) SetImage(images []ImageMetric) {
-	m.setMu.Lock()
-	defer m.setMu.Unlock()
-
 	pulls := make(map[[3]string]bool, len(images))
 	for _, image := range images {
 		key := [3]string{image.Registry, image.Owner, image.Repo}

@@ -45,9 +45,9 @@ const attrValue = "value"
 // carries structured attributes rather than a pre-rendered sentence, so
 // attribute-keyed queries keep working. Attrs holds only top-level string
 // or int attributes: no groups, so a caller can bound a string value
-// without resolving one. Attribute values are raw environment input, and a
-// caller that emits them owns capping and sanitizing them first
-// (runesafe.SanitizeSingleLineCapped).
+// without resolving one. A string attribute may carry environment-derived
+// input, trimmed but not otherwise sanitized, and a caller that emits one owns
+// capping and sanitizing it first (runesafe.SanitizeSingleLineCapped).
 type Warning struct {
 	// Rewording a Msg silently disarms any alerts/logql.yaml rule matching
 	// it: RegistryStatsConfigRejected matches three of the five below.

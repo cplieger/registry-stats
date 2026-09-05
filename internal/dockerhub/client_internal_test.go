@@ -96,17 +96,6 @@ func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T)
 	}
 }
 
-// TestClient_NilLogger_DoesNotPanic verifies a Client built with a nil
-// logger falls back to a usable default.
-func TestClient_NilLogger_DoesNotPanic(t *testing.T) {
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry()})
-	c.Collect(t.Context(), []registry.RepoRef{{Owner: "o", Repo: "a"}})
-}
-
 func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	// Count only exact owner-listing requests toward the page cap.
 	ownerPages := 0
@@ -129,19 +118,41 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
 	refs := []registry.RepoRef{{Owner: "o", Repo: "*"}}
-	_, attempted, _ := c.Collect(t.Context(), refs)
+	_, _, attempted, _ := c.Collect(t.Context(), refs)
 
-	if ownerPages != 10 {
-		t.Errorf("owner-listing requests = %d, want 10 (update if maxOwnerPages changes)", ownerPages)
+	if ownerPages != 2 {
+		t.Errorf("owner-listing requests = %d, want 2 (update if maxOwnerPages changes)", ownerPages)
 	}
-	if attempted != 10 {
-		t.Errorf("attempted = %d, want 10 distinct repos (update if maxOwnerPages changes)", attempted)
+	if attempted != 0 {
+		t.Errorf("attempted = %d, want 0 (listing rows are not fetches)", attempted)
 	}
 	logs := buf.String()
 	if !strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
-		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=10") ||
+		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=2") ||
 		!strings.Contains(logs, "advertised=1000") {
-		t.Errorf("Collect stopping at the page cap did not report 10 of 1000 collected; logs:\n%s", logs)
+		t.Errorf("Collect stopping at the page cap did not report 2 of 1000 collected; logs:\n%s", logs)
+	}
+}
+
+func TestClient_ListRepos_RejectsMoreReposThanAdvertised(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
+			"results": []map[string]any{
+				{"name": "a", "pull_count": 1},
+				{"name": "b", "pull_count": 2},
+			},
+			"next": "",
+		})
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	_, _, err := c.listRepos(t.Context(), "o")
+
+	if !shapeChanged(err) {
+		t.Errorf("listRepos(count 1 with 2 repos) error = %v, want a shape-change error", err)
 	}
 }
 

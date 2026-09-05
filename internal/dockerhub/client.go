@@ -7,7 +7,6 @@
 package dockerhub
 
 import (
-	"cmp"
 	"context"
 	"encoding/json/v2"
 	"errors"
@@ -24,13 +23,15 @@ import (
 
 // Docker Hub refuses anonymous owner-listing requests whose offset reaches
 // 100, so pageSize 99 is the largest size with a legal second page and
-// reaches 198 repositories. maxOwnerPages bounds a non-terminating next
-// token and reports truncation if reached. listingElemCap bounds one page's
-// decode cost with headroom for upstream page-size widening. A body
-// larger than 1 MiB is a format signal, not content; the largest measured
-// full upstream page is about 75 KB, leaving about 14x headroom.
+// maxOwnerPages stops the walk there: a third page would answer 403 rather
+// than data. Reaching the cap means the owner publishes more than
+// pageSize*maxOwnerPages repositories and this walk holds only part of it.
+// listingElemCap bounds one page's decode cost with headroom for upstream
+// page-size widening. A body larger than 1 MiB is a format signal, not
+// content; the largest measured full upstream page is about 75 KB, leaving
+// about 14x headroom.
 const (
-	maxOwnerPages  = 10
+	maxOwnerPages  = 2
 	pageSize       = 99
 	listingElemCap = 4 * pageSize
 	listingBodyCap = 1 << 20
@@ -45,10 +46,9 @@ type Client struct {
 }
 
 // Options configures NewClient beyond the required HTTP client: the
-// per-request retry options and the logger, each with a meaningful zero
-// (httpx defaults; slog.Default).
+// per-request retry options and required logger.
 type Options struct {
-	// Logger receives the client's logs; nil falls back to slog.Default.
+	// Logger receives the client's logs; required.
 	Logger *slog.Logger
 	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
 	// defaults.
@@ -58,11 +58,10 @@ type Options struct {
 // NewClient returns a Client that uses the provided *http.Client for all
 // outbound requests, configured by opts.
 func NewClient(client *http.Client, opts Options) *Client {
-	logger := cmp.Or(opts.Logger, slog.Default())
 	return &Client{
 		http:      client,
 		retryOpts: opts.RetryOpts,
-		logger:    logger,
+		logger:    opts.Logger,
 	}
 }
 
@@ -71,19 +70,19 @@ func NewClient(client *http.Client, opts Options) *Client {
 // (registry.DockerHub.String()).
 func (c *Client) Source() registry.ID { return registry.DockerHub }
 
-// Collect gathers pull counts for every ref in refs. Returns the per-repo
-// entries plus the attempted count (including failures). listingFailed reports
-// a wildcard owner listing that failed without yielding any usable repos.
-// Cancellation itself never sets listingFailed; a wholesale failure recorded
-// before the cancellation persists. An explicit ref is counted in attempted
-// before its metadata fetch, so cancellation during that fetch leaves it in
-// attempted but not entries.
-func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool) {
-	wildcardResults, wildcardAttempted, seen, listingFailed := c.collectWildcards(ctx, refs)
+// Collect gathers pull counts for every ref in refs. fetched and attempted
+// count successful and total per-repo metadata fetches. Repos whose counts
+// came from a wildcard owner listing are entries but not fetches.
+// listingFailed reports a wildcard owner listing that failed without yielding
+// any usable repos. Cancellation itself never sets listingFailed; a wholesale
+// failure recorded before the cancellation persists. An explicit ref is
+// counted in attempted before its metadata fetch, so cancellation during that
+// fetch leaves it in attempted but not fetched.
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool) {
+	wildcardResults, seen, listingFailed := c.collectWildcards(ctx, refs)
 	explicitResults, explicitAttempted := c.collectExplicit(ctx, refs, seen)
 	entries = slices.Concat(wildcardResults, explicitResults)
-	attempted = wildcardAttempted + explicitAttempted
-	return entries, attempted, listingFailed
+	return entries, len(explicitResults), explicitAttempted, listingFailed
 }
 
 // collectWildcards expands every "*" ref into concrete repo entries.
@@ -92,27 +91,26 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries 
 //
 // listingFailed is true when at least one owner listing wholly failed
 // (see collectWildcardRef).
-func (c *Client) collectWildcards(ctx context.Context, refs []registry.RepoRef) (results []registry.Entry, attempted int, seen map[registry.RepoRef]bool, listingFailed bool) {
+func (c *Client) collectWildcards(ctx context.Context, refs []registry.RepoRef) (results []registry.Entry, seen map[registry.RepoRef]bool, listingFailed bool) {
 	seen = make(map[registry.RepoRef]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {
 			continue
 		}
-		refResults, refAttempted, refFailed := c.collectWildcardRef(ctx, ref.Owner, seen)
+		refResults, refFailed := c.collectWildcardRef(ctx, ref.Owner, seen)
 		results = append(results, refResults...)
-		attempted += refAttempted
 		if refFailed {
 			listingFailed = true
 		}
 	}
-	return results, attempted, seen, listingFailed
+	return results, seen, listingFailed
 }
 
 // collectWildcardRef lists one owner's public repos, deduping against the
 // shared seen map (mutated in place). listingFailed reports a wholesale
 // listing outage for this owner. A partial failure, a legitimately empty owner
 // and a cancelled cycle all leave it false; a stop is not an outage.
-func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int, listingFailed bool) {
+func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[registry.RepoRef]bool) (results []registry.Entry, listingFailed bool) {
 	repos, advertised, err := c.listRepos(ctx, owner)
 	switch {
 	case ctx.Err() != nil:
@@ -137,9 +135,6 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 		c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos), "advertised", advertised)
 	}
 	for i := range repos {
-		if ctx.Err() != nil {
-			return results, attempted, listingFailed
-		}
 		repo := repos[i]
 		name := repo.Owner + "/" + repo.Repo
 		key := registry.RepoRef{Owner: repo.Owner, Repo: repo.Repo}
@@ -147,11 +142,10 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 			continue
 		}
 		seen[key] = true
-		attempted++
 		results = append(results, repo)
 		c.logger.Debug("docker hub repo collected", "repo", name, "pulls", repo.Pulls)
 	}
-	return results, attempted, listingFailed
+	return results, listingFailed
 }
 
 // collectExplicit fetches each non-wildcard ref unless it was already

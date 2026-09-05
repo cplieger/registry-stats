@@ -14,14 +14,16 @@ import (
 // Source collects registry-specific statistics for a list of refs, as flat
 // per-image registry.Entry records whose Owner and Repo label components
 // are non-empty. Source() must return a known registry.ID, since Run
-// derives the metric and log label from it. attempted counts per-image
-// fetch attempts including failures, after wildcard expansion, so it is
-// not len(refs); it is the denominator of Run's health verdict, so a ref
-// an implementation skips counts as neither. listingFailed reports a
-// wildcard owner listing that failed without yielding any usable refs.
+// derives the metric and log label from it. attempted and fetched count
+// per-image fetches only: attempted every fetch the source tried after
+// wildcard expansion, fetched the ones that yielded an entry. A ref whose
+// count arrived from an owner listing is in neither, so a listing can neither
+// dilute nor improve the health verdict; a ref an implementation skips counts
+// as neither either. listingFailed reports a wildcard owner listing that
+// failed without yielding any usable refs.
 type Source interface {
 	Source() registry.ID
-	Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool)
+	Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool)
 }
 
 // Options configures a single Run. Metrics, RefsFor and Logger are
@@ -78,10 +80,10 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	}
 
 	if len(images) == 0 {
-		// Rewording either WARN below silently disarms
-		// RegistryStatsConfigRejected (alerts/logql.yaml).
 		switch {
 		case !invokedAnySource:
+			// RegistryStatsConfigRejected (alerts/logql.yaml) matches the text of the
+			// "no repos configured" WARN; reword it there and here together.
 			logger.Warn("no repos configured")
 		case degraded:
 			logger.Error("no images collected, at least one source failed")
@@ -114,15 +116,15 @@ func collectSource(
 	src Source,
 	refs []registry.RepoRef,
 ) (images []obs.ImageMetric, srcHealthy bool) {
-	entries, attempted, listingFailed := src.Collect(ctx, refs)
+	entries, fetched, attempted, listingFailed := src.Collect(ctx, refs)
 	// Unhealthy when a wildcard owner listing wholly failed, or when more
-	// than half the attempts yielded no entry.
-	srcHealthy = !listingFailed && len(entries)*2 >= attempted
+	// than half the fetch attempts yielded no entry.
+	srcHealthy = !listingFailed && fetched*2 >= attempted
 	label := src.Source().String()
 	failed := !srcHealthy && ctx.Err() == nil
 	if failed {
 		logger.Warn("source reported unhealthy",
-			"source", label, "succeeded", len(entries), "attempted", attempted,
+			"source", label, "succeeded", fetched, "attempted", attempted,
 			"listing_failed", listingFailed)
 	}
 	m.RecordCollect(label, failed)

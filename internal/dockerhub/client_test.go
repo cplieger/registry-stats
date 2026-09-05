@@ -39,8 +39,11 @@ func TestClient_Collect_ExplicitRef(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "myapp"}}
-	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+	entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
 
+	if fetched != 1 {
+		t.Errorf("fetched = %d, want 1", fetched)
+	}
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1", attempted)
 	}
@@ -71,10 +74,13 @@ func TestClient_Collect_Wildcard(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+	entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
 
-	if attempted != 2 {
-		t.Errorf("attempted = %d, want 2", attempted)
+	if fetched != 0 {
+		t.Errorf("fetched = %d, want 0 (listing rows are not fetches)", fetched)
+	}
+	if attempted != 0 {
+		t.Errorf("attempted = %d, want 0 (listing rows are not fetches)", attempted)
 	}
 	if listingFailed {
 		t.Errorf("listingFailed = true, want false")
@@ -102,10 +108,10 @@ func TestClient_Collect_WildcardDedupAgainstExplicit(t *testing.T) {
 		{Owner: "owner", Repo: "*"},
 		{Owner: "owner", Repo: "app1"},
 	}
-	entries, attempted, _ := c.Collect(t.Context(), refs)
+	entries, fetched, attempted, _ := c.Collect(t.Context(), refs)
 
-	if attempted != 1 {
-		t.Errorf("attempted = %d, want 1 (wildcard covered the explicit ref)", attempted)
+	if fetched != 0 || attempted != 0 {
+		t.Errorf("fetch counts = (fetched %d, attempted %d), want (0, 0); wildcard covered the explicit ref", fetched, attempted)
 	}
 	if len(entries) != 1 {
 		t.Errorf("entries len = %d, want 1 (deduped)", len(entries))
@@ -119,7 +125,7 @@ func TestClient_Collect_AllExplicitFailuresAreNotListingFailure(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "a"}, {Owner: "owner", Repo: "b"}}
-	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if attempted != 2 {
 		t.Errorf("attempted = %d, want 2", attempted)
@@ -144,7 +150,7 @@ func TestClient_Collect_WildcardListError_SkipsButContinues(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "a"}}
-	entries, _, _ := c.Collect(t.Context(), refs)
+	entries, _, _, _ := c.Collect(t.Context(), refs)
 
 	if len(entries) != 1 {
 		t.Fatalf("entries len = %d, want 1 (good/a survives bad wildcard listing)", len(entries))
@@ -163,7 +169,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 		}))
 
 		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		entries, attempted, listingFailed := c.Collect(t.Context(), wildcard)
+		entries, _, attempted, listingFailed := c.Collect(t.Context(), wildcard)
 
 		if !listingFailed {
 			t.Error("listingFailed = false, want true for a wholesale wildcard listing failure")
@@ -184,7 +190,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 		srv := httptest.NewTestServer(t, mux)
 
 		c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
-		entries, _, listingFailed := c.Collect(t.Context(), wildcard)
+		entries, _, _, listingFailed := c.Collect(t.Context(), wildcard)
 
 		if listingFailed {
 			t.Error("listingFailed = true, want false for a legitimately empty owner")
@@ -225,7 +231,7 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 
 				logger, buf := captureLogger()
 				c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-				entries, attempted, listingFailed := c.Collect(t.Context(), wildcard)
+				entries, _, attempted, listingFailed := c.Collect(t.Context(), wildcard)
 
 				if listingFailed {
 					t.Error("listingFailed = true, want false for a partial listing failure")
@@ -233,8 +239,8 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 				if len(entries) != 1 || entries[0].Owner != "o" || entries[0].Repo != "a1" {
 					t.Errorf("entries = %+v, want one entry o/a1 (partial results served)", entries)
 				}
-				if attempted != 1 {
-					t.Errorf("attempted = %d, want 1", attempted)
+				if attempted != 0 {
+					t.Errorf("attempted = %d, want 0 (listing rows are not fetches)", attempted)
 				}
 				logs := buf.String()
 				if !strings.Contains(logs, `msg="docker hub listing partially failed"`) || !strings.Contains(logs, tt.wantError) {
@@ -266,10 +272,10 @@ func TestClient_Collect_DuplicateListingRowsRemainPartial(t *testing.T) {
 
 	logger, buf := captureLogger()
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-	entries, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "o", Repo: "*"}})
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "o", Repo: "*"}})
 
-	if attempted != 1 || listingFailed {
-		t.Errorf("Collect with duplicate listing rows = (attempted=%d, listingFailed=%v), want (1, false)", attempted, listingFailed)
+	if attempted != 0 || listingFailed {
+		t.Errorf("Collect with duplicate listing rows = (attempted=%d, listingFailed=%v), want (0, false)", attempted, listingFailed)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("Collect with duplicate listing rows returned %d entries, want 1", len(entries))
@@ -302,13 +308,13 @@ func TestClient_Collect_WildcardListingFailureIsSticky(t *testing.T) {
 
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
 	refs := []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "*"}}
-	entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 	if !listingFailed {
 		t.Error("Collect after an earlier wildcard listing failure = listingFailed false, want true")
 	}
-	if attempted != 1 {
-		t.Errorf("Collect after an earlier wildcard listing failure attempted = %d, want 1", attempted)
+	if attempted != 0 {
+		t.Errorf("Collect after an earlier wildcard listing failure attempted = %d, want 0 (listing rows are not fetches)", attempted)
 	}
 	if len(entries) != 1 {
 		t.Fatalf("Collect after an earlier wildcard listing failure returned %d entries, want 1", len(entries))
@@ -348,7 +354,7 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 			logger, buf := captureLogger()
 			c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 			refs := []registry.RepoRef{{Owner: "bad", Repo: "app"}, {Owner: "good", Repo: "app"}}
-			entries, attempted, listingFailed := c.Collect(t.Context(), refs)
+			entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
 
 			if attempted != 2 || listingFailed {
 				t.Errorf("Collect partial %s = (attempted=%d, listingFailed=%v), want (2, false)", tt.name, attempted, listingFailed)
@@ -382,7 +388,7 @@ func TestClient_Collect_CancelledWildcardListingIsNotAnOutage(t *testing.T) {
 
 	logger, buf := captureLogger()
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	entries, _, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 
 	if listingFailed {
 		t.Error("Collect with a cancelled wildcard listing = listingFailed true, want false")
@@ -416,7 +422,7 @@ func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 
 	logger, buf := captureLogger()
 	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
-	entries, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
+	entries, _, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "myapp"}})
 
 	if attempted != 1 {
 		t.Errorf("attempted = %d, want 1 (the ref was tried)", attempted)

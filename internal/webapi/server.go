@@ -19,7 +19,7 @@ const (
 	defaultIdleTimeout       = 60 * time.Second
 )
 
-// Deps supplies the HTTP server dependencies. Metrics and Logger are required. A nil Ready reports 503.
+// Deps supplies the HTTP server dependencies. Metrics, Ready and Logger are required.
 type Deps struct {
 	Metrics *obs.Metrics
 	Ready   webhttp.ReadinessChecker
@@ -28,14 +28,8 @@ type Deps struct {
 
 // New constructs the server without binding or starting it.
 func New(d Deps) *http.Server {
-	ready := d.Ready
-	if ready == nil {
-		// ReadinessHandler calls Ready unconditionally.
-		ready = &webhttp.Ready{}
-	}
-
 	mux := http.NewServeMux()
-	mux.Handle("GET /api/health", webhttp.ReadinessHandler(ready))
+	mux.Handle("GET /api/health", webhttp.ReadinessHandler(d.Ready))
 	mux.HandleFunc("GET /metrics", d.Metrics.Handler())
 
 	// Logging is outermost so recovered panics are recorded as 500 responses.

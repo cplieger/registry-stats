@@ -170,7 +170,7 @@ func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) 
 	orgNames, orgRefused, orgErr := c.readListing(ctx, p, owner, orgOwner)
 	switch {
 	case len(orgNames) > 0:
-		return orgNames, orgRefused, orgErr
+		return orgNames, refused.merge(orgRefused), orgErr
 	case err != nil:
 		return nil, refused.merge(orgRefused), err
 	case orgErr == nil || isNotFound(orgErr):
@@ -193,12 +193,12 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 }
 
 // readListing walks one owner's listing in kind's URL form from page 1 up
-// to the cap. A page after the first that adds no name is the end of the
-// listing unless it contains refusals, which make the listing untrustworthy.
-// A page that fails is a partial listing, returned with the names already
-// collected. Exhausting the cap while names still arrive is a truncated
-// listing. Both states WARN, unless the cycle's own cancellation caused the
-// failure, because alerts/logql.yaml keys on their message text.
+// to the cap. A later page with no package link ends the listing; one that
+// carries links but adds no new name has stopped advancing and is partial, as is
+// one with refusals. A page that fails is a partial listing, returned with the
+// names already collected. Exhausting the cap while names still arrive is a
+// truncated listing. Both states WARN, unless the cycle's own cancellation
+// caused the failure, because alerts/logql.yaml keys on their message text.
 func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
 		names   []string
@@ -224,6 +224,10 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 				return c.partialListing(ctx, owner, page, names, refused,
 					fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page))
 			}
+			if len(pageNames) > 0 {
+				return c.partialListing(ctx, owner, page, names, refused,
+					fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames)))
+			}
 			return names, refused, nil
 		}
 		if lastPageMarkerPresent(html) {
@@ -236,8 +240,8 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 }
 
 // appendUnseenNames appends every name not already in seen and reports how
-// many it added. Zero added means the page carried nothing new, which is what
-// ends the walk.
+// many it added so the caller can distinguish progress from an empty or
+// repeated page.
 func appendUnseenNames(names []string, seen map[string]bool, pageNames []string) (kept []string, added int) {
 	kept = names
 	for _, name := range pageNames {
@@ -267,6 +271,12 @@ func isNotFound(err error) bool {
 	return false
 }
 
+// markupTagEnd treats ANY quote as opening an attribute value, not only one
+// that follows '='. Deliberate: a quote desync has two arms with opposite
+// costs, and this one loses just the unreadable tag itself (pinned by
+// TestParsePackageList_UnreadableTagDoesNotEndTheWalk), where requiring '='
+// first would let an unterminated quote swallow every tag after it. GitHub
+// serves no unquoted attribute value containing a quote.
 func markupTagEnd(html string, start int) (int, bool) {
 	var quote byte
 	for i := start + 1; i < len(html); i++ {
@@ -282,26 +292,13 @@ func markupTagEnd(html string, start int) (int, bool) {
 	return 0, false
 }
 
-func quotedAttributeIs(html string, end int, name string) (byte, bool) {
-	for _, quote := range []byte{'"', '\''} {
-		suffix := name + "=" + string(quote)
-		start := end - len(suffix)
-		if start <= 0 || html[start:end] != suffix {
-			continue
-		}
-		if html[start-1] == '<' || strings.ContainsRune(htmlWhitespace, rune(html[start-1])) {
-			return quote, true
-		}
-	}
-	return 0, false
-}
-
 // nextAttributeName returns the next attribute name at or after start and the
 // index of the '=' that follows it, skipping any valueless attribute in
 // between: HTML allows one anywhere, GitHub serves several, and the pairs after
 // it are still readable. An empty name with ok true is the end of the tag.
-// Whitespace between the name and its '=' is not this case and refuses the tag,
-// because quotedAttributeIs compares name, '=' and quote as adjacent bytes.
+// Whitespace between the name and its '=' is not this case and refuses the tag:
+// such a name is skipped as valueless, and the bare '=' that follows it names
+// nothing.
 func nextAttributeName(tag string, start int) (name string, eq int, ok bool) {
 	for {
 		attrs := strings.TrimLeft(tag[start:], htmlWhitespace)
@@ -309,7 +306,10 @@ func nextAttributeName(tag string, start int) (name string, eq int, ok bool) {
 			return "", len(tag), true
 		}
 		nameEnd := strings.IndexAny(attrs, "="+htmlWhitespace)
-		if nameEnd <= 0 {
+		if nameEnd < 0 {
+			return "", len(tag), true
+		}
+		if nameEnd == 0 {
 			return "", 0, false
 		}
 		at := len(tag) - len(attrs) + nameEnd
@@ -330,10 +330,13 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 	if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
 		return "", "", 0, false
 	}
-	quote, validName := quotedAttributeIs(tag, eq+2, name)
-	if !validName || quote != attrs[0] {
+	// An attribute name must start at a tag or attribute boundary; the tail
+	// check below enforces this for every pair after the first.
+	if before := eq - len(name) - 1; before < 0 ||
+		(tag[before] != '<' && !strings.ContainsRune(htmlWhitespace, rune(tag[before]))) {
 		return "", "", 0, false
 	}
+	quote := attrs[0]
 	attrs = attrs[1:]
 	valueEnd := strings.IndexByte(attrs, quote)
 	if valueEnd < 0 {
@@ -553,8 +556,11 @@ func parseDownloads(html string) (int64, error) {
 }
 
 // markerText returns the first plausible "Total downloads" occurrence and
-// the number found. A plausible occurrence's next non-whitespace byte begins
-// the element's closing tag.
+// the number found. A plausible occurrence is bounded on both sides the way
+// element text is: the previous non-whitespace byte closes a start tag and the
+// next ones begin the element's closing tag. Nothing tracks markup context, so
+// the pair of boundaries is what keeps marker-shaped bytes inside a comment or
+// a script body from being read as the marker.
 func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
 	for at := 0; ; {
@@ -563,8 +569,9 @@ func markerText(html string) (idx, n int) {
 			return idx, n
 		}
 		i += at
+		before := strings.TrimRight(html[:i], htmlWhitespace)
 		rest := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
-		if strings.HasPrefix(rest, "</") {
+		if strings.HasSuffix(before, ">") && strings.HasPrefix(rest, "</") {
 			if n == 0 {
 				idx = i
 			}

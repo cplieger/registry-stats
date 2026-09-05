@@ -16,7 +16,7 @@ import (
 // Options configures GHCR-specific scraper policy. Its zero value selects
 // production defaults (DefaultMinPacing + DefaultPacingJitter).
 type Options struct {
-	// Logger receives the client's warnings; nil falls back to slog.Default.
+	// Logger receives the client's warnings; required.
 	Logger *slog.Logger
 	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx defaults.
 	RetryOpts []httpx.GetOption
@@ -39,16 +39,13 @@ const (
 // collect.Source at the wiring site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {
 	http *http.Client
-	// opts.Logger is resolved by NewClient, so reads need no nil check.
+	// opts.Logger is required, so reads need no nil check.
 	opts Options
 }
 
 // NewClient returns a Client that uses the provided *http.Client for all
 // outbound requests, configured by opts.
 func NewClient(client *http.Client, opts Options) *Client {
-	if opts.Logger == nil {
-		opts.Logger = slog.Default()
-	}
 	return &Client{http: client, opts: opts}
 }
 
@@ -60,10 +57,11 @@ func (c *Client) Source() registry.ID { return registry.GHCR }
 // expanded through the owner's packages listing before scraping; explicit
 // refs are scraped as-is. A package whose scrape fails is NOT appended, so
 // a transient error cannot inject a false zero into the exposed gauge.
-// attempted counts per-package scrape attempts; a package a shutdown
-// interrupted counts as neither attempt nor failure. listingFailed reports
-// a wildcard listing that failed without yielding any usable package names.
-func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, attempted int, listingFailed bool) {
+// attempted counts per-package scrape attempts; fetched counts the attempts
+// that yielded entries. A package a shutdown interrupted counts as neither.
+// listingFailed reports a wildcard listing that failed without yielding any
+// usable package names.
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool) {
 	p := &pacer{delay: c.pacingDelay}
 	pkgParseFailures := 0
 	packages, listingFailed := c.buildPackageList(ctx, p, refs)
@@ -72,7 +70,7 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries 
 		stat, err := c.scrapePackage(ctx, p, ref)
 		if err != nil && ctx.Err() != nil {
 			c.logInterrupted(len(entries), len(packages)-attempted, ctx.Err())
-			return entries, attempted, listingFailed
+			return entries, len(entries), attempted, listingFailed
 		}
 
 		attempted++
@@ -96,7 +94,7 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries 
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
-	return entries, attempted, listingFailed
+	return entries, len(entries), attempted, listingFailed
 }
 
 // logInterrupted records the packages already collected and the ones a

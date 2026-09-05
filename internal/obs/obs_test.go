@@ -3,6 +3,8 @@ package obs
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +177,29 @@ func TestSetImage_preservesSurvivingSeriesDuringConcurrentScrape(t *testing.T) {
 	}
 	if missing {
 		t.Error("SetImage() omitted the surviving image_pulls series during a concurrent scrape")
+	}
+}
+
+func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
+	m := New()
+	m.MintCollectSources([]string{"dockerhub"})
+	m.SetImage([]ImageMetric{{Registry: "dockerhub", Owner: "owner", Repo: "repo", Pulls: 1}})
+	body := scrapeBody(t, m)
+
+	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
+	consumerSeries := make(map[string]bool)
+	for _, path := range []string{"../../grafana-dashboard.json", "../../alerts/promql.yaml"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Setup: read shipped metric consumer %s: %v", path, err)
+		}
+		for _, name := range metricName.FindAllString(string(data), -1) {
+			consumerSeries[name] = true
+		}
+	}
+	for name := range consumerSeries {
+		if !strings.Contains(body, "# HELP "+name+" ") {
+			t.Errorf("shipped consumer series %q is absent from /metrics", name)
+		}
 	}
 }

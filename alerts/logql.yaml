@@ -21,10 +21,11 @@
 #
 # These rules assume the default LOG_LEVEL=info.
 # LOG_LEVEL=error silences RegistryStatsCollectionIncomplete because every
-# named incomplete-set line is below ERROR. RegistryStatsConfigRejected keeps
-# working at every LOG_LEVEL: config skip warnings are emitted once per start
-# before the configured level is applied, and the no-repos state also logs at
-# ERROR during startup.
+# named incomplete-set line is below ERROR. RegistryStatsConfigRejected's
+# startup records work at every LOG_LEVEL because they are emitted before the
+# configured level is applied. At LOG_LEVEL=error, the recurring no-repos WARN
+# is suppressed, so that alert clears when its startup record ages out of the
+# one-hour window.
 groups:
   - name: registry-stats
     rules:
@@ -62,12 +63,17 @@ groups:
       # therefore level-wide rather than collection-specific: one rule covers
       # an all-registries-failed cycle, registry response-shape or markup drift,
       # an empty wildcard owner, a startup with no usable repo configuration,
-      # and a 5xx from the exporter's own endpoint. Only the majority-failure
+      # and any 5xx from the exporter's own endpoint EXCEPT the readiness gate's
+      # documented unready answer - /api/health answers 503 on every cold boot
+      # until the first collect completes (measured 1m51s on
+      # GHCR_REPOS=cplieger/*) and again during the drain, and webhttp's
+      # ProbeLogLevel preset levels a 5xx at Error, so without the exclusion this
+      # rule fires on every boot and every deploy. Only the majority-failure
       # subset of those reaches registrystats_collect_errors_total.
       - alert: RegistryStatsError
         expr: |
           sum by (container) (count_over_time(
-            {container="registry-stats"} |= `level=ERROR` [1h]
+            {container="registry-stats"} |= `level=ERROR` != `path=/api/health status=503` [1h]
           )) > 0
         for: 0m
         labels:
@@ -80,9 +86,10 @@ groups:
             errors as well as collection ones: registry response-shape or GHCR
             markup drift, a wildcard owner with no public images, a cycle in
             which every registry failed, a startup with no usable repo
-            configuration, or a 5xx from the exporter's own endpoint. Read
-            `docker logs registry-stats` for the message; a GHCR format change
-            carries a link to open an issue.
+            configuration, or a 5xx from the exporter's own endpoint other
+            than the readiness gate's startup/shutdown 503. Read `docker logs
+            registry-stats` for the message; a GHCR format change carries a
+            link to open an issue.
       # The WARN lines that mean "this cycle exported an incomplete set of image
       # or tag series" while the app's health verdict stays healthy, so
       # registrystats_collect_errors_total never moves and every PromQL rule in

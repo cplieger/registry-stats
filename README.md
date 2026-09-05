@@ -16,7 +16,7 @@ Track how many times your container images are pulled, with a ready-made Grafana
 When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded, but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
 
 - **Prometheus metrics** (`/metrics`): pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
-- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to discover public repos on each poll. Docker Hub wildcards collect up to 198 repositories per owner: its unauthenticated API refuses offsets of 100 or more, so Registry Stats reads two pages of 99. Each poll logs the collected and advertised counts.
+- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to discover public repos on each poll. Docker Hub wildcards collect up to 198 repositories per owner: its unauthenticated API refuses offsets of 100 or more, so Registry Stats reads two pages of 99. GHCR wildcards read up to ten listing pages, about 300 packages as GitHub currently paginates them; reaching that cap logs a truncation warning. Each poll logs the collected and advertised counts.
 
 ### Why this design
 
@@ -66,7 +66,7 @@ services:
 | Variable | Description | Default | Required |
 | --- | --- | --- | --- |
 | `DOCKERHUB_REPOS` | Comma-separated Docker Hub repositories. Use `owner/repo` for one repo or `owner/*` for up to 198 public repos per owner; the unauthenticated API serves two pages of 99 before it refuses offset 100 | _(unset)_ | No |
-| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
+| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages, up to ten listing pages (about 300 packages as GitHub currently paginates). A listing longer than that logs a truncation warning and collects the pages it read. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
 | `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
 | `LISTEN_ADDR` | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port | `:9100` | No |
@@ -128,10 +128,10 @@ five rules, evaluated with Prometheus or the Mimir ruler over the `/metrics`
 endpoint you already scrape (see [Grafana integration](#grafana-integration)).
 [`alerts/logql.yaml`](alerts/logql.yaml) holds three, evaluated with Loki's
 ruler over the container log, because their conditions leave no series to read:
-a repo ref rejected at parse time is never polled, and a cycle that loses a
-minority of its repos still reports healthy, so the exported counts go quietly
-incomplete while no metric moves. Load each half into its own ruler: neither
-ruler parses the other's expressions.
+a repo ref rejected at parse time is never polled, and a cycle where only a
+minority of per-image fetches fail still reports healthy. The exported counts
+go quietly incomplete while no metric moves. Load each half into its own
+ruler: neither ruler parses the other's expressions.
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
@@ -140,8 +140,8 @@ ruler parses the other's expressions.
 | `RegistryStatsCollectStalled` | no collect cycle has completed in 3h, while the exporter is up and serving its last values | warning |
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
-| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, no entry was usable at all, or every ref resolved to nothing | warning |
-| `RegistryStatsError` | the container logged an `ERROR`: a fetch or parse failure or a changed GHCR page | warning |
+| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, or none was usable at all, or `POLL_INTERVAL_HOURS` was corrected: malformed, negative, or above the 8,760-hour cap | warning |
+| `RegistryStatsError` | the container logged an `ERROR` - a fetch or parse failure, a changed GHCR page, an unusable configuration, or a 5xx from its own endpoint other than the readiness gate's startup 503 | warning |
 | `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
 
 `RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,
@@ -151,11 +151,12 @@ fires about 30m after every container start. Set the `for:` window to about
 three `POLL_INTERVAL_HOURS`, and drop the rule in one-shot mode
 (`POLL_INTERVAL_HOURS=0`), where a single cycle is the point.
 
-`RegistryStatsCollectionIncomplete` is the counterpart to
-`RegistryStatsSourceDegraded` on the axis the counters cannot reach. A cycle
-counts as healthy while most repos succeed, so a rate limit, a truncated owner
-listing, or refused GHCR package names can take images off `/metrics` without
-moving `registrystats_collect_errors_total`. Keep `LOG_LEVEL` at its `info`
+`RegistryStatsCollectionIncomplete` covers incomplete output that the source
+health counters do not always expose. Source health compares successful
+per-image fetches with fetch attempts; owner-listing rows are outside both
+counts. Listing results cannot hide explicit fetch failures, but a truncated
+listing can still remove images without moving
+`registrystats_collect_errors_total` by itself. Keep `LOG_LEVEL` at its `info`
 default for that rule and for `RegistryStatsConfigRejected`'s every-cycle
 members: they key on `WARN` lines. `RegistryStatsConfigRejected` still catches
 a bad ref at any level, because config-parse warnings are emitted before the

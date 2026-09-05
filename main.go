@@ -32,9 +32,6 @@ import (
 // warnValueBytes bounds raw warning attributes while preserving enough input for diagnosis.
 const warnValueBytes = 128
 
-// pub serializes publishing a cycle's outcome against shutdown clearing it.
-var pub sync.Mutex
-
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -103,10 +100,15 @@ func run() error {
 	sources := []collectpkg.Source{dh, gh}
 
 	m.MintCollectSources(configuredSources(&cfg, sources))
+	// Healthy before the first cycle: a first collect over two live
+	// registries can outlast the image's 15s HEALTHCHECK start-period, and
+	// runCollect's per-cycle Set(ok) cannot cover the window before a
+	// cycle has finished.
 	marker.Set(true)
 
+	pub := &publication{marker: marker, m: m, ready: &ready}
 	collect := func(ctx context.Context) {
-		runCollect(ctx, &cfg, sources, m, marker, &ready)
+		runCollect(ctx, &cfg, sources, pub)
 	}
 
 	var bg sync.WaitGroup
@@ -125,9 +127,7 @@ func run() error {
 
 	preDrain := func(context.Context) {
 		slog.Info("shutting down", "cause", context.Cause(ctx))
-		pub.Lock()
-		defer pub.Unlock()
-		ready.Set(false)
+		pub.drain()
 	}
 
 	// Start this waiter before teardown so AwaitDone can observe a completed cycle.
@@ -166,39 +166,46 @@ func logWarnings(warns []config.Warning) {
 	}
 }
 
+// publication serializes cycle publication against shutdown clearing readiness.
+type publication struct {
+	marker healthSignal
+	m      *obs.Metrics
+	ready  *webhttp.Ready
+	mu     sync.Mutex
+}
+
+func (p *publication) publish(ctx context.Context, images []obs.ImageMetric) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// SetImage deletes labels absent from a pass, so a cancelled cycle publishes nothing.
+	if ctx.Err() != nil {
+		return
+	}
+	p.m.SetImage(images)
+	ok := len(images) > 0
+	p.marker.Set(ok)
+	if ok {
+		p.ready.Set(true)
+	}
+}
+
+func (p *publication) drain() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ready.Set(false)
+}
+
 // runCollect executes one cycle and publishes its outcome.
-func runCollect(
-	ctx context.Context,
-	cfg *config.Config,
-	sources []collectpkg.Source,
-	m *obs.Metrics,
-	marker healthSignal,
-	ready *webhttp.Ready,
-) {
+func runCollect(ctx context.Context, cfg *config.Config, sources []collectpkg.Source, pub *publication) {
 	start := time.Now()
 	images := collectpkg.Run(ctx, collectpkg.Options{
-		Metrics: m,
+		Metrics: pub.m,
 		Sources: sources,
 		Logger:  slog.Default(),
 		RefsFor: func(source registry.ID) []registry.RepoRef { return refsFor(cfg, source) },
 	})
-	m.ObserveCollectDuration(time.Since(start))
-
-	pub.Lock()
-	defer pub.Unlock()
-	// This gate withholds the label set and both health signals: SetImage deletes
-	// every label key absent from this pass, readiness is preDrain's once shutdown
-	// starts, and the marker's removal is Cleanup's. The duration sample above it is
-	// deliberately not withheld — a truncated cycle still spent that wall time.
-	if ctx.Err() != nil {
-		return
-	}
-	m.SetImage(images)
-	ok := len(images) > 0
-	marker.Set(ok)
-	if ok {
-		ready.Set(true)
-	}
+	pub.m.ObserveCollectDuration(time.Since(start))
+	pub.publish(ctx, images)
 }
 
 func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {

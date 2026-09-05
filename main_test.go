@@ -30,11 +30,11 @@ type mainFakeSource struct {
 
 func (f *mainFakeSource) Source() registry.ID { return f.src }
 
-func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, bool) {
+func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, int, bool) {
 	if f.onCollect != nil {
 		f.onCollect()
 	}
-	return f.entries, len(f.entries), f.listingFailed
+	return f.entries, len(f.entries), len(f.entries), f.listingFailed
 }
 
 func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
@@ -93,7 +93,7 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
 	marker := &mainFakeMarker{}
-	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, obs.New(), marker, &webhttp.Ready{})
+	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, &publication{marker: marker, m: obs.New(), ready: &webhttp.Ready{}})
 	if !marker.Healthy() {
 		t.Error("runCollect partial success left marker unhealthy, want healthy")
 	}
@@ -111,8 +111,9 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	m := obs.New()
 	marker := &mainFakeMarker{}
 	ready := &webhttp.Ready{}
+	pub := &publication{marker: marker, m: m, ready: ready}
 
-	runCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
+	runCollect(t.Context(), cfg, []collect.Source{source}, pub)
 	if !marker.Healthy() {
 		t.Error("runCollect first cycle left marker unhealthy, want healthy")
 	}
@@ -122,7 +123,7 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 
 	source.entries = nil
 	source.listingFailed = true
-	runCollect(t.Context(), cfg, []collect.Source{source}, m, marker, ready)
+	runCollect(t.Context(), cfg, []collect.Source{source}, pub)
 
 	if marker.Healthy() {
 		t.Error("runCollect failed cycle left marker healthy, want unhealthy")
@@ -152,7 +153,7 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 	marker := &mainFakeMarker{}
 	ready := &webhttp.Ready{}
 
-	runCollect(ctx, cfg, []collect.Source{source}, m, marker, ready)
+	runCollect(ctx, cfg, []collect.Source{source}, &publication{marker: marker, m: m, ready: ready})
 
 	if marker.Healthy() {
 		t.Error("cancelled cycle set the marker healthy, want untouched")
@@ -187,7 +188,7 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	}
 	m := obs.New()
 	marker := &mainFakeMarker{}
-	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, m, marker, &webhttp.Ready{})
+	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, &publication{marker: marker, m: m, ready: &webhttp.Ready{}})
 	if !marker.Healthy() {
 		t.Error("runCollect image publication left marker unhealthy, want healthy")
 	}
@@ -228,9 +229,9 @@ func (m *mainBlockingMarker) Set(bool) {
 }
 
 // TestRunCollect_holdsPubAcrossPublication pins the serialization
-// preDrain depends on: a cycle publishes its outcome under pub, so the
-// shutdown readiness clear cannot land between the cycle's context
-// check and ready.Set(true) and be overwritten by it.
+// preDrain depends on: a cycle publishes its outcome under the publication
+// lock, so the shutdown readiness clear cannot land between the cycle's
+// context check and ready.Set(true) and be overwritten by it.
 func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 	source := &mainFakeSource{
 		src:     registry.DockerHub,
@@ -243,16 +244,17 @@ func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 		release: make(chan struct{}),
 	}
 
+	pub := &publication{marker: marker, m: obs.New(), ready: ready}
 	done := make(chan struct{})
 	go func() {
-		runCollect(t.Context(), cfg, []collect.Source{source}, obs.New(), marker, ready)
+		runCollect(t.Context(), cfg, []collect.Source{source}, pub)
 		close(done)
 	}()
 	<-marker.entered
 
-	if pub.TryLock() {
-		pub.Unlock()
-		t.Error("runCollect published without holding pub; a shutdown readiness clear can interleave")
+	if pub.mu.TryLock() {
+		pub.mu.Unlock()
+		t.Error("runCollect published without holding its publication lock; a shutdown readiness clear can interleave")
 	}
 
 	close(marker.release)
@@ -311,7 +313,7 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
 	}
 
-	runCollect(t.Context(), cfg, sources, m, &mainFakeMarker{}, &webhttp.Ready{})
+	runCollect(t.Context(), cfg, sources, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
 	w = httptest.NewRecorder()
 	m.Handler()(w, r)
 	body = w.Body.String()
