@@ -48,7 +48,7 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">nested name</a>`, "owner")
 	f.Add(`<a href="/users/owner/packages/container/package/..%2f..%2f">traversal</a>`, "owner")
 	f.Fuzz(func(t *testing.T, html, owner string) {
-		pkgs, refused := parsePackageList(html, owner, userOwner)
+		pkgs, refused, _ := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
 			canonical, err := urlsafe.PackageName(owner, url.PathEscape(name))
 			if err != nil || canonical != name {

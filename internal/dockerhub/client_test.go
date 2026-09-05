@@ -497,3 +497,25 @@ func TestClient_Collect_WildcardListingError_LogsWarn(t *testing.T) {
 		}
 	})
 }
+
+func TestClient_Collect_EmptyWildcardLogsError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/owner/", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "results": []any{}, "next": ""})
+	})
+	srv := httptest.NewTestServer(t, mux)
+
+	logger, buf := captureLogger()
+	c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+
+	if listingFailed || len(entries) != 0 || attempted != 0 {
+		t.Errorf("Collect() empty wildcard = (%d entries, attempted=%d, listingFailed=%v), want (0, 0, false)", len(entries), attempted, listingFailed)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "level=ERROR") ||
+		!strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
+		!strings.Contains(logs, "owner=owner") || !strings.Contains(logs, "repos=0") {
+		t.Errorf("Collect() empty wildcard did not emit the alert-reaching ERROR record; logs:\n%s", logs)
+	}
+}

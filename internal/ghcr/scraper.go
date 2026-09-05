@@ -16,9 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -51,11 +51,9 @@ const maxListingCandidates = 100
 // cycle reads.
 const maxListingPages = 10
 
-// lastPageMarker is GitHub's own positive end-of-listing signal. Only its
-// PRESENCE stops the loop: it distinguishes a listing that ends at
-// maxListingPages from one truncated there, while a renamed class degrades to
-// one extra fetch and a clean stop instead of silent truncation.
-const lastPageMarker = "next_page disabled"
+// advertisedPagesAttr is the only value that can prove the walk read every
+// page GitHub says exists. It is absent for a single-page listing.
+const advertisedPagesAttr = "data-total-pages"
 
 // maxRefusalSampleBytes bounds both the retained page slice and the sanitized
 // log attribute. Both caps are needed because invalid UTF-8 expands when
@@ -93,8 +91,8 @@ func linkPrefix(kind ownerKind, owner string) string {
 }
 
 // fetchHTML fetches a GitHub HTML page, spacing requests by c.pacingDelay
-// after the first of the cycle. httpx retries 429, 5xx and transient transport
-// errors per c.opts.RetryOpts; other non-2xx statuses fail fast. The
+// after the first of the cycle. httpx retries 408, 429, 5xx and transient
+// transport errors per c.opts.RetryOpts; other non-2xx statuses fail fast. The
 // appended browser headers (anonymous GHCR pages gate on User-Agent) and
 // ghcrBodyCap always win, because options are applied left to right.
 func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (string, error) {
@@ -104,9 +102,11 @@ func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (strin
 
 	// Fresh slice so c.opts.RetryOpts, reused across every request, is
 	// never mutated by the append.
-	htmlOpts := make([]httpx.GetOption, 0, len(c.opts.RetryOpts)+2)
+	htmlOpts := make([]httpx.GetOption, 0, len(c.opts.RetryOpts)+4)
 	htmlOpts = append(htmlOpts, c.opts.RetryOpts...)
 	htmlOpts = append(htmlOpts,
+		httpx.WithLogger(c.opts.Logger),
+		httpx.WithExhaustedLevel(slog.LevelDebug),
 		httpx.WithHeaders(func(req *http.Request) {
 			req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
 			req.Header.Set("Accept", "text/html")
@@ -126,7 +126,7 @@ func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (strin
 }
 
 // refusals summarises listing candidates whose name urlsafe.PackageName
-// rejects. Sample is the first such candidate, bounded by
+// rejects. Sample is one such candidate if any carried bytes, bounded by
 // maxRefusalSampleBytes and detached from the listing page.
 type refusals struct {
 	Sample string
@@ -153,10 +153,9 @@ func (r refusals) refuse(candidate string) refusals {
 }
 
 // scrapePackageList reads one owner's packages listing and returns the
-// package names in listing order plus the candidates it could not use. A
-// first-page failure, and a first page with no package links, yield no
-// names and an error; a later page's failure returns the names collected
-// so far alongside it.
+// package names in listing order plus the candidates it could not use. An
+// error is returned when neither account form yields names; a later-page
+// failure returns names already collected alongside the error.
 func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) ([]string, refusals, error) {
 	names, refused, err := c.readListing(ctx, p, owner, userOwner)
 	if len(names) > 0 {
@@ -164,19 +163,23 @@ func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) 
 	}
 
 	// A user-form read that produced no names settles nothing about the
-	// account kind, and one that failed settles less, so the org form is asked
-	// either way: a 404 there proves the owner is a user account, and only
-	// then are the user form's zero links the answer emptyListingError reports.
+	// account kind, and one that failed settles less, so the org form is
+	// asked either way. Two org-form answers make the user form's zero links
+	// the final word: a 404, which proves the owner is a user account, and a
+	// clean read with no links, which is an organization publishing nothing.
+	// emptyListingError names both causes because neither is distinguishable
+	// from changed listing markup.
 	orgNames, orgRefused, orgErr := c.readListing(ctx, p, owner, orgOwner)
+	refused = refused.merge(orgRefused)
 	switch {
 	case len(orgNames) > 0:
-		return orgNames, refused.merge(orgRefused), orgErr
+		return orgNames, refused, orgErr
 	case err != nil:
-		return nil, refused.merge(orgRefused), err
+		return nil, refused, err
 	case orgErr == nil || isNotFound(orgErr):
-		return nil, orgRefused, emptyListingError(owner)
+		return nil, refused, emptyListingError(owner)
 	default:
-		return nil, orgRefused, orgErr
+		return nil, refused, orgErr
 	}
 }
 
@@ -193,16 +196,17 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 }
 
 // readListing walks one owner's listing in kind's URL form from page 1 up
-// to the cap. A later page with no package link ends the listing; one that
-// carries links but adds no new name has stopped advancing and is partial, as is
-// one with refusals. A page that fails is a partial listing, returned with the
-// names already collected. Exhausting the cap while names still arrive is a
-// truncated listing. Both states WARN, unless the cycle's own cancellation
-// caused the failure, because alerts/logql.yaml keys on their message text.
+// to the cap. An advertised page count stops the walk after every page GitHub
+// says exists; without one, a later page with no package link ends the listing.
+// Refused candidates make a page partial only if it adds no usable name; mixed
+// pages continue and return the refusal summary for caller reporting. Other
+// early stops return names already collected. A non-cancelled partial warns
+// after collecting names; reaching the cap always warns.
 func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
-		names   []string
-		refused refusals
+		names      []string
+		refused    refusals
+		advertised int
 	)
 	seen := make(map[string]bool)
 	for page := 1; page <= maxListingPages; page++ {
@@ -210,7 +214,7 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		pageNames, pageRefused := parsePackageList(html, owner, kind)
+		pageNames, pageRefused, pageTotal := parsePackageList(html, owner, kind)
 		candidates := len(pageNames) + pageRefused.Count
 		refused = refused.merge(pageRefused)
 		if candidates > maxListingCandidates {
@@ -219,6 +223,12 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		}
 		kept, added := appendUnseenNames(names, seen, pageNames)
 		names = kept
+		if advertised == 0 {
+			advertised = pageTotal
+		} else if pageTotal != advertised {
+			return c.partialListing(ctx, owner, page, names, refused,
+				fmt.Errorf("%w: listing page %d advertises %d pages against %d earlier", errHTMLFormatChanged, page, pageTotal, advertised))
+		}
 		if added == 0 {
 			if pageRefused.Count > 0 {
 				return c.partialListing(ctx, owner, page, names, refused,
@@ -228,14 +238,18 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 				return c.partialListing(ctx, owner, page, names, refused,
 					fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames)))
 			}
+			if page < advertised {
+				return c.partialListing(ctx, owner, page, names, refused,
+					fmt.Errorf("%w: listing page %d of the %d advertised served no package names", errHTMLFormatChanged, page, advertised))
+			}
 			return names, refused, nil
 		}
-		if lastPageMarkerPresent(html) {
+		if page == advertised {
 			return names, refused, nil
 		}
 	}
-	c.opts.Logger.Warn("ghcr owner listing hit page cap; results may be truncated",
-		"owner", owner, "max_pages", maxListingPages)
+	c.opts.Logger.Warn("ghcr owner listing hit page cap; results truncated",
+		"owner", owner, "max_pages", maxListingPages, "advertised_pages", advertised)
 	return names, refused, nil
 }
 
@@ -272,11 +286,10 @@ func isNotFound(err error) bool {
 }
 
 // markupTagEnd treats ANY quote as opening an attribute value, not only one
-// that follows '='. Deliberate: a quote desync has two arms with opposite
-// costs, and this one loses just the unreadable tag itself (pinned by
-// TestParsePackageList_UnreadableTagDoesNotEndTheWalk), where requiring '='
-// first would let an unterminated quote swallow every tag after it. GitHub
-// serves no unquoted attribute value containing a quote.
+// that follows '='. Deliberate: a stray quote that never re-closes costs only
+// its own tag; one that finds a partner makes the walk skip every start tag
+// through the next '>' after that partner. GitHub serves no unquoted attribute
+// value containing a quote.
 func markupTagEnd(html string, start int) (int, bool) {
 	var quote byte
 	for i := start + 1; i < len(html); i++ {
@@ -330,8 +343,9 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 	if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
 		return "", "", 0, false
 	}
-	// An attribute name must start at a tag or attribute boundary; the tail
-	// check below enforces this for every pair after the first.
+	// An attribute name must start at a boundary: the byte before it is the
+	// '<' that opens the tag, or whitespace. A name that begins after any
+	// other byte, a stray '<' inside the tag included, refuses the tag.
 	if before := eq - len(name) - 1; before < 0 ||
 		(tag[before] != '<' && !strings.ContainsRune(htmlWhitespace, rune(tag[before]))) {
 		return "", "", 0, false
@@ -348,16 +362,6 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 		return "", "", 0, false
 	}
 	return name, value, next, true
-}
-
-func containsMarkerFields(value string) bool {
-	fields := strings.Fields(value)
-	for marker := range strings.FieldsSeq(lastPageMarker) {
-		if !slices.Contains(fields, marker) {
-			return false
-		}
-	}
-	return true
 }
 
 // startsTagName reports whether b is the ASCII letter that opens a start tag.
@@ -383,11 +387,11 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, ok bool)
 		if end := strings.Index(rest, "-->"); end >= 0 {
 			return "", open + len("<!--") + end + len("-->"), false, true
 		}
-		return "", open + 1, false, true
 	}
 	// Only a start tag's attribute values can carry a '>', so only a start tag's
 	// end may be found by tracking quotes. Anything else — an end tag, a
-	// processing instruction, a '<' in page text — advances one byte.
+	// processing instruction, an unterminated comment, a '<' in page text —
+	// advances one byte.
 	if open+1 >= len(html) || !startsTagName(html[open+1]) {
 		return "", open + 1, false, true
 	}
@@ -398,9 +402,10 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, ok bool)
 	return html[open:tagEnd], tagEnd + 1, true, true
 }
 
-// startTags yields each start tag's text, from its '<' through the byte before
-// its closing '>'. End tags, processing instructions, and terminated comments
-// are skipped. Only quoted attribute values on a start tag move its end.
+// startTags yields each span that begins at a '<' followed by an ASCII letter and
+// ends at the first '>' outside a quoted attribute value. End tags, processing
+// instructions, and terminated comments are skipped. A raw-text element body
+// (script, style, textarea, title) is walked as ordinary markup, including tag-shaped bytes.
 func startTags(html string) iter.Seq[string] {
 	return func(yield func(string) bool) {
 		for cursor := 0; cursor < len(html); {
@@ -439,41 +444,27 @@ func tagAttributes(tag string) iter.Seq2[string, string] {
 	}
 }
 
-// tagHasMarkerClass reports whether one start tag's class attribute carries
-// every token in lastPageMarker.
-func tagHasMarkerClass(tag string) bool {
-	for name, value := range tagAttributes(tag) {
-		if strings.EqualFold(name, "class") && containsMarkerFields(value) {
-			return true
-		}
-	}
-	return false
-}
-
-// lastPageMarkerPresent reports whether a start tag's class token list carries
-// every token in lastPageMarker. Text and unrelated attributes cannot answer it.
-func lastPageMarkerPresent(html string) bool {
-	for tag := range startTags(html) {
-		if tagHasMarkerClass(tag) {
-			return true
-		}
-	}
-	return false
-}
-
-// parsePackageList extracts package names from one page of an owner's
-// packages listing. A name is taken only from the value of a real href
-// attribute on a start tag, so page text, a terminated comment body, and an
-// unrelated attribute containing the link bytes are not candidates. An unterminated
-// comment body is still walked. The registered owner casing is response data,
-// so the prefix is matched without transforming untrusted HTML. Zero names is
-// not an error here: what it means depends on the page number, which only the caller knows.
-func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
+// parsePackageList extracts package names and the advertised page total from
+// one owner's listing page; zero means the attribute was absent or unusable.
+// A name comes only from a real href attribute on a start tag, so page text,
+// terminated comments, and unrelated attributes are not candidates. An
+// unterminated comment body is still walked. Registered owner casing is
+// response data, so the prefix is matched without transforming untrusted HTML.
+// Zero names is not an error here because its meaning depends on the page
+// number, which only the caller knows.
+func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals, int) {
 	prefix := linkPrefix(kind, owner)
 	var names []string
 	var refused refusals
+	advertised := 0
 	for tag := range startTags(html) {
 		for name, value := range tagAttributes(tag) {
+			if strings.EqualFold(name, advertisedPagesAttr) {
+				if pages, err := strconv.Atoi(strings.Trim(value, htmlWhitespace)); err == nil && pages > 0 {
+					advertised = pages
+				}
+				continue
+			}
 			if !strings.EqualFold(name, "href") || len(value) < len(prefix) ||
 				!strings.EqualFold(value[:len(prefix)], prefix) {
 				continue
@@ -487,7 +478,7 @@ func parsePackageList(html, owner string, kind ownerKind) ([]string, refusals) {
 			names = append(names, strings.Clone(pkg))
 		}
 	}
-	return names, refused
+	return names, refused, advertised
 }
 
 // scrapeDownloads fetches a single package page and returns its total
@@ -556,12 +547,12 @@ func parseDownloads(html string) (int64, error) {
 }
 
 // markerText returns the first plausible "Total downloads" occurrence and
-// the number found. A plausible occurrence is bounded on both sides the way
-// element text is: the previous non-whitespace byte closes a start tag and the
-// next ones begin the element's closing tag. Nothing tracks markup context, so a
-// comment or script body shaped that way is counted too; parseDownloads' refusal
-// of any count but one, and of anything but an <h3 title>, is what stops it being
-// read as the count.
+// the number found. A plausible occurrence is bounded like element text: the
+// previous non-whitespace byte closes a start tag and the next bytes begin an
+// element's closing tag. It does not track markup context, so a comment or
+// script body with that shape counts too. If the real marker is also present,
+// parseDownloads rejects the duplicate; if the false shape is the only one,
+// its count is read, a shape GitHub does not serve.
 func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
 	for at := 0; ; {
@@ -591,8 +582,10 @@ func markerText(html string) (idx, n int) {
 // for is worse than no count, and the caller reports the refusal as format
 // drift.
 func titleAttribute(tag string) (string, bool) {
-	var title string
-	found := false
+	var (
+		title string
+		found bool
+	)
 	for cursor := len("<h3"); ; {
 		name, value, next, ok := readAttribute(tag, cursor)
 		if !ok {
@@ -637,7 +630,8 @@ func (c *Client) expandWildcard(
 			// Shutdown/deadline cancelled the listing scrape; expected, not a
 			// failure. Logging it at ERROR would fire a false alert on the
 			// level=error stream on every SIGTERM landing mid-listing.
-			c.opts.Logger.Debug("ghcr package listing cancelled", "owner", ref.Owner, "error", err)
+			c.opts.Logger.Debug("ghcr package listing cancelled", "owner", ref.Owner,
+				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			return out, false
 		}
 		listingWhollyFailed = len(names) == 0

@@ -7,8 +7,9 @@
 # scrape `job` label is yours; the examples assume job="registry-stats".
 #
 # Three further conditions leave no series to key on, so they are LogQL and live
-# in alerts/logql.yaml: a collect cycle that loses images still returns a healthy
-# verdict, and every condition that leaves no series still leaves a log line.
+# in alerts/logql.yaml. A source counter advances when a wildcard owner listing
+# wholly fails or more than half of its per-image fetch attempts fail. Docker Hub
+# rows counted from an owner listing are neither attempts nor successful fetches.
 #
 # Load each half into its own ruler: neither ruler parses the other's
 # expressions. Firing alerts from both deliver through your Alertmanager like
@@ -82,12 +83,12 @@ groups:
             the counter has no series then, so RegistryStatsConfigRejected
             owns that case.
       # The app's own per-source verdict. registry-stats increments
-      # collect_errors_total once for a cycle in which that source failed a
-      # MAJORITY of its repos, or lost an owner listing outright, so one
-      # increment means EITHER most of that registry's repos failed or one
-      # wildcard owner's listing was lost outright - the log says which, and
-      # how many owners. A minority failure deliberately does not move this
-      # counter, which is what RegistryStatsCollectionIncomplete covers.
+      # collect_errors_total once for a cycle in which a wildcard owner listing
+      # wholly fails or more than half of the source's per-image fetch attempts
+      # fail. Docker Hub rows whose counts come from an owner listing count on
+      # neither side of that fetch-attempt ratio. A minority of per-image fetch
+      # failures deliberately does not move this counter, which is what
+      # RegistryStatsCollectionIncomplete covers.
       #
       # Both per-source counters are pre-minted at zero for every configured
       # source at process start, so increase() has an earlier sample to
@@ -103,13 +104,15 @@ groups:
           summary: "registry-stats collection failing for {{ $labels.source }}"
           description: >
             registrystats_collect_errors_total advanced for this source: a
-            collect cycle either failed for most of its repos or lost a
-            wildcard owner listing outright. Whichever it was, those repos stop
-            appearing on /metrics until a later cycle succeeds - the other
-            configured owners are unaffected and their series keep updating, so
-            read the log for the owner rather than assuming the whole registry.
-            Check `docker logs registry-stats` for the per-repo reason: a rate
-            limit, an HTTP failure, or a page-format change.
+            wildcard owner listing wholly failed, or more than half of the
+            source's per-image fetch attempts failed. Docker Hub rows whose
+            counts come from an owner listing count on neither side of that
+            fetch-attempt ratio. The affected repos stop appearing on /metrics
+            until a later cycle succeeds. Other configured owners are
+            unaffected and their series keep updating, so read the log for the
+            owner instead of assuming the whole registry failed. Check `docker
+            logs registry-stats` for the per-repo reason: a rate limit, an HTTP
+            failure, or a page-format change.
       # registrystats_image_pulls_total is exported as a GAUGE despite the
       # `_total` suffix, so range queries on it use `delta()` (as
       # grafana-dashboard.json:214 does) and never `rate()`/`increase()`, whose

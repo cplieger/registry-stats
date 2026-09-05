@@ -2,6 +2,7 @@ package urlsafe
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -122,6 +123,43 @@ func FuzzIsSafeURLSegment(f *testing.F) {
 			if !allowed {
 				t.Errorf("IsSafeURLSegment(%q) = true, but it contains disallowed byte %q", s, b)
 			}
+		}
+	})
+}
+
+func FuzzPackageName_decodesBeforeValidatingElements(f *testing.F) {
+	f.Add("owner", "helm-charts%2Fgrafana-operator")
+	f.Add("owner", "%2E%2E")
+	f.Add("owner", "app%252Fversions")
+	f.Add("owner", "app/versions")
+	f.Add("owner", "%zz")
+	f.Add("owner", strings.Repeat("a", MaxSegmentBytes-len("owner/")))
+	f.Add("owner", strings.Repeat("a", MaxSegmentBytes-len("owner/")+1))
+
+	f.Fuzz(func(t *testing.T, owner, token string) {
+		decoded, decodeErr := url.PathUnescape(token)
+		wantOK := !strings.Contains(token, "/") && decodeErr == nil && len(owner)+1+len(decoded) <= MaxSegmentBytes
+		if wantOK {
+			for part := range strings.SplitSeq(decoded, "/") {
+				if !IsSafeURLSegment(part) {
+					wantOK = false
+					break
+				}
+			}
+		}
+
+		got, err := PackageName(owner, token)
+		if (err == nil) != wantOK {
+			t.Fatalf("PackageName(%q, %q) = (%q, %v), accepted = %v", owner, token, got, err, wantOK)
+		}
+		if err != nil {
+			if got != "" {
+				t.Fatalf("PackageName(%q, %q) returned name %q with error %v, want empty name", owner, token, got, err)
+			}
+			return
+		}
+		if got != decoded {
+			t.Fatalf("PackageName(%q, %q) = %q, want decoded name %q", owner, token, got, decoded)
 		}
 	})
 }

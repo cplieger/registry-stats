@@ -3,13 +3,14 @@
 # RegistryStatsCollectionIncomplete) read the container's log stream, because
 # their conditions have no series to key on. A repo ref rejected at parse time
 # is never polled, so it produces no metric of any kind, and with both repo
-# lists empty registrystats_collects_total has no series either. A cycle that
-# loses a minority of its repos to a rate limit, a truncated owner listing or a
-# changed page keeps the healthy verdict, so registrystats_collect_errors_total
-# never moves while the exported counts go quietly incomplete. Ship the
-# container's logs to Loki (Grafana Alloy's Docker log discovery does this with
-# no configuration) and evaluate them with Loki's ruler. The selector label is
-# `container`; use `job` or `service` if your collector keys on those instead.
+# lists empty registrystats_collects_total has no series either. A source counter
+# advances when a wildcard owner listing wholly fails or more than half of its
+# per-image fetch attempts fail. Docker Hub rows whose counts come from an owner
+# listing count on neither side of that ratio, so incomplete output can leave
+# registrystats_collect_errors_total unchanged. Ship the container's logs to Loki
+# (Grafana Alloy's Docker log discovery does this with no configuration) and
+# evaluate them with Loki's ruler. The selector label is `container`; use `job`
+# or `service` if your collector keys on those instead.
 #
 # Five further rules read series from /metrics and are PromQL, so they live in
 # alerts/promql.yaml.

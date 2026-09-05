@@ -2,7 +2,10 @@ package dockerhub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +13,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/slogx/capture"
 )
 
 // shortRetry returns httpx options with a 1 ms base delay so retry tests
@@ -300,5 +305,132 @@ func TestParseRepoListPage_dropsUnsafeName(t *testing.T) {
 	}
 	if repos[0].Owner != "owner" || repos[0].Repo != "good" || repos[0].Pulls != 2 {
 		t.Errorf("repos[0] = %+v, want owner/good with 2 pulls", repos[0])
+	}
+}
+
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
+	hostile := "\n\x00\u202e" + string([]byte{0xff}) + strings.Repeat("x", 300)
+	retryOpts := []httpx.GetOption{httpx.WithMaxAttempts(1)}
+	wildcard := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
+	explicit := []registry.RepoRef{{Owner: "owner", Repo: "repo"}}
+
+	tests := []struct {
+		name string
+		msg  string
+		run  func(*testing.T, *slog.Logger)
+	}{
+		{
+			name: "wholly_failed_listing",
+			msg:  "docker hub listing wholly failed",
+			run: func(t *testing.T, logger *slog.Logger) {
+				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errors.New(hostile)
+				})}
+				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), wildcard)
+			},
+		},
+		{
+			name: "partially_failed_listing",
+			msg:  "docker hub listing partially failed",
+			run: func(t *testing.T, logger *slog.Logger) {
+				requests := 0
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if requests == 1 {
+						body := `{"count":1,"results":[{"name":"repo","pull_count":1}],"next":"page2"}`
+						return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+					}
+					return nil, errors.New(hostile)
+				})}
+				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), wildcard)
+			},
+		},
+		{
+			name: "cancelled_fetch",
+			msg:  "docker hub fetch cancelled",
+			run: func(t *testing.T, logger *slog.Logger) {
+				ctx, cancel := context.WithCancel(t.Context())
+				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					cancel()
+					return nil, errors.New(hostile)
+				})}
+				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(ctx, explicit)
+			},
+		},
+		{
+			name: "failed_fetch",
+			msg:  "docker hub fetch failed",
+			run: func(t *testing.T, logger *slog.Logger) {
+				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errors.New(hostile)
+				})}
+				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), explicit)
+			},
+		},
+		{
+			name: "failed_parse",
+			msg:  "docker hub parse failed",
+			run: func(t *testing.T, logger *slog.Logger) {
+				key := strings.Repeat("x", 400)
+				body := `{"` + key + `":1,"` + key + `":2}`
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+				})}
+				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), explicit)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, rec := capture.New()
+			tt.run(t, logger)
+
+			got, ok := rec.AttrValueExact(tt.msg, "error")
+			if !ok {
+				t.Fatalf("Collect() log %q has no error attribute", tt.msg)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("Collect() log %q error = %q, want valid UTF-8", tt.msg, got)
+			}
+			if len(got) > 259 || (len(got) > 256 && !strings.HasSuffix(got, "...")) {
+				t.Errorf("Collect() log %q error length = %d, want at most 256 content bytes plus a truncation marker", tt.msg, len(got))
+			}
+			if strings.ContainsAny(got, "\n\r\x00") || strings.ContainsRune(got, '\u202e') {
+				t.Errorf("Collect() log %q error = %q, want no planted control or bidi runes", tt.msg, got)
+			}
+		})
+	}
+}
+
+func TestClient_Collect_InternalBodyCapOverridesCaller(t *testing.T) {
+	body := `{"count":0,"results":[],"next":"","padding":"` + strings.Repeat("x", 1<<20) + `"}`
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := NewClient(srv.Client(), Options{
+		Logger:    logger,
+		RetryOpts: []httpx.GetOption{httpx.WithMaxBodyBytes(2 << 20)},
+	})
+	entries, _, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+
+	if !listingFailed {
+		t.Error("Collect() listingFailed = false, want true for a body past the internal cap")
+	}
+	if len(entries) != 0 || attempted != 0 {
+		t.Errorf("Collect() past the internal body cap = (%d entries, attempted=%d), want (0, 0)", len(entries), attempted)
+	}
+	if !strings.Contains(buf.String(), "shape_change=true") {
+		t.Errorf("Collect() past the internal body cap did not classify a shape change; logs:\n%s", buf.String())
 	}
 }

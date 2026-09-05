@@ -65,7 +65,7 @@ services:
 
 | Variable | Description | Default | Required |
 | --- | --- | --- | --- |
-| `DOCKERHUB_REPOS` | Comma-separated Docker Hub repositories. Use `owner/repo` for one repo or `owner/*` for up to 198 public repos per owner; the unauthenticated API serves two pages of 99 before it refuses offset 100 | _(unset)_ | No |
+| `DOCKERHUB_REPOS` | Comma-separated Docker Hub repositories. Use `owner/repo` for one repo or `owner/*` for up to 198 public repos per owner; the unauthenticated API serves two pages of 99 before it refuses offset 100. Each `owner/repo` entry costs one request per cycle, issued back to back, while the unauthenticated API counts requests per client IP (it advertises 180 per minute in `x-ratelimit-limit`), so a list approaching that size can see per-repo failures that recover on the next cycle | _(unset)_ | No |
 | `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages, up to ten listing pages (about 300 packages as GitHub currently paginates). A listing longer than that logs a truncation warning and collects the pages it read. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
 | `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
 | `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
@@ -185,10 +185,10 @@ The HTTP client follows redirects only within a `docker.com` / `github.com` /
 misconfigured upstream cannot bounce the polling request to an arbitrary
 third-party host (the registries legitimately redirect to their own CDNs and
 blob stores). URL path segments built from registry data are validated
-against an `[A-Za-z0-9._-]` allowlist. Response bodies are capped at 10 MB
-for JSON and 2 MB for HTML; a GHCR page that exceeds the HTML cap is treated
-as a format-change signal, not silently truncated. The HTTP server sets all
-four timeouts, and `Retry-After` headers on 429/503 responses are honoured
+against an `[A-Za-z0-9._-]` allowlist. Response bodies are capped at
+1 MiB for the Docker Hub JSON API and 2 MiB for GHCR HTML; a response over
+its cap is treated as a format-change signal, not silently truncated. The
+HTTP server sets all four timeouts, and `Retry-After` headers on 429/503 responses are honoured
 up to the configured retry backoff ceiling.
 
 One accepted scanner finding: semgrep flags the use of `math/rand/v2`, which

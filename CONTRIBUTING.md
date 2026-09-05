@@ -12,11 +12,14 @@ schedule and exposes download-count metrics as Prometheus time series
 (`/metrics`) plus a health endpoint (`/api/health`) on port 9100. History is
 owned by the scraping backend (Mimir/Prometheus); the app itself is stateless.
 
-`main.go` is a **pure composition root**: it wires config → `*http.Client`
+`main.go` is the **composition root**: it wires config → `*http.Client`
 (with the `httpx` redirect policy) → `dockerhub.Client` + `ghcr.Client` →
 health marker → `webapi` server, then runs the signal-driven lifecycle. It
-contains no business logic, globals, or type aliases; everything testable
-lives under `internal/`.
+holds no globals or type aliases, and every registry-facing behaviour lives
+under `internal/`. It does own the lifecycle's own policy, which is what
+`main_test.go` covers: the health/readiness publication serialized against
+the shutdown drain, the configuration warnings emitted before `LOG_LEVEL`
+applies, the active-source pre-mint, and the startup diagnostics.
 
 Interfaces live at their consumers (there is no hub package): `collect.Source`
 is declared in `internal/collect`, the one seam its orchestrator drives, and

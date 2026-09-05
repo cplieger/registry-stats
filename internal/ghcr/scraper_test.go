@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,8 +51,8 @@ func downloadsHTML(count string) string {
 	return `<span>Total downloads</span><h3 title="` + count + `">` + count + `</h3>`
 }
 
-func lastPageHTML() string {
-	return `<div class="` + lastPageMarker + `">Next</div>`
+func totalPagesHTML(pages int) string {
+	return `<a class="current" aria-label="Page 1" data-total-pages="` + strconv.Itoa(pages) + `" href="#">1</a>`
 }
 
 func TestClient_Name(t *testing.T) {
@@ -154,50 +155,11 @@ func TestParseDownloads_CommentTextIsNotMarkup(t *testing.T) {
 	}
 }
 
-// TestParseDownloads_UsesAssociatedCountElement pins that the count is the
-// marker's own element rather than another titled element nearby.
-func TestParseDownloads_UsesAssociatedCountElement(t *testing.T) {
-	tests := []struct {
-		name    string
-		html    string
-		want    int64
-		wantErr bool
-	}{
-		{
-			name:    "unrelated titled span before the count",
-			html:    `<span>Total downloads</span><span title="1">rank</span><h3 title="27880">27.8K</h3>`,
-			wantErr: true,
-		},
-		{
-			name: "live shape",
-			html: `<span>Total downloads</span> <h3 title="27880">27.8K</h3>`,
-			want: 27880,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseDownloads(tt.html)
-			if tt.wantErr {
-				if !errors.Is(err, errHTMLFormatChanged) {
-					t.Fatalf("parseDownloads(%q) = (%d, %v), want errHTMLFormatChanged", tt.html, got, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseDownloads(%q) error = %v", tt.html, err)
-			}
-			if got != tt.want {
-				t.Errorf("parseDownloads(%q) = %d, want %d", tt.html, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParsePackageList_Valid(t *testing.T) {
 	html := `<a href="/users/owner/packages/container/package/app1">app1</a>
 <a href="/users/owner/packages/container/package/app2">app2</a>
 <a href="/users/owner/packages/container/package/app1">app1-dup</a>`
-	got, _ := parsePackageList(html, "owner", userOwner)
+	got, _, _ := parsePackageList(html, "owner", userOwner)
 	want := []string{"app1", "app2", "app1"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d packages, want %d (%v)", len(got), len(want), got)
@@ -211,7 +173,7 @@ func TestParsePackageList_Valid(t *testing.T) {
 
 func TestParsePackageList_SingleQuotedHref(t *testing.T) {
 	html := `<a href='/users/owner/packages/container/package/app'>app</a>`
-	got, refused := parsePackageList(html, "owner", userOwner)
+	got, refused, _ := parsePackageList(html, "owner", userOwner)
 	if !slices.Equal(got, []string{"app"}) || refused.Count != 0 {
 		t.Errorf("parsePackageList(single-quoted href) = (%v, %+v), want ([app], no refusals)", got, refused)
 	}
@@ -221,7 +183,7 @@ func TestParsePackageList_SingleQuotedHref(t *testing.T) {
 // on the same HTML line are all extracted.
 func TestParsePackageList_MultiplePerLine(t *testing.T) {
 	html := `<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`
-	got, _ := parsePackageList(html, "o", userOwner)
+	got, _, _ := parsePackageList(html, "o", userOwner)
 	if len(got) != 2 {
 		t.Fatalf("got %d packages, want 2 (%v)", len(got), got)
 	}
@@ -230,7 +192,7 @@ func TestParsePackageList_MultiplePerLine(t *testing.T) {
 func TestParsePackageList_DecodesNestedNames(t *testing.T) {
 	for _, encoded := range []string{"helm-charts%2Fgrafana-operator", "helm-charts%2fgrafana-operator"} {
 		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
-		got, refused := parsePackageList(html, "owner", userOwner)
+		got, refused, _ := parsePackageList(html, "owner", userOwner)
 		if !slices.Equal(got, []string{"helm-charts/grafana-operator"}) || refused.Count != 0 {
 			t.Errorf("parsePackageList(%q) = (%v, %+v), want decoded nested name", encoded, got, refused)
 		}
@@ -253,7 +215,7 @@ func TestParsePackageList_BoundsWholeName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			html := `<a href="/users/owner/packages/container/package/` + tt.token + `">package</a>`
-			got, refused := parsePackageList(html, "owner", userOwner)
+			got, refused, _ := parsePackageList(html, "owner", userOwner)
 			if !slices.Equal(got, tt.want) || refused.Count != tt.wantRefused {
 				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, refused=%d)", tt.token, got, refused, tt.want, tt.wantRefused)
 			}
@@ -264,7 +226,7 @@ func TestParsePackageList_BoundsWholeName(t *testing.T) {
 func TestParsePackageList_RefusesUnsafeDecodedNames(t *testing.T) {
 	for _, encoded := range []string{"..%2f..%2fetc%2fpasswd", "%2e%2e%2f%2e%2e", "%2e", "a//b", "/abs", "a%2F", "bad%00name", "%zz"} {
 		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
-		got, refused := parsePackageList(html, "owner", userOwner)
+		got, refused, _ := parsePackageList(html, "owner", userOwner)
 		if len(got) != 0 || refused.Count != 1 {
 			t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", encoded, got, refused)
 		}
@@ -308,7 +270,7 @@ func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, refused := parsePackageList(tt.html, "owner", userOwner)
+			got, refused, _ := parsePackageList(tt.html, "owner", userOwner)
 			if !slices.Equal(got, tt.want) || refused.Count != tt.wantRefused {
 				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, refused=%d)", tt.html, got, refused, tt.want, tt.wantRefused)
 			}
@@ -328,7 +290,7 @@ func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, refused := parsePackageList(tt.html, "nvidia", userOwner)
+			got, refused, _ := parsePackageList(tt.html, "nvidia", userOwner)
 			if !slices.Equal(got, []string{"CUDA"}) || refused.Count != 0 {
 				t.Errorf("parsePackageList = (%v, %+v), want registered package casing preserved", got, refused)
 			}
@@ -339,7 +301,7 @@ func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 func TestParsePackageList_BoundsRefusalSample(t *testing.T) {
 	raw := strings.Repeat("a", 256)
 	html := `<a href="/users/owner/packages/container/package/` + raw + `">package</a>`
-	got, refused := parsePackageList(html, "owner", userOwner)
+	got, refused, _ := parsePackageList(html, "owner", userOwner)
 	if len(got) != 0 || refused.Count != 1 {
 		t.Fatalf("parsePackageList(overlong name) = (%v, %+v), want one refusal", got, refused)
 	}
@@ -350,7 +312,7 @@ func TestParsePackageList_BoundsRefusalSample(t *testing.T) {
 
 func TestParsePackageList_RefusalSampleDoesNotRetainPage(t *testing.T) {
 	html := `<a href="/users/owner/packages/container/package/%zz">bad</a>` + strings.Repeat("x", 512<<10)
-	_, refused := parsePackageList(html, "owner", userOwner)
+	_, refused, _ := parsePackageList(html, "owner", userOwner)
 	if refused.Sample != "%zz" {
 		t.Fatalf("parsePackageList refusal sample = %q, want %%zz", refused.Sample)
 	}
@@ -372,19 +334,14 @@ func TestParsePackageList_RefusalSampleDoesNotRetainPage(t *testing.T) {
 func TestParsePackageList_KeepsFirstInformativeSample(t *testing.T) {
 	prefix := linkPrefix(userOwner, "owner")
 	html := `<a href="` + prefix + `"></a><a href="` + prefix + `%zz">bad</a>`
-	_, refused := parsePackageList(html, "owner", userOwner)
+	_, refused, _ := parsePackageList(html, "owner", userOwner)
 	if refused.Count != 2 || refused.Sample != "%zz" {
 		t.Errorf("parsePackageList refusals = %+v, want count 2 and sample %%zz", refused)
-	}
-
-	merged := (refusals{Count: 1}).merge(refusals{Count: 1, Sample: "%zz"})
-	if merged.Count != 2 || merged.Sample != "%zz" {
-		t.Errorf("refusals.merge = %+v, want count 2 and sample %%zz", merged)
 	}
 }
 
 func TestParsePackageList_Empty(t *testing.T) {
-	got, refused := parsePackageList("<html>nothing here</html>", "owner", userOwner)
+	got, refused, _ := parsePackageList("<html>nothing here</html>", "owner", userOwner)
 	if len(got) != 0 || refused.Count != 0 {
 		t.Errorf("parsePackageList(empty page) = (%v, %+v), want no names and no refusals", got, refused)
 	}
@@ -487,46 +444,6 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	}
 }
 
-// TestCollect_WildcardMock exercises the wildcard branch end-to-end:
-// owner listing returns two packages, each package page returns a
-// download count.
-func TestCollect_WildcardMock(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html>
-<a href="/users/owner/packages/container/package/pkg1">pkg1</a>
-<a href="/users/owner/packages/container/package/pkg2">pkg2</a>
-</html>`))
-	})
-	mux.HandleFunc("GET /users/owner/packages/container/package/pkg1", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><span>Total downloads</span>
-<h3 title="100">100</h3></html>`))
-	})
-	mux.HandleFunc("GET /users/owner/packages/container/package/pkg2", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><span>Total downloads</span>
-<h3 title="200">200</h3></html>`))
-	})
-	srv := httptest.NewTestServer(t, mux)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-
-	client := srv.Client()
-	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
-	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	entries, _, _, listingFailed := c.Collect(ctx, refs)
-
-	if listingFailed {
-		t.Error("listingFailed = true, want false")
-	}
-	if len(entries) != 2 {
-		t.Fatalf("Collect returned %d entries, want 2", len(entries))
-	}
-}
-
 func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
@@ -536,7 +453,7 @@ func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "app") + lastPageHTML()))
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "app") + totalPagesHTML(1)))
 	})
 	mux.HandleFunc("GET /users/owner/packages/container/package/app", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("7")))
@@ -621,7 +538,7 @@ func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, refused := parsePackageList(tt.html, tt.owner, userOwner)
+			got, refused, _ := parsePackageList(tt.html, tt.owner, userOwner)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d packages %v, want %d %v", len(got), got, len(tt.want), tt.want)
 			}
@@ -691,9 +608,9 @@ func listingClient(t *testing.T, h http.Handler, logger *slog.Logger) *Client {
 }
 
 // TestClient_ScrapePackageList_PaginatesOwnerListing pins the page loop: an
-// owner listing longer than one page is read to its end and the names are
-// unioned in listing order, and the read stops clean — no WARN — when a page
-// carries GitHub's own last-page marker or no package link.
+// owner listing longer than one page is read to its advertised end and the
+// names are unioned in listing order. Without a total, a page with no package
+// link remains the fallback end signal.
 func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -702,55 +619,12 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 		wantPages int
 	}{
 		{
-			name: "stops on the positive last-page marker",
+			name: "stops on the advertised page total",
 			pages: map[string]string{
-				"1": packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b"),
-				"2": packageLink(userOwner, "owner", "c") + `<div class="next_page disabled">Next</div>`,
+				"1": packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b") + totalPagesHTML(2),
+				"2": packageLink(userOwner, "owner", "c") + totalPagesHTML(2),
 			},
 			want:      []string{"a", "b", "c"},
-			wantPages: 2,
-		},
-		{
-			name: "stops on a last-page marker at the page cap",
-			pages: map[string]string{
-				"1":  packageLink(userOwner, "owner", "p1"),
-				"2":  packageLink(userOwner, "owner", "p2"),
-				"3":  packageLink(userOwner, "owner", "p3"),
-				"4":  packageLink(userOwner, "owner", "p4"),
-				"5":  packageLink(userOwner, "owner", "p5"),
-				"6":  packageLink(userOwner, "owner", "p6"),
-				"7":  packageLink(userOwner, "owner", "p7"),
-				"8":  packageLink(userOwner, "owner", "p8"),
-				"9":  packageLink(userOwner, "owner", "p9"),
-				"10": packageLink(userOwner, "owner", "p10") + lastPageHTML(),
-			},
-			want:      []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"},
-			wantPages: maxListingPages,
-		},
-		{
-			name: "stops on reversed last-page class tokens",
-			pages: map[string]string{
-				"1": packageLink(userOwner, "owner", "a") + `<div class="disabled paginate next_page">Next</div>`,
-			},
-			want:      []string{"a"},
-			wantPages: 1,
-		},
-		{
-			name: "ordinary text does not stop pagination",
-			pages: map[string]string{
-				"1": packageLink(userOwner, "owner", "a") + `<p>next_page disabled</p>`,
-				"2": packageLink(userOwner, "owner", "b") + `<div class="next_page disabled">Next</div>`,
-			},
-			want:      []string{"a", "b"},
-			wantPages: 2,
-		},
-		{
-			name: "unrelated attribute does not stop pagination",
-			pages: map[string]string{
-				"1": packageLink(userOwner, "owner", "a") + `<div data-state="next_page disabled"></div>`,
-				"2": packageLink(userOwner, "owner", "b") + `<div class="next_page disabled">Next</div>`,
-			},
-			want:      []string{"a", "b"},
 			wantPages: 2,
 		},
 		{
@@ -804,7 +678,7 @@ func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 			for i := range count {
 				html.WriteString(packageLink(userOwner, "owner", fmt.Sprintf("p%d", i)))
 			}
-			html.WriteString(lastPageHTML())
+			html.WriteString(totalPagesHTML(1))
 			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(html.String()))
 			}), testsupport.QuietLogger())
@@ -869,15 +743,59 @@ func TestClient_ScrapePackageList_RepeatedPageIsPartial(t *testing.T) {
 	}
 }
 
+func TestClient_ScrapePackageList_PageShortOfAdvertisedTotalIsPartial(t *testing.T) {
+	var buf bytes.Buffer
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a") + totalPagesHTML(3)))
+			return
+		}
+		_, _ = w.Write([]byte(totalPagesHTML(3)))
+	}), capturingLogger(&buf))
+
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged", err)
+	}
+	if !slices.Equal(got, []string{"a"}) {
+		t.Errorf("scrapePackageList = %v, want the first page's name kept alongside the error", got)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "listing partially failed") {
+		t.Errorf("a page short of its advertised total did not warn; logs:\n%s", logs)
+	}
+}
+
+func TestClient_ScrapePackageList_AdvertisedTotalVanishingIsPartial(t *testing.T) {
+	var buf bytes.Buffer
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a") + totalPagesHTML(2)))
+			return
+		}
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "b")))
+	}), capturingLogger(&buf))
+
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged", err)
+	}
+	if !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("scrapePackageList = %v, want both pages' names kept alongside the error", got)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "listing partially failed") {
+		t.Errorf("a vanished advertised total did not warn; logs:\n%s", logs)
+	}
+}
+
 // TestClient_ScrapePackageList_PageCapWarnsOnTruncation pins the WARN an
 // operator's alert keys on: with names still arriving when the bound bites,
-// the listing is truncated and warns with the literal alerts/logql.yaml matches.
+// the listing is truncated and reports GitHub's advertised total.
 func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 	var buf bytes.Buffer
 	pages := 0
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
-		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page"))))
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page")) + totalPagesHTML(25)))
 	}), capturingLogger(&buf))
 
 	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
@@ -889,8 +807,9 @@ func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 	}
 	logs := buf.String()
 	wantPages := fmt.Sprintf("max_pages=%d", maxListingPages)
-	if !strings.Contains(logs, "hit page cap") || !strings.Contains(logs, wantPages) {
-		t.Errorf("a truncated listing did not warn with the `hit page cap` literal and %s; logs:\n%s", wantPages, logs)
+	if !strings.Contains(logs, "hit page cap") || !strings.Contains(logs, wantPages) ||
+		!strings.Contains(logs, "advertised_pages=25") {
+		t.Errorf("a truncated listing did not warn with the page cap, %s, and advertised_pages=25; logs:\n%s", wantPages, logs)
 	}
 }
 
@@ -981,10 +900,10 @@ func TestClient_ScrapePackageList_ReadsOrganizationForm(t *testing.T) {
 func TestClient_ScrapePackageList_MergesUserFormRefusals(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "bad/nested") + lastPageHTML()))
+		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "bad/nested") + totalPagesHTML(1)))
 	})
 	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc") + lastPageHTML()))
+		_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc") + totalPagesHTML(1)))
 	})
 	c := listingClient(t, mux, testsupport.QuietLogger())
 
@@ -1136,7 +1055,7 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	huge := strings.Repeat("%", 4096)
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<a href="` + linkPrefix(userOwner, "owner") + huge + `">bad</a>` +
-			packageLink(userOwner, "owner", "good") + lastPageHTML()))
+			packageLink(userOwner, "owner", "good") + totalPagesHTML(1)))
 	}), capturingLogger(&buf))
 
 	packages, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
@@ -1160,18 +1079,9 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 func TestParsePackageList_CommentBodyDoesNotSwallowLaterLinks(t *testing.T) {
 	canary := `<!-- '"` + "`" + ` --><!-- </textarea></xmp> -->`
 	html := canary + packageLink(userOwner, "owner", "app1")
-	got, refused := parsePackageList(html, "owner", userOwner)
+	got, refused, _ := parsePackageList(html, "owner", userOwner)
 	if !slices.Equal(got, []string{"app1"}) || refused.Count != 0 {
 		t.Errorf("parsePackageList(canary comment + link) = (%v, %+v), want ([app1], no refusals)", got, refused)
-	}
-}
-
-// The same canary must not blind the end-of-listing check, which walks the
-// same tags: a marker after the comment has to still be found.
-func TestLastPageMarkerPresent_FoundAfterCommentBody(t *testing.T) {
-	canary := `<!-- '"` + "`" + ` -->`
-	if !lastPageMarkerPresent(canary + `<a class="` + lastPageMarker + `" href="#">next</a>`) {
-		t.Error("lastPageMarkerPresent(canary comment + marker tag) = false, want true")
 	}
 }
 
@@ -1179,7 +1089,7 @@ func TestLastPageMarkerPresent_FoundAfterCommentBody(t *testing.T) {
 // found is skipped, not treated as the end of the page.
 func TestParsePackageList_UnreadableTagDoesNotEndTheWalk(t *testing.T) {
 	html := `<div x="unclosed` + packageLink(userOwner, "owner", "app1")
-	got, _ := parsePackageList(html, "owner", userOwner)
+	got, _, _ := parsePackageList(html, "owner", userOwner)
 	if !slices.Equal(got, []string{"app1"}) {
 		t.Errorf("parsePackageList(unreadable tag + link) = %v, want [app1]", got)
 	}

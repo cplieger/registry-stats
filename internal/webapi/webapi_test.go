@@ -193,3 +193,26 @@ func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
 		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
 	}
 }
+
+func TestNew_unreadyHealthLogMatchesAlertExclusion(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: logger})
+
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /api/health status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	logs := buf.String()
+	if count := strings.Count(logs, "msg=http"); count != 1 {
+		t.Errorf("GET /api/health access record count = %d, want 1; logs: %q", count, logs)
+	}
+	if !strings.Contains(logs, "level=ERROR") {
+		t.Errorf("GET /api/health access level is not ERROR; logs: %q", logs)
+	}
+	if !strings.Contains(logs, "path=/api/health status=503") {
+		t.Errorf("GET /api/health access record does not match the shipped exclusion; logs: %q", logs)
+	}
+}

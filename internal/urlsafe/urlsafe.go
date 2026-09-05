@@ -9,9 +9,11 @@ import (
 	"strings"
 )
 
-// MaxSegmentBytes bounds one decoded URL path segment. PackageName uses it
-// to bound the whole decoded owner/name reference. It does not bound the
-// percent-escaped form a caller may encode into one segment.
+// MaxSegmentBytes is the container-reference grammar's 255-byte repository-path
+// limit, measured over the slash-joined path excluding the registry host.
+// IsSafeURLSegment applies it per segment; PackageName applies it to owner/name
+// as a whole. It does not bound the percent-escaped form a caller may encode
+// into one segment.
 const MaxSegmentBytes = 255
 
 // safeSegment is an allowlist so unrecognized input is rejected by default.
@@ -27,9 +29,10 @@ func IsSafeURLSegment(s string) bool {
 }
 
 // PackageName decodes GHCR's one-token spelling of a package name. The
-// decoded name may contain '/'-separated path elements. A caller placing it
-// back into one URL path segment must encode it with url.PathEscape. Errors
-// name the refusing rule for callers to report and are not sentinels.
+// decoded name may contain '/'-separated path elements. Callers must encode
+// the returned name with url.PathEscape when placing it back into one URL path
+// segment. Errors name the refusing rule for callers to report and are not
+// sentinels.
 func PackageName(owner, token string) (name string, err error) {
 	if strings.Contains(token, "/") {
 		return "", errors.New("raw slash; percent-encode nested names")

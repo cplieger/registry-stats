@@ -99,7 +99,8 @@ func run() error {
 	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
 	sources := []collectpkg.Source{dh, gh}
 
-	m.MintCollectSources(configuredSources(&cfg, sources))
+	active, sourceNames := activeSources(&cfg, sources)
+	m.MintCollectSources(sourceNames)
 	// Healthy before the first cycle: a first collect over two live
 	// registries can outlast the image's 15s HEALTHCHECK start-period, and
 	// runCollect's per-cycle Set(ok) cannot cover the window before a
@@ -108,34 +109,31 @@ func run() error {
 
 	pub := &publication{marker: marker, m: m, ready: &ready}
 	collect := func(ctx context.Context) {
-		runCollect(ctx, &cfg, sources, pub)
+		runCollect(ctx, &cfg, active, pub)
 	}
 
-	var bg sync.WaitGroup
+	bgDone := make(chan struct{})
 	if cfg.PollInterval == 0 {
 		slog.Info("one-shot mode, collecting once then serving")
-		bg.Go(func() { collect(ctx) })
+		go func() {
+			defer close(bgDone)
+			collect(ctx)
+		}()
 	} else {
 		slog.Info("scheduled mode", "interval", cfg.PollInterval)
-		bg.Go(func() {
+		go func() {
+			defer close(bgDone)
 			scheduler.RunLoop(ctx, collect, scheduler.LoopOptions{
 				Interval:    cfg.PollInterval,
 				FireOnStart: true,
 			})
-		})
+		}()
 	}
 
 	preDrain := func(context.Context) {
 		slog.Info("shutting down", "cause", context.Cause(ctx))
 		pub.drain()
 	}
-
-	// Start this waiter before teardown so AwaitDone can observe a completed cycle.
-	bgDone := make(chan struct{})
-	go func() {
-		bg.Wait()
-		close(bgDone)
-	}()
 
 	waitForCollect := func(ctx context.Context) {
 		if !webhttp.AwaitDone(ctx, bgDone) {
@@ -218,16 +216,21 @@ func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
 	return nil
 }
 
-func configuredSources(cfg *config.Config, sources []collectpkg.Source) []string {
+// activeSources returns the sources with at least one configured
+// ref and their metric names. One pass, so a source cannot be
+// invoked without having been pre-minted.
+func activeSources(cfg *config.Config, sources []collectpkg.Source) ([]collectpkg.Source, []string) {
+	active := make([]collectpkg.Source, 0, len(sources))
 	names := make([]string, 0, len(sources))
 	for _, src := range sources {
 		source := src.Source()
 		if len(refsFor(cfg, source)) == 0 {
 			continue
 		}
+		active = append(active, src)
 		names = append(names, source.String())
 	}
-	return names
+	return active, names
 }
 
 // healthSignal is the write-only liveness contract used by the collect loop.

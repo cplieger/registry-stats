@@ -57,6 +57,35 @@ func TestMetricsHandler(t *testing.T) {
 	}
 }
 
+func TestMetricsHandler_publishesExactHelpText(t *testing.T) {
+	m := New()
+	m.RecordHTTP(webhttp.RequestMetric{
+		Method:  http.MethodGet,
+		Path:    "/metrics",
+		Status:  http.StatusOK,
+		Latency: time.Second,
+	})
+	m.MintCollectSources([]string{"dockerhub"})
+	m.ObserveCollectDuration(time.Second)
+	m.SetImage([]ImageMetric{{Registry: "dockerhub", Owner: "owner", Repo: "repo", Pulls: 1}})
+
+	body := scrapeBody(t, m)
+
+	want := []string{
+		"# HELP registrystats_http_requests_total Total HTTP requests",
+		"# HELP registrystats_collects_total Total collection runs by source",
+		"# HELP registrystats_collect_errors_total Failed collection runs by source",
+		"# HELP registrystats_http_request_duration_seconds HTTP request latency",
+		"# HELP registrystats_collect_duration_seconds Collection cycle duration",
+		"# HELP registrystats_image_pulls_total Total pull count per image",
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("New() exposition missing HELP line %q:\n%s", line, body)
+		}
+	}
+}
+
 func TestObserveCollectDuration_recordsSeconds(t *testing.T) {
 	m := New()
 	m.ObserveCollectDuration(1420 * time.Millisecond)
@@ -200,6 +229,26 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	for name := range consumerSeries {
 		if !strings.Contains(body, "# HELP "+name+" ") {
 			t.Errorf("shipped consumer series %q is absent from /metrics", name)
+		}
+	}
+}
+
+
+func TestMintCollectSources_mintsBothCountersForEverySource(t *testing.T) {
+	m := New()
+	m.MintCollectSources([]string{"dockerhub", "ghcr"})
+
+	body := scrapeBody(t, m)
+
+	want := []string{
+		`registrystats_collects_total{source="dockerhub"} 0`,
+		`registrystats_collect_errors_total{source="dockerhub"} 0`,
+		`registrystats_collects_total{source="ghcr"} 0`,
+		`registrystats_collect_errors_total{source="ghcr"} 0`,
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("MintCollectSources() exposition missing %q:\n%s", line, body)
 		}
 	}
 }

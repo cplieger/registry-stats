@@ -27,8 +27,9 @@ type Metrics struct {
 
 // New constructs an isolated metrics registry.
 // The names below are the published series: grafana-dashboard.json and
-// alerts/{promql,logql}.yaml read them as literal text and nothing links the two,
-// so a rename here empties a panel or a rule silently.
+// alerts/promql.yaml read them as literal text, and
+// TestMetricsHandler_publishesSeriesUsedByShippedConsumers fails on a rename
+// that strands one. The copies in README.md and CONTRIBUTING.md are unchecked.
 func New() *Metrics {
 	m := &Metrics{
 		registry: metrics.NewRegistry("registrystats"),
@@ -44,7 +45,7 @@ func New() *Metrics {
 		),
 		collectErrors: metrics.NewLabeledCounter(
 			"collect_errors_total",
-			"Total collection errors by source",
+			"Failed collection runs by source",
 			[]string{"source"},
 		),
 		httpDuration: metrics.NewHistogram(
@@ -59,8 +60,8 @@ func New() *Metrics {
 			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600}),
 		),
 		// _total on a gauge is a deliberate deviation: the name is the published
-		// series, and metrics/v4's Counter has no Set, so the per-cycle
-		// replacement SetImage performs cannot be a counter.
+		// series, and the mirrored registry total can be restated downward, which
+		// no counter may do (RegistryStatsPullCountRegressed alerts on it).
 		imagePulls: metrics.NewLabeledGauge(
 			"image_pulls_total",
 			"Total pull count per image",

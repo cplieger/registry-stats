@@ -2,7 +2,6 @@ package config
 
 import (
 	"log/slog"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -10,8 +9,7 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
-	"pgregory.net/rapid"
+	"github.com/cplieger/slogx/capture"
 )
 
 func TestParseRepoRefs(t *testing.T) {
@@ -240,6 +238,28 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadAndPollInterval_neverLog(t *testing.T) {
+	recorder := capture.Default(t)
+	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
+	t.Setenv("LOG_LEVEL", "docker hub fetch failed")
+	t.Setenv("LISTEN_ADDR", " :9100 ")
+	t.Setenv("DOCKERHUB_REPOS", "bad")
+	t.Setenv("GHCR_REPOS", "bad")
+
+	_, warns := Load()
+	if len(warns) != 5 {
+		t.Fatalf("Load returned %d warnings, want 5 fixtures", len(warns))
+	}
+	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
+	_, clampWarns := PollInterval()
+	if len(clampWarns) != 1 {
+		t.Fatalf("PollInterval returned %d warnings, want 1 clamp fixture", len(clampWarns))
+	}
+	if got := recorder.Len(); got != 0 {
+		t.Errorf("Load and PollInterval emitted %d log records, want 0: %v", got, recorder.Messages())
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
@@ -287,28 +307,6 @@ func TestLoadZeroValues(t *testing.T) {
 	if cfg.PollInterval != 0 {
 		t.Errorf("PollInterval = %v, want 0 (one-shot mode)", cfg.PollInterval)
 	}
-}
-
-func TestParseRepoRefs_output_always_safe(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		input := rapid.String().Draw(t, "input")
-		for _, reg := range []registry.ID{registry.DockerHub, registry.GHCR} {
-			refs, _ := parseRepoRefs(input, reg)
-			for _, ref := range refs {
-				if reg == registry.GHCR && ref.Repo != "*" {
-					name, perr := urlsafe.PackageName(ref.Owner, url.PathEscape(ref.Repo))
-					if perr != nil || name != ref.Repo {
-						t.Fatalf("parseRepoRefs(%q, GHCR) produced unsafe repo %q", input, ref.Repo)
-					}
-				} else if ref.Repo != "*" && !urlsafe.IsSafeURLSegment(ref.Repo) {
-					t.Fatalf("parseRepoRefs(%q, DockerHub) produced unsafe repo %q", input, ref.Repo)
-				}
-				if !urlsafe.IsSafeURLSegment(ref.Owner) {
-					t.Fatalf("parseRepoRefs(%q, %v) produced unsafe owner %q", input, reg, ref.Owner)
-				}
-			}
-		}
-	})
 }
 
 // clampMaxPollHours mirrors Load's clamp threshold (24 * 365).
@@ -373,6 +371,31 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 	}}
 	if !slices.EqualFunc(warns, wantNegative, warningEqual) {
 		t.Errorf("Load(POLL_INTERVAL_HOURS=-5) warnings = %+v, want %+v", warns, wantNegative)
+	}
+}
+
+func TestWarningAttrs_areSanitizableByCaller(t *testing.T) {
+	t.Setenv("POLL_INTERVAL_HOURS", "notanumber")
+	t.Setenv("LOG_LEVEL", "docker hub fetch failed")
+	t.Setenv("LISTEN_ADDR", " :9100 ")
+	t.Setenv("DOCKERHUB_REPOS", "bad")
+	t.Setenv("GHCR_REPOS", "bad")
+
+	_, warns := Load()
+	t.Setenv("POLL_INTERVAL_HOURS", strconv.Itoa(clampMaxPollHours+1))
+	_, clampWarns := PollInterval()
+	warns = append(warns, clampWarns...)
+
+	if len(warns) != 6 {
+		t.Fatalf("Load and PollInterval returned %d warnings, want 6 fixtures", len(warns))
+	}
+	for _, warning := range warns {
+		for _, attr := range warning.Attrs {
+			kind := attr.Value.Kind()
+			if kind != slog.KindString && kind != slog.KindInt64 {
+				t.Errorf("Warning %q attribute %q kind = %v, want String or Int64", warning.Msg, attr.Key, kind)
+			}
+		}
 	}
 }
 

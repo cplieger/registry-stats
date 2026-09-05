@@ -21,20 +21,19 @@ import (
 	"github.com/cplieger/runesafe/v2"
 )
 
-// Docker Hub refuses anonymous owner-listing requests whose offset reaches
-// 100, so pageSize 99 is the largest size with a legal second page and
-// maxOwnerPages stops the walk there: a third page would answer 403 rather
-// than data. Reaching the cap means the owner publishes more than
-// pageSize*maxOwnerPages repositories and this walk holds only part of it.
-// listingElemCap bounds one page's decode cost with headroom for upstream
-// page-size widening. A body larger than 1 MiB is a format signal, not
-// content; the largest measured full upstream page is about 75 KB, leaving
-// about 14x headroom.
+// Docker Hub refuses an anonymous owner-listing offset at 100, so pageSize 99
+// is the largest size with a legal second page and maxOwnerPages stops there;
+// reaching the cap means this walk holds only part of the owner.
+// listingElemCap refuses a page that served far more rows than pageSize asked
+// for: it is the only bound on rows accepted when the walk ends on the page
+// cap, which returns them without comparing against the advertised total.
+// responseBodyCap bounds every response this client reads, listing pages and
+// per-repo metadata alike; the largest measured upstream page is about 75 KB.
 const (
-	maxOwnerPages  = 2
-	pageSize       = 99
-	listingElemCap = 4 * pageSize
-	listingBodyCap = 1 << 20
+	maxOwnerPages   = 2
+	pageSize        = 99
+	listingElemCap  = 4 * pageSize
+	responseBodyCap = 1 << 20
 )
 
 // Client is the Docker Hub source (it satisfies collect.Source at the wiring
@@ -106,10 +105,11 @@ func (c *Client) collectWildcards(ctx context.Context, refs []registry.RepoRef) 
 	return results, seen, listingFailed
 }
 
-// collectWildcardRef lists one owner's public repos, deduping against the
-// shared seen map (mutated in place). listingFailed reports a wholesale
-// listing outage for this owner. A partial failure, a legitimately empty owner
-// and a cancelled cycle all leave it false; a stop is not an outage.
+// collectWildcardRef lists one owner's public repos, recording each repo in
+// the shared seen map (mutated in place) so collectExplicit can skip a ref this
+// expansion already covered. listingFailed reports a wholesale listing outage
+// for this owner. A partial failure, a legitimately empty owner and a cancelled
+// cycle all leave it false; a stop is not an outage.
 func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[registry.RepoRef]bool) (results []registry.Entry, listingFailed bool) {
 	repos, advertised, err := c.listRepos(ctx, owner)
 	switch {
@@ -134,13 +134,9 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 	default:
 		c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos), "advertised", advertised)
 	}
-	for i := range repos {
-		repo := repos[i]
+	for _, repo := range repos {
 		name := repo.Owner + "/" + repo.Repo
 		key := registry.RepoRef{Owner: repo.Owner, Repo: repo.Repo}
-		if seen[key] {
-			continue
-		}
 		seen[key] = true
 		results = append(results, repo)
 		c.logger.Debug("docker hub repo collected", "repo", name, "pulls", repo.Pulls)
@@ -175,6 +171,7 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 				return results, attempted
 			}
 			c.logger.Warn("docker hub fetch failed", "repo", name,
+				"shape_change", shapeChanged(err),
 				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			continue
 		}
@@ -333,7 +330,8 @@ func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, mor
 // signal, distinct from malformed JSON.
 var errPullCountInvalid = errors.New("pull count missing or negative")
 
-// errRepoNameUnsafe classifies a page whose names Docker Hub cannot serve.
+// errRepoNameUnsafe classifies a listing page on which no result name passed
+// urlsafe.IsSafeURLSegment before publication as a metric label value.
 var errRepoNameUnsafe = errors.New("listed repo names rejected as unsafe")
 
 // errResponseUnparsable classifies any post-200 schema failure as a
@@ -352,11 +350,14 @@ func shapeChanged(err error) bool {
 }
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub helper.
-// listingBodyCap always wins because options are applied left to right.
+// responseBodyCap always wins because options are applied left to right.
 func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
-	opts := make([]httpx.GetOption, 0, len(c.retryOpts)+1)
+	opts := make([]httpx.GetOption, 0, len(c.retryOpts)+3)
 	opts = append(opts, c.retryOpts...)
-	opts = append(opts, httpx.WithMaxBodyBytes(listingBodyCap))
+	opts = append(opts,
+		httpx.WithLogger(c.logger),
+		httpx.WithExhaustedLevel(slog.LevelDebug),
+		httpx.WithMaxBodyBytes(responseBodyCap))
 	data, err := httpx.GetBytes(ctx, c.http, url, opts...)
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {

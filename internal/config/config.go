@@ -36,18 +36,18 @@ type Config struct {
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
 }
 
-// attrValue is the slog key the whole-value warnings carry that value
-// under. A skipped repo-list entry carries "input" instead: it is one
-// token out of the value, not the value.
+// attrValue is the slog key invalid whole-value fallback warnings use for
+// the supplied value. A skipped repo-list entry carries "input" instead: it
+// is one token out of the value, not the value.
 const attrValue = "value"
 
 // Warning is a non-fatal configuration note for the caller to log. Attrs
 // carries structured attributes rather than a pre-rendered sentence, so
 // attribute-keyed queries keep working. Attrs holds only top-level string
 // or int attributes: no groups, so a caller can bound a string value
-// without resolving one. A string attribute may carry environment-derived
-// input, trimmed but not otherwise sanitized, and a caller that emits one owns
-// capping and sanitizing it first (runesafe.SanitizeSingleLineCapped).
+// without resolving one. A string attribute may carry raw environment-derived
+// input, and a caller that emits one owns capping and sanitizing it first
+// (runesafe.SanitizeSingleLineCapped).
 type Warning struct {
 	// Rewording a Msg silently disarms any alerts/logql.yaml rule matching
 	// it: RegistryStatsConfigRejected matches three of the five below.
@@ -148,8 +148,7 @@ func Load() (Config, []Warning) {
 
 // parseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
 // pairs. Invalid entries are skipped and reported with the rule that refused
-// them. Each accepted ref is canonicalized to lower case because neither
-// registry distinguishes repository case.
+// them. Each accepted ref is canonicalized to lower case.
 func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	if s == "" {
 		return nil, nil
@@ -182,9 +181,9 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	return refs, warns
 }
 
-// resolveRef returns the canonical lower-case ref because neither registry
-// distinguishes repository case. A non-nil error names the refusing rule and
-// is not a sentinel.
+// resolveRef returns the canonical lower-case ref because lower case is the
+// spelling both registries accept: Docker Hub requires it, while GHCR is
+// case-insensitive. A non-nil error names the refusing rule and is not a sentinel.
 func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 	owner, repo, ok := strings.Cut(token, "/")
 	if !ok || owner == "" || repo == "" {

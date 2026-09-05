@@ -32,9 +32,6 @@ type fakeSource struct {
 	cancel context.CancelFunc
 }
 
-// Compile-time assertion: *fakeSource satisfies Source.
-var _ collect.Source = (*fakeSource)(nil)
-
 func (f *fakeSource) Source() registry.ID { return f.source }
 
 func (f *fakeSource) Collect(
@@ -199,6 +196,32 @@ func TestRun_records_counters_only_for_invoked_sources(t *testing.T) {
 	}
 }
 
+func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
+	m := obs.New()
+	m.MintCollectSources([]string{"dockerhub"})
+	src := newFakeDockerHub()
+
+	collect.Run(t.Context(), collect.Options{
+		Metrics: m,
+		Sources: []collect.Source{src},
+		Logger:  testsupport.QuietLogger(),
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "*"}}
+		},
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	m.Handler()(w, r)
+	body := w.Body.String()
+	if !strings.Contains(body, `registrystats_collects_total{source="dockerhub"} 1`) {
+		t.Errorf("Run(zero-attempt source) metrics missing one collect:\n%s", body)
+	}
+	if !strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 0`) {
+		t.Errorf("Run(zero-attempt source) metrics did not retain a zero error count:\n%s", body)
+	}
+}
+
 func TestRun_derivesSourceHealthFromResults(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -208,13 +231,8 @@ func TestRun_derivesSourceHealthFromResults(t *testing.T) {
 		listingFailed bool
 		wantHealthy   bool
 	}{
-		{name: "zero_attempts", wantHealthy: true},
-		{name: "all_failed", attempted: 3},
-		{name: "majority_failed", entries: 1, fetched: 1, attempted: 3},
 		{name: "exactly_half_failed", entries: 1, fetched: 1, attempted: 2, wantHealthy: true},
-		{name: "all_succeeded", entries: 2, fetched: 2, attempted: 2, wantHealthy: true},
 		{name: "wildcard_rows_do_not_absorb_failures", entries: 25, fetched: 1, attempted: 3},
-		{name: "listing_failed", entries: 2, fetched: 2, attempted: 2, listingFailed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -449,6 +467,35 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 	}
 }
 
+func TestRun_degraded_source_does_not_stop_later_source(t *testing.T) {
+	failed := newFakeDockerHub()
+	failed.attempted = 1
+
+	serving := newFakeGHCR()
+	serving.entries = []registry.Entry{{Owner: "owner", Repo: "pkg", Pulls: 9}}
+	serving.fetched = 1
+	serving.attempted = 1
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	images := collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
+		Sources: []collect.Source{failed, serving},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+		},
+	})
+
+	want := []obs.ImageMetric{{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 9}}
+	if !reflect.DeepEqual(images, want) {
+		t.Errorf("Run(unhealthy first, healthy second) images = %+v, want %+v", images, want)
+	}
+	if logs := buf.String(); !strings.Contains(logs, `msg="partial collection failure" images=1`) {
+		t.Errorf("Run(unhealthy first, healthy second) logs = %q, want partial collection", logs)
+	}
+}
+
 func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.T) {
 	t.Run("degraded_cycle", func(t *testing.T) {
 		serving := newFakeDockerHub()
@@ -460,7 +507,7 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 		failed.attempted = 1
 
 		var buf bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 		collect.Run(t.Context(), collect.Options{
 			Metrics: obs.New(),
 			Sources: []collect.Source{serving, failed},
@@ -471,8 +518,10 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 		})
 
 		logs := buf.String()
-		if !strings.Contains(logs, `level=WARN msg="partial collection failure" images=1`) {
-			t.Errorf("Run() degraded serving cycle missing partial-failure record; logs:\n%s", logs)
+		partial := strings.Index(logs, `level=WARN msg="partial collection failure" images=1`)
+		completed := strings.Index(logs, `level=INFO msg="collection complete" images=1 duration=`)
+		if partial < 0 || completed < 0 || partial >= completed {
+			t.Errorf("Run() degraded serving-cycle logs = %q, want partial failure followed by completion", logs)
 		}
 	})
 

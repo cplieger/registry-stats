@@ -40,12 +40,24 @@ func TestNewClient_customLogger_isUsed(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 
-	var buf bytes.Buffer
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	var defaultBuf bytes.Buffer
+	oldDefault := slog.Default()
+	slog.SetDefault(capturingLogger(&defaultBuf))
+	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+
+	var injectedBuf bytes.Buffer
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&injectedBuf)))
 	_, _, _, _ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
-	if !strings.Contains(buf.String(), "ghcr scrape failed") {
-		t.Errorf("supplied logger captured no scrape-failure log; logs:\n%s", buf.String())
+	if logs := defaultBuf.String(); logs != "" {
+		t.Errorf("default logger captured records from Collect(retryable failure):\n%s", logs)
+	}
+	logs := injectedBuf.String()
+	if !strings.Contains(logs, `level=DEBUG msg="http retries exhausted"`) {
+		t.Errorf("supplied logger captured no DEBUG retry-exhausted log; logs:\n%s", logs)
+	}
+	if got := strings.Count(logs, `level=WARN msg="ghcr scrape failed"`); got != 1 {
+		t.Errorf("supplied logger captured %d ghcr scrape-failure WARNs, want 1; logs:\n%s", got, logs)
 	}
 }
 
@@ -82,27 +94,32 @@ func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
 func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var stamps []time.Time
-		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			stamps = append(stamps, time.Now())
-			_, _ = w.Write([]byte(downloadsHTML("11")))
+			switch r.URL.Path {
+			case "/owner":
+				_, _ = w.Write([]byte(`<div data-total-pages="1"></div>` +
+					packageLink(userOwner, "owner", "pkg1") +
+					packageLink(userOwner, "owner", "pkg2")))
+			case "/users/owner/packages/container/package/pkg1", "/users/owner/packages/container/package/pkg2":
+				_, _ = w.Write([]byte(downloadsHTML("11")))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
 		}))
 
 		// Pacing fields left at zero on purpose: they are the subject.
 		c := NewClient(srv.Client(), Options{Logger: testsupport.QuietLogger()})
-		refs := []registry.RepoRef{
-			{Owner: "owner", Repo: "pkg1"},
-			{Owner: "owner", Repo: "pkg2"},
-			{Owner: "owner", Repo: "pkg3"},
-		}
+		refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 
 		start := time.Now()
 		entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
-		if fetched != len(refs) || attempted != len(refs) || listingFailed || len(entries) != len(refs) {
-			t.Fatalf("Collect = (%d entries, fetched %d, attempted %d, listingFailed %v), want (%d, %d, %d, false)",
-				len(entries), fetched, attempted, listingFailed, len(refs), len(refs), len(refs))
+		if fetched != 2 || attempted != 2 || listingFailed || len(entries) != 2 {
+			t.Fatalf("Collect(wildcard) = (%d entries, fetched %d, attempted %d, listingFailed %v), want (2, 2, 2, false)",
+				len(entries), fetched, attempted, listingFailed)
 		}
-		if len(stamps) != len(refs) {
-			t.Fatalf("handler saw %d requests, want %d", len(stamps), len(refs))
+		if len(stamps) != 3 {
+			t.Fatalf("handler saw %d requests, want 3 (one listing and two packages)", len(stamps))
 		}
 		if !stamps[0].Equal(start) {
 			t.Errorf("first request issued at %v, want no clock advance from %v", stamps[0], start)
@@ -214,10 +231,10 @@ func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "ok"}, {Owner: "owner", Repo: "fail"}}
-	_, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+	_, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
 
-	if attempted != 2 {
-		t.Fatalf("precondition: attempted = %d, want 2", attempted)
+	if fetched != 1 || attempted != 2 {
+		t.Fatalf("Collect with one successful and one failed scrape = (fetched %d, attempted %d), want (1, 2)", fetched, attempted)
 	}
 	if listingFailed {
 		t.Error("Collect listingFailed = true, want false for an explicit-package failure")
@@ -314,22 +331,7 @@ func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 	}
 }
 
-// TestCollect_cancelledMidCycle_logsUnscrapedRemainder pins the count the
-// interrupted-collection log reports for the packages a shutdown skipped:
-// the packages never reached, not the whole list. It is what tells an
-// operator how much of the cycle a SIGTERM cost, so it has to shrink as
-// the cycle progresses rather than restate the list length.
-//
-// The stop is scheduled to land inside the SECOND package's pacing wait,
-// which is the widest window a signal can arrive in, so one of the two
-// packages is already collected and one is never reached. A package a stop
-// interrupted is neither attempted nor failed, so attempted stays at the
-// one that completed.
-//
-// synctest keeps it deterministic and free: the hour-long pacing costs no
-// wall time on the synthetic clock, and the cancellation fires at a fixed
-// point on it rather than racing a response.
-func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
+func TestCollect_cancelledMidCycle_isNotAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
 		ctx, cancel := context.WithCancel(t.Context())
@@ -357,21 +359,12 @@ func TestCollect_cancelledMidCycle_logsUnscrapedRemainder(t *testing.T) {
 		if listingFailed {
 			t.Error("Collect listingFailed = true, want false for cancellation")
 		}
-		logs := buf.String()
-		if !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
-			t.Fatalf("Collect(2 refs, cancelled mid-cycle) logged no interruption; logs:\n%s", logs)
-		}
-		if !strings.Contains(logs, "remaining=1") {
-			t.Errorf("Collect(2 refs, 1 attempted) interruption log = %q, want it to carry remaining=1", logs)
+		if logs := buf.String(); strings.Contains(logs, "level=WARN") {
+			t.Errorf("Collect(2 refs, cancelled mid-cycle) logged a source warning; logs:\n%s", logs)
 		}
 	})
 }
 
-// TestCollect_cancelledInPacingWait_isNotAFailure pins that a SIGTERM in
-// the pacing wait before a later scrape is reported as a stop rather than as
-// a GHCR failure: the completed first package stays counted, the interrupted
-// package does not, listingFailed stays false, and the interruption WARN names
-// what was skipped.
 func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer
@@ -405,8 +398,9 @@ func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 		if listingFailed {
 			t.Error("Collect listingFailed = true, want false for cancellation")
 		}
-		if logs := buf.String(); !strings.Contains(logs, "ghcr collection interrupted by context cancellation") {
-			t.Errorf("Collect(cancelled in the second pacing wait) logged no interruption; logs:\n%s", logs)
+		if logs := buf.String(); strings.Contains(logs, "level=WARN") {
+			t.Errorf("Collect(cancelled in the second pacing wait) logged a source warning; logs:\n%s", logs)
 		}
 	})
 }
+

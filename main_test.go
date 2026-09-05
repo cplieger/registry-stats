@@ -281,11 +281,11 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 	}
 }
 
-// TestConfiguredSources_preMintsConfiguredSourcesOnly pins the cold-start
+// TestActiveSources_preMintsConfiguredSourcesOnly pins the cold-start
 // contract the shipped RegistryStatsSourceDegraded rule reads: both per-source
 // collect counters carry a zero sample before the first collect. A source with
 // no configured refs gets no series.
-func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
+func TestActiveSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 	m := obs.New()
 
 	cfg := &config.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
@@ -294,7 +294,8 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		&mainFakeSource{src: registry.GHCR},
 	}
 
-	m.MintCollectSources(configuredSources(cfg, sources))
+	active, names := activeSources(cfg, sources)
+	m.MintCollectSources(names)
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -313,7 +314,7 @@ func TestConfiguredSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
 	}
 
-	runCollect(t.Context(), cfg, sources, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
+	runCollect(t.Context(), cfg, active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
 	w = httptest.NewRecorder()
 	m.Handler()(w, r)
 	body = w.Body.String()
