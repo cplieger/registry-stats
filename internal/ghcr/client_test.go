@@ -331,40 +331,6 @@ func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 	}
 }
 
-func TestCollect_cancelledMidCycle_isNotAFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var buf bytes.Buffer
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(downloadsHTML("5")))
-		}))
-
-		c := NewClient(srv.Client(), Options{
-			MinPacing:    time.Hour,
-			PacingJitter: time.Nanosecond,
-			RetryOpts:    shortRetry(),
-			Logger:       capturingLogger(&buf),
-		})
-		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
-
-		// Between the immediate first scrape and the second at t+1h.
-		time.AfterFunc(30*time.Minute, cancel)
-		entries, _, attempted, listingFailed := c.Collect(ctx, refs)
-
-		if attempted != 1 || len(entries) != 1 {
-			t.Fatalf("Collect(2 refs, cancelled in the second pacing wait) = (%d entries, attempted %d), want (1, 1)",
-				len(entries), attempted)
-		}
-		if listingFailed {
-			t.Error("Collect listingFailed = true, want false for cancellation")
-		}
-		if logs := buf.String(); strings.Contains(logs, "level=WARN") {
-			t.Errorf("Collect(2 refs, cancelled mid-cycle) logged a source warning; logs:\n%s", logs)
-		}
-	})
-}
-
 func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var buf bytes.Buffer

@@ -1072,16 +1072,18 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	}
 }
 
-// A comment body is not attributes. GitHub serves an XSS canary comment of
-// bare quotes two thirds of the way down a listing page; reading those as
-// attribute quotes made the tag walk consume every remaining byte, so every
-// package link after it went missing and the page read as an empty listing.
-func TestParsePackageList_CommentBodyDoesNotSwallowLaterLinks(t *testing.T) {
+// Commented-out markup is not markup: a terminated comment's body is
+// skipped whole, so a link and a page-total attribute inside one are
+// invisible and the canary's bare quotes never open an attribute value.
+func TestStartTagWalk_IgnoresCommentedMarkup(t *testing.T) {
 	canary := `<!-- '"` + "`" + ` --><!-- </textarea></xmp> -->`
-	html := canary + packageLink(userOwner, "owner", "app1")
-	got, refused, _ := parsePackageList(html, "owner", userOwner)
-	if !slices.Equal(got, []string{"app1"}) || refused.Count != 0 {
-		t.Errorf("parsePackageList(canary comment + link) = (%v, %+v), want ([app1], no refusals)", got, refused)
+	html := canary +
+		`<!-- ` + packageLink(userOwner, "owner", "ghost") + ` -->` +
+		`<!-- <div data-total-pages="9"></div> -->` +
+		packageLink(userOwner, "owner", "app1")
+	got, refused, advertised := parsePackageList(html, "owner", userOwner)
+	if !slices.Equal(got, []string{"app1"}) || refused.Count != 0 || advertised != 0 {
+		t.Errorf("parsePackageList(commented markup + link) = (%v, %+v, %d), want ([app1], no refusals, 0)", got, refused, advertised)
 	}
 }
 
