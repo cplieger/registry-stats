@@ -3,14 +3,17 @@
 # RegistryStatsCollectionIncomplete) read the container's log stream, because
 # their conditions have no series to key on. A repo ref rejected at parse time
 # is never polled, so it produces no metric of any kind, and with both repo
-# lists empty registrystats_collects_total has no series either. A source counter
-# advances when a wildcard owner listing wholly fails or more than half of its
-# per-image fetch attempts fail. Docker Hub rows whose counts come from an owner
-# listing count on neither side of that ratio, so incomplete output can leave
-# registrystats_collect_errors_total unchanged. Ship the container's logs to Loki
-# (Grafana Alloy's Docker log discovery does this with no configuration) and
-# evaluate them with Loki's ruler. The selector label is `container`; use `job`
-# or `service` if your collector keys on those instead.
+# lists empty, registrystats_collects_total has no series either. A source
+# counter advances when a wildcard owner listing wholly fails or more than half
+# of its per-image fetch attempts fail. Docker Hub rows whose counts come from
+# an owner listing count on neither side of that ratio, so incomplete output
+# can leave registrystats_collect_errors_total unchanged. Ship the container's
+# logs to Loki (Grafana Alloy's Docker log discovery does this with no
+# configuration) and evaluate them with Loki's ruler. The selector label is
+# `container`; use `job` or `service` if your collector keys on those instead.
+# The rules extract record fields under an `rs_` prefix because Loki otherwise
+# uses a `<name>_extracted` label when a collector has already set `level`,
+# `msg`, `path`, or `status` as a stream label.
 #
 # Five further rules read series from /metrics and are PromQL, so they live in
 # alerts/promql.yaml.
@@ -26,7 +29,12 @@
 # startup records work at every LOG_LEVEL because they are emitted before the
 # configured level is applied. At LOG_LEVEL=error, the recurring no-repos WARN
 # is suppressed, so that alert clears when its startup record ages out of the
-# one-hour window.
+# one-hour window. Before this rewrite, an operator running LOG_LEVEL=error had
+# no reachable true RegistryStatsCollectionIncomplete firing and exactly one
+# reachable false one: a startup WARN emitted before the configured level was
+# applied could match when an attribute value spelled one of the rule's phrases;
+# parsing `msg` closes that false positive.
+---
 groups:
   - name: registry-stats
     rules:
@@ -37,16 +45,22 @@ groups:
       # lists empty registrystats_collects_total has no series either, so
       # RegistryStatsCollectStalled cannot fire.
       - alert: RegistryStatsConfigRejected
+        # yamllint disable rule:line-length
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped` [1h]
+            |~ `no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped`
+            | logfmt rs_msg="msg"
+            | rs_msg =~ ".*(no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped).*" [1h]
           )) > 0
+        # yamllint enable rule:line-length
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "registry-stats rejected part of its configuration or corrected the poll interval"
+          summary: >-
+            registry-stats rejected part of its configuration or corrected the
+            poll interval
           description: >
             registry-stats skipped a DOCKERHUB_REPOS or GHCR_REPOS entry it
             could not parse, or found no usable entry at all, so those images
@@ -58,23 +72,13 @@ groups:
             ask for until the value is fixed. A skip line is logged once per
             start, so this clears one window after a restart with a corrected
             value; the no-repos line repeats every cycle.
-      # Keyed on the LEVEL, not on each message: registry-stats uses the slog
-      # text handler, so every error line carries `level=ERROR` (uppercase, and
-      # a lowercase matcher silently matches nothing). The expression is
-      # therefore level-wide rather than collection-specific: one rule covers
-      # an all-registries-failed cycle, registry response-shape or markup drift,
-      # an empty wildcard owner, a startup with no usable repo configuration,
-      # and any 5xx from the exporter's own endpoint EXCEPT the readiness gate's
-      # documented unready answer - /api/health answers 503 on every cold boot
-      # until the first collect completes (measured 1m51s on
-      # GHCR_REPOS=cplieger/*) and again during the drain, and webhttp's
-      # ProbeLogLevel preset levels a 5xx at Error, so without the exclusion this
-      # rule fires on every boot and every deploy. Only the majority-failure
-      # subset of those reaches registrystats_collect_errors_total.
       - alert: RegistryStatsError
         expr: |
           sum by (container) (count_over_time(
-            {container="registry-stats"} |= `level=ERROR` != `path=/api/health status=503` [1h]
+            {container="registry-stats"} |= `level=ERROR`
+            | logfmt rs_level="level", rs_path="path", rs_status="status"
+            | rs_level = "ERROR"
+            | rs_path != "/api/health" or rs_status != "503" [1h]
           )) > 0
         for: 0m
         labels:
@@ -91,35 +95,38 @@ groups:
             than the readiness gate's startup/shutdown 503. Read `docker logs
             registry-stats` for the message; a GHCR format change carries a
             link to open an issue.
-      # The WARN lines that mean "this cycle exported an incomplete set of image
-      # or tag series" while the app's health verdict stays healthy, so
-      # registrystats_collect_errors_total never moves and every PromQL rule in
-      # alerts/promql.yaml stays quiet. The per-repo Docker Hub fetch and GHCR
-      # scrape lines remove one image series. `ghcr listing refused package
-      # candidates` catches the nil-error case where a listing returns usable
-      # refs but omits published candidates, which no counter can see. On a
-      # wholly failed listing or page-cap path, the same line accompanies
-      # another member that already fires; because the condition is greater
-      # than zero, the extra match cannot change whether this rule fires.
-      # Enumerated rather than keyed on level=WARN, because the WARN stream also
-      # carries the liveness-marker transition `health state changed
-      # healthy=false`, which every container start emits once as it clears a
-      # marker inherited from its predecessor. A MAJORITY of package failures,
-      # and a listing that fails WHOLLY, both flip the source unhealthy, so
+      # The WARN lines mean that this cycle omitted image series. This rule
+      # reports those omissions whether or not the source-level health threshold
+      # is crossed; RegistryStatsSourceDegraded may fire concurrently. The
+      # per-repo Docker Hub fetch and GHCR scrape lines remove one image series.
+      # `ghcr listing refused package candidates` catches the nil-error case
+      # where a listing returns usable refs but omits published candidates,
+      # which no counter can see. On a wholly failed listing or page-cap path,
+      # the same line accompanies another member that already fires; because the
+      # condition is greater than zero, the extra match cannot change whether
+      # this rule fires. A MAJORITY of GHCR package failures, and a GHCR listing
+      # that fails WHOLLY, both flip the source unhealthy, so
       # RegistryStatsSourceDegraded owns them through
-      # registrystats_collect_errors_total; minority per-repo failures and
-      # refused candidates are what this rule exists for.
+      # registrystats_collect_errors_total; one failed explicit ref is a
+      # majority when it is the only ref. Minority per-repo failures and refused
+      # candidates are what this rule exists for. Docker Hub repositories found
+      # through a listing sit outside the fetch ratio.
       - alert: RegistryStatsCollectionIncomplete
+        # yamllint disable rule:line-length
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed` [2h]
+            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed`
+            | logfmt rs_msg="msg"
+            | rs_msg =~ ".*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed).*" [2h]
           )) > 0
+        # yamllint enable rule:line-length
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "registry-stats cycle exported an incomplete set of image series"
+          summary: >-
+            registry-stats cycle exported an incomplete set of image series
           description: >
             A collect cycle exported an incomplete set of image series: a
             Docker Hub owner publishes more repositories than an unauthenticated
@@ -127,5 +134,10 @@ groups:
             owner listing hit its page cap or lost a page, GHCR refused one or
             more published package-link candidates, or a minority of GHCR
             packages failed to scrape. The affected image series are absent
-            from /metrics for that cycle while every PromQL rule stays quiet.
-            Read the container logs for the affected owner or repo.
+            from /metrics for that cycle whether or not the source-level health
+            threshold is crossed. RegistryStatsSourceDegraded may fire
+            concurrently: a majority of per-repo failures or a wholly failed
+            listing flips the source unhealthy, and one failed explicit ref is
+            the majority when it is the only ref. Docker Hub repositories found
+            through a listing sit outside the fetch ratio. Read the container
+            logs for the affected owner or repo.
