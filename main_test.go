@@ -7,18 +7,135 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
+	"github.com/cplieger/health"
 	"github.com/cplieger/registry-stats/v2/internal/collect"
 	"github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/webhttp/v2"
 )
+
+func TestCollectLoop_modes(t *testing.T) {
+	t.Run("one_shot", func(t *testing.T) {
+		calls := 0
+		collectLoop(t.Context(), 0, func(context.Context) { calls++ })
+		if calls != 1 {
+			t.Errorf("collectLoop(interval=0) calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("scheduled", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			var calls atomic.Int64
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				collectLoop(ctx, time.Hour, func(context.Context) { calls.Add(1) })
+			}()
+
+			synctest.Wait()
+			if got := calls.Load(); got != 1 {
+				t.Errorf("collectLoop(interval=1h) calls before the first tick = %d, want 1", got)
+			}
+
+			time.Sleep(time.Hour)
+			synctest.Wait()
+			if got := calls.Load(); got != 2 {
+				t.Errorf("collectLoop(interval=1h) calls after one interval = %d, want 2", got)
+			}
+
+			cancel()
+			<-done
+		})
+	})
+}
+
+func TestMain_healthProbeUsesThreePollIntervals(t *testing.T) {
+	const helperEnv = "REGISTRY_STATS_HEALTH_PROBE_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		os.Args = []string{os.Args[0], "health"}
+		main()
+		return
+	}
+
+	path := health.DefaultPath
+	oldInfo, statErr := os.Stat(path)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		t.Fatalf("stat existing health marker: %v", statErr)
+	}
+	var oldData []byte
+	if oldInfo != nil {
+		var readErr error
+		oldData, readErr = os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read existing health marker: %v", readErr)
+		}
+	}
+	t.Cleanup(func() {
+		if oldInfo == nil {
+			health.NewMarker(path).Cleanup()
+			return
+		}
+		if err := os.WriteFile(path, oldData, oldInfo.Mode().Perm()); err != nil {
+			t.Errorf("restore health marker: %v", err)
+			return
+		}
+		if err := os.Chtimes(path, oldInfo.ModTime(), oldInfo.ModTime()); err != nil {
+			t.Errorf("restore health marker time: %v", err)
+		}
+	})
+
+	tests := []struct {
+		name     string
+		interval string
+		age      time.Duration
+		wantCode int
+	}{
+		{name: "inside_three_intervals", interval: "1", age: 3*time.Hour - 5*time.Minute, wantCode: 0},
+		{name: "outside_three_intervals", interval: "1", age: 3*time.Hour + 5*time.Minute, wantCode: 1},
+		{name: "one_shot_has_no_deadline", interval: "0", age: 24 * time.Hour, wantCode: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatalf("write health marker: %v", err)
+			}
+			modified := time.Now().Add(-tt.age)
+			if err := os.Chtimes(path, modified, modified); err != nil {
+				t.Fatalf("age health marker: %v", err)
+			}
+
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMain_healthProbeUsesThreePollIntervals$")
+			cmd.Env = append(os.Environ(), helperEnv+"=1", "POLL_INTERVAL_HOURS="+tt.interval)
+			output, err := cmd.CombinedOutput()
+			gotCode := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("run health helper: %v", err)
+				}
+				gotCode = exitErr.ExitCode()
+			}
+			if gotCode != tt.wantCode {
+				t.Errorf("main health with interval=%s and age=%s exit = %d, want %d; output=%q",
+					tt.interval, tt.age, gotCode, tt.wantCode, output)
+			}
+		})
+	}
+}
 
 // mainFakeSource is a canned collect.Source for driving runCollect.
 type mainFakeSource struct {
@@ -30,11 +147,16 @@ type mainFakeSource struct {
 
 func (f *mainFakeSource) Source() registry.ID { return f.src }
 
-func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) ([]registry.Entry, int, int, bool) {
+func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) registry.Collection {
 	if f.onCollect != nil {
 		f.onCollect()
 	}
-	return f.entries, len(f.entries), len(f.entries), f.listingFailed
+	return registry.Collection{
+		Entries:       f.entries,
+		Fetched:       len(f.entries),
+		Attempted:     len(f.entries),
+		ListingFailed: f.listingFailed,
+	}
 }
 
 func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
@@ -76,6 +198,34 @@ func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
 	}
 	if got := warning.Attrs[0].Value.String(); got != raw {
 		t.Errorf("logWarnings mutated source attr = %q, want original value", got)
+	}
+}
+
+// TestLoadConfig_emitsWarningsBeforeApplyingLogLevel pins the ratified
+// ordering: a configuration diagnostic reaches the log stream even when
+// the configuration being diagnosed sets LOG_LEVEL=error. Swaps
+// slog.Default to capture, so no t.Parallel.
+func TestLoadConfig_emitsWarningsBeforeApplyingLogLevel(t *testing.T) {
+	t.Setenv("DOCKERHUB_REPOS", "library/alpine,bad//ref")
+	t.Setenv("GHCR_REPOS", "")
+	t.Setenv("LOG_LEVEL", "error")
+
+	buf := &bytes.Buffer{}
+	levelVar := &slog.LevelVar{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: levelVar})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	cfg := loadConfig(levelVar)
+
+	if cfg.LogLevel != slog.LevelError {
+		t.Fatalf("loadConfig(LOG_LEVEL=error).LogLevel = %v, want %v", cfg.LogLevel, slog.LevelError)
+	}
+	if got := levelVar.Level(); got != slog.LevelError {
+		t.Errorf("loadConfig left level = %v, want %v applied", got, slog.LevelError)
+	}
+	if !strings.Contains(buf.String(), "skipping unusable repo ref") {
+		t.Errorf("loadConfig(LOG_LEVEL=error) did not emit the repo-ref warning before applying the level; logs:\n%s", buf.String())
 	}
 }
 

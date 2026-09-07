@@ -10,10 +10,11 @@ import (
 	"github.com/cplieger/webhttp/v2"
 )
 
-// Metrics records and serves registry-stats metrics. Recording and serving are
-// safe for concurrent use: the metric values synchronize themselves. SetImage is
-// the one exception -- it owns the per-cycle label bookkeeping and takes a single
-// writer, which is the collect loop.
+// Metrics records and serves registry-stats metrics. Construct via New; the
+// zero value is not usable. Recording and serving are safe for concurrent use:
+// the metric values synchronize themselves. SetImage is the one exception -- it
+// owns the per-cycle label bookkeeping and takes a single writer, which is the
+// collect loop.
 type Metrics struct {
 	registry        *metrics.Registry
 	httpRequests    *metrics.LabeledCounter
@@ -26,10 +27,10 @@ type Metrics struct {
 }
 
 // New constructs an isolated metrics registry.
-// The names below are the published series: grafana-dashboard.json and
-// alerts/promql.yaml read them as literal text, and
-// TestMetricsHandler_publishesSeriesUsedByShippedConsumers fails on a rename
-// that strands one. The copies in README.md and CONTRIBUTING.md are unchecked.
+// The names below are the published series, read as literal text by every
+// shipped consumer TestMetricsHandler_publishesSeriesUsedByShippedConsumers
+// enumerates; it fails on a rename that strands one. CONTRIBUTING.md carries
+// only the rename-proof registrystats_* glob and stays outside that list.
 func New() *Metrics {
 	m := &Metrics{
 		registry: metrics.NewRegistry("registrystats"),
@@ -115,12 +116,11 @@ type ImageMetric struct {
 	Pulls    int64
 }
 
-// SetImage replaces the image gauge data for one collect cycle. Current values
-// are Set in place and departed series dropped one by one rather than Reset+Set,
-// so a series present in both cycles is never missing from a concurrent scrape.
-// A scrape overlapping the update may still read some series one cycle stale, or
-// miss a family entirely: metrics/v4's LabeledGauge reads a family's label keys
-// and their values under separate locks.
+// SetImage replaces the image gauge data for one collect cycle.
+// images is the whole population this cycle MEASURED: every key absent from it is retired, so an absent series means
+// this cycle did not measure that image - either it is gone, or the source could not finish enumerating its population.
+// Current values are Set in place and departed series Deleted one by one rather than Reset+Set, so a series present in
+// both cycles is never missing from a concurrent scrape; an overlapping scrape may still read one cycle stale.
 func (m *Metrics) SetImage(images []ImageMetric) {
 	pulls := make(map[[3]string]bool, len(images))
 	for _, image := range images {

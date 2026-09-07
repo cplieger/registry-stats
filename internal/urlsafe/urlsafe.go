@@ -11,9 +11,9 @@ import (
 
 // MaxSegmentBytes is the container-reference grammar's 255-byte repository-path
 // limit, measured over the slash-joined path excluding the registry host.
-// IsSafeURLSegment applies it per segment; PackageName applies it to owner/name
-// as a whole. It does not bound the percent-escaped form a caller may encode
-// into one segment.
+// IsSafeURLSegment applies it per segment; CheckReference applies it to
+// owner/name as a whole. It does not bound the percent-escaped form a caller
+// may encode into one segment.
 const MaxSegmentBytes = 255
 
 // safeSegment is an allowlist so unrecognized input is rejected by default.
@@ -28,11 +28,22 @@ func IsSafeURLSegment(s string) bool {
 	return safeSegment.MatchString(s)
 }
 
+// CheckReference reports the refusing rule when the slash-joined owner/name
+// repository path exceeds MaxSegmentBytes. Both registry arms call it, so the
+// bound is one rule with one wording rather than a per-registry copy.
+func CheckReference(owner, name string) error {
+	if len(owner)+1+len(name) > MaxSegmentBytes {
+		return fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)
+	}
+	return nil
+}
+
 // PackageName decodes GHCR's one-token spelling of a package name. The
 // decoded name may contain '/'-separated path elements. Callers must encode
 // the returned name with url.PathEscape when placing it back into one URL path
 // segment. Errors name the refusing rule for callers to report and are not
-// sentinels.
+// sentinels. owner is read only for its length, as part of the whole-reference
+// budget; the caller owns putting it through IsSafeURLSegment.
 func PackageName(owner, token string) (name string, err error) {
 	if strings.Contains(token, "/") {
 		return "", errors.New("raw slash; percent-encode nested names")
@@ -41,8 +52,8 @@ func PackageName(owner, token string) (name string, err error) {
 	if err != nil {
 		return "", errors.New("invalid percent-escape")
 	}
-	if len(owner)+1+len(name) > MaxSegmentBytes {
-		return "", fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)
+	if err := CheckReference(owner, name); err != nil {
+		return "", err
 	}
 	for part := range strings.SplitSeq(name, "/") {
 		if !IsSafeURLSegment(part) {

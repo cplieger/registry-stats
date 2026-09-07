@@ -9,6 +9,23 @@ type Entry struct {
 	Pulls int64
 }
 
+// Collection is one source's entries and cycle accounting.
+type Collection struct {
+	// The entries are what this source MEASURED this cycle, not a claim that
+	// the population is complete; a source that truncated its listing says so
+	// through its own diagnostics, and the published series for the rows it did
+	// not read are absent for that cycle.
+	Entries []Entry
+	// Fetched counts explicit metadata fetches that yielded an entry; wildcard
+	// rows never count as fetched.
+	Fetched int
+	// Attempted counts explicit metadata fetches tried; wildcard rows never
+	// count as attempted.
+	Attempted int
+	// ListingFailed reports an owner listing that could not be read as a listing.
+	ListingFailed bool
+}
+
 // RepoRef is an owner/repository pair. Repo is "*" for refs expanded at collection time.
 type RepoRef struct {
 	Owner string

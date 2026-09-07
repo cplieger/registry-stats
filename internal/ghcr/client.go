@@ -53,23 +53,25 @@ func NewClient(client *http.Client, opts Options) *Client {
 // entries without a string compare.
 func (c *Client) Source() registry.ID { return registry.GHCR }
 
-// Collect gathers download counts for every ref in refs. Wildcard refs are
-// expanded through the owner's packages listing before scraping; explicit
-// refs are scraped as-is. A package whose scrape fails is NOT appended, so
-// a transient error cannot inject a false zero into the exposed gauge.
-// attempted counts per-package scrape attempts; fetched counts the attempts
-// that yielded entries. A package a shutdown interrupted counts as neither.
-// listingFailed reports a wildcard listing that failed without yielding any
-// usable package names.
-func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool) {
+// Collect gathers download counts for every ref in refs. A failed scrape is
+// absent rather than published as zero. A package interrupted by shutdown is
+// neither attempted nor fetched.
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection {
 	p := &pacer{delay: c.pacingDelay}
 	var pkgParseFailures int
 	packages, listingFailed := c.buildPackageList(ctx, p, refs)
+	var entries []registry.Entry
+	var attempted int
 
 	for _, ref := range packages {
 		stat, err := c.scrapePackage(ctx, p, ref)
 		if err != nil && ctx.Err() != nil {
-			return entries, len(entries), attempted, listingFailed
+			return registry.Collection{
+				Entries:       entries,
+				Fetched:       len(entries),
+				Attempted:     attempted,
+				ListingFailed: listingFailed,
+			}
 		}
 
 		attempted++
@@ -93,7 +95,12 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries 
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
 	}
 
-	return entries, len(entries), attempted, listingFailed
+	return registry.Collection{
+		Entries:       entries,
+		Fetched:       len(entries),
+		Attempted:     attempted,
+		ListingFailed: listingFailed,
+	}
 }
 
 // pacer spaces consecutive GHCR requests inside one Collect. The first
@@ -136,7 +143,7 @@ func (c *Client) pacingDelay() time.Duration {
 // scrape; on any error the entry is zero and the caller leaves the package out
 // of results.
 func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoRef) (registry.Entry, error) {
-	downloads, err := c.scrapeDownloads(ctx, p, ref.Owner, ref.Repo)
+	downloads, err := c.scrapeDownloads(ctx, p, ref)
 	if err != nil {
 		if ctx.Err() != nil {
 			// collect.Run logs cancellation once for the cycle; suppress the

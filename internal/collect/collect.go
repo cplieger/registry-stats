@@ -11,19 +11,11 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Source collects registry-specific statistics for a list of refs, as flat
-// per-image registry.Entry records whose Owner and Repo label components
-// are non-empty. Source() must return a known registry.ID, since Run
-// derives the metric and log label from it. attempted and fetched count
-// per-image fetches only: attempted every fetch the source tried after
-// wildcard expansion, fetched the ones that yielded an entry. A ref whose
-// count arrived from an owner listing is in neither, so a listing can neither
-// dilute nor improve the health verdict; a ref an implementation skips counts
-// as neither either. listingFailed reports a wildcard owner listing that
-// failed without yielding any usable refs.
+// Source collects registry-specific statistics. Source must return a known
+// registry.ID; registry.Collection defines the returned cycle accounting.
 type Source interface {
 	Source() registry.ID
-	Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool)
+	Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection
 }
 
 // Options configures a single Run. Metrics, RefsFor and Logger are
@@ -37,9 +29,9 @@ type Options struct {
 }
 
 // Run orchestrates a single collection cycle: it invokes each source's
-// Collect (skipping sources with no refs), stamps each entry with its
-// source's registry label, and returns the combined per-image records. The
-// caller owns the health marker and derives it from the returned set. A
+// Collect, stamps each entry with its source's registry label, and returns
+// the combined per-image records. The caller owns the health marker and derives
+// it from the returned set. A
 // cancelled cycle stops early and returns what it collected, with no error,
 // so a caller that publishes the set must check ctx.Err() first.
 func Run(ctx context.Context, opts Options) []obs.ImageMetric {
@@ -50,7 +42,6 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	start := time.Now()
 	logger.Info("starting collection")
 	var degraded bool
-	var invokedAnySource bool
 
 	for _, src := range opts.Sources {
 		if ctx.Err() != nil {
@@ -62,10 +53,6 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 			break
 		}
 		refs := opts.RefsFor(src.Source())
-		if len(refs) == 0 {
-			continue
-		}
-		invokedAnySource = true
 		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, src, refs)
 		if !srcHealthy {
 			degraded = true
@@ -81,7 +68,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 
 	if len(images) == 0 {
 		switch {
-		case !invokedAnySource:
+		case len(opts.Sources) == 0:
 			// RegistryStatsConfigRejected (alerts/logql.yaml) matches the text of the
 			// "no repos configured" WARN; reword it there and here together.
 			logger.Warn("no repos configured")
@@ -116,21 +103,21 @@ func collectSource(
 	src Source,
 	refs []registry.RepoRef,
 ) (images []obs.ImageMetric, srcHealthy bool) {
-	entries, fetched, attempted, listingFailed := src.Collect(ctx, refs)
+	collection := src.Collect(ctx, refs)
 	// Unhealthy when a wildcard owner listing wholly failed, or when more
 	// than half the fetch attempts yielded no entry.
-	srcHealthy = !listingFailed && fetched*2 >= attempted
+	srcHealthy = !collection.ListingFailed && collection.Fetched*2 >= collection.Attempted
 	label := src.Source().String()
 	failed := !srcHealthy && ctx.Err() == nil
 	if failed {
 		logger.Warn("source reported unhealthy",
-			"source", label, "succeeded", fetched, "attempted", attempted,
-			"listing_failed", listingFailed)
+			"source", label, "succeeded", collection.Fetched, "attempted", collection.Attempted,
+			"listing_failed", collection.ListingFailed)
 	}
 	m.RecordCollect(label, failed)
 
-	images = make([]obs.ImageMetric, 0, len(entries))
-	for _, e := range entries {
+	images = make([]obs.ImageMetric, 0, len(collection.Entries))
+	for _, e := range collection.Entries {
 		images = append(images, obs.ImageMetric{
 			Registry: label,
 			Owner:    e.Owner,

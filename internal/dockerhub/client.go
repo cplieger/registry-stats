@@ -69,19 +69,19 @@ func NewClient(client *http.Client, opts Options) *Client {
 // (registry.DockerHub.String()).
 func (c *Client) Source() registry.ID { return registry.DockerHub }
 
-// Collect gathers pull counts for every ref in refs. fetched and attempted
-// count successful and total per-repo metadata fetches. Repos whose counts
-// came from a wildcard owner listing are entries but not fetches.
-// listingFailed reports a wildcard owner listing that failed without yielding
-// any usable repos. Cancellation itself never sets listingFailed; a wholesale
-// failure recorded before the cancellation persists. An explicit ref is
-// counted in attempted before its metadata fetch, so cancellation during that
-// fetch leaves it in attempted but not fetched.
-func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) (entries []registry.Entry, fetched, attempted int, listingFailed bool) {
+// Collect gathers pull counts for every ref in refs. Cancellation never sets
+// ListingFailed; a wholesale failure recorded before cancellation persists.
+// An explicit ref interrupted during its metadata fetch is attempted but not
+// fetched.
+func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection {
 	wildcardResults, seen, listingFailed := c.collectWildcards(ctx, refs)
 	explicitResults, explicitAttempted := c.collectExplicit(ctx, refs, seen)
-	entries = slices.Concat(wildcardResults, explicitResults)
-	return entries, len(explicitResults), explicitAttempted, listingFailed
+	return registry.Collection{
+		Entries:       slices.Concat(wildcardResults, explicitResults),
+		Fetched:       len(explicitResults),
+		Attempted:     explicitAttempted,
+		ListingFailed: listingFailed,
+	}
 }
 
 // collectWildcards expands every "*" ref into concrete repo entries.
@@ -117,20 +117,18 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 		// A stop is not a classification.
 	case err != nil && len(repos) == 0:
 		listingFailed = true
-		c.logger.Warn("docker hub listing wholly failed",
+		c.logger.Log(ctx, listingLevel(err), "docker hub listing wholly failed",
 			"owner", owner,
 			"advertised", advertised,
-			"shape_change", shapeChanged(err),
 			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 	case err != nil:
-		c.logger.Warn("docker hub listing partially failed",
+		c.logger.Log(ctx, listingLevel(err), "docker hub listing partially failed",
 			"owner", owner,
 			"repos", len(repos),
 			"advertised", advertised,
-			"shape_change", shapeChanged(err),
 			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 	case len(repos) == 0:
-		c.logger.Error("docker hub wildcard expanded", "owner", owner, "repos", 0, "advertised", advertised)
+		c.logger.Error("docker hub wildcard expanded no repos", "owner", owner, "repos", 0, "advertised", advertised)
 	default:
 		c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos), "advertised", advertised)
 	}
@@ -144,8 +142,8 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 	return results, listingFailed
 }
 
-// collectExplicit fetches each non-wildcard ref unless it was already
-// collected earlier in the cycle.
+// collectExplicit fetches each non-wildcard ref unless a wildcard already
+// covered it or the same explicit ref was encountered earlier in this pass.
 func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int) {
 	for _, ref := range refs {
 		if ref.Repo == "*" {
@@ -170,8 +168,7 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 				return results, attempted
 			}
-			c.logger.Warn("docker hub fetch failed", "repo", name,
-				"shape_change", shapeChanged(err),
+			c.logger.Log(ctx, listingLevel(err), "docker hub fetch failed", "repo", name,
 				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			continue
 		}
@@ -180,7 +177,6 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 		if err != nil {
 			c.logger.Error("docker hub parse failed",
 				"repo", name,
-				"shape_change", shapeChanged(err),
 				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
 			continue
 		}
@@ -195,12 +191,14 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 	return results, attempted
 }
 
-// listRepos paginates the Docker Hub owner listing endpoint. advertised is
-// the total the owner listing publishes for itself, so the caller can report
-// how much of the owner this walk holds. A listing upstream says is complete
-// but that served a different number of distinct repositories than its own
-// total is an error; a walk that stopped early returns what it collected with
-// advertised set.
+// listRepos paginates the Docker Hub owner listing endpoint. advertised is the
+// total its first page publishes, so the caller can report how much of the
+// owner this walk holds. A completed walk whose retained distinct repositories
+// differ from that total is an error, and the cause is one of three: a row the
+// name check dropped, a listing that changed between page requests, or an
+// upstream total that does not match what it served. Offset pagination cannot
+// tell them apart, so the snapshot may be mixed and may have skipped the row on
+// the page boundary; a walk that stopped early returns what it collected with advertised set.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
 	seen := make(map[registry.RepoRef]bool)
 	complete := false
@@ -235,7 +233,7 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		return entries, advertised, nil
 	}
 	if len(entries) != advertised {
-		return entries, advertised, fmt.Errorf("%w: owner listing served %d distinct repositories against the %d it advertises",
+		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d its first page advertised; the listing may have changed while it was being read",
 			errResponseUnparsable, len(entries), advertised)
 	}
 
@@ -306,8 +304,12 @@ func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, mor
 	}
 	repos := make([]registry.Entry, 0, len(resp.Results))
 	for _, res := range resp.Results {
-		// Repo names become published label values. Apply the same
-		// allowlist that defines errRepoNameUnsafe before retaining them.
+		// Repo names become published label values and log attributes, so
+		// they pass the urlsafe allowlist behind errRepoNameUnsafe. Upstream
+		// enforces a narrower rule than that allowlist — measured HTTP 400
+		// "invalid repository" for a name outside [a-z0-9._-] or over 255
+		// characters — so this skip cannot drop a repo Docker Hub will serve;
+		// a renamed name member blanks every result and fails loudly below.
 		if !urlsafe.IsSafeURLSegment(res.Name) {
 			continue
 		}
@@ -347,6 +349,13 @@ func shapeChanged(err error) bool {
 	return errors.Is(err, errPullCountInvalid) ||
 		errors.Is(err, errRepoNameUnsafe) ||
 		errors.Is(err, errResponseUnparsable)
+}
+
+func listingLevel(err error) slog.Level {
+	if shapeChanged(err) {
+		return slog.LevelError
+	}
+	return slog.LevelWarn
 }
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub helper.

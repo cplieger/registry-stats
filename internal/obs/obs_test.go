@@ -57,7 +57,7 @@ func TestMetricsHandler(t *testing.T) {
 	}
 }
 
-func TestMetricsHandler_publishesExactHelpText(t *testing.T) {
+func TestMetricsHandler_publishesExactMetadata(t *testing.T) {
 	m := New()
 	m.RecordHTTP(webhttp.RequestMetric{
 		Method:  http.MethodGet,
@@ -73,15 +73,21 @@ func TestMetricsHandler_publishesExactHelpText(t *testing.T) {
 
 	want := []string{
 		"# HELP registrystats_http_requests_total Total HTTP requests",
+		"# TYPE registrystats_http_requests_total counter",
 		"# HELP registrystats_collects_total Total collection runs by source",
+		"# TYPE registrystats_collects_total counter",
 		"# HELP registrystats_collect_errors_total Failed collection runs by source",
+		"# TYPE registrystats_collect_errors_total counter",
 		"# HELP registrystats_http_request_duration_seconds HTTP request latency",
+		"# TYPE registrystats_http_request_duration_seconds histogram",
 		"# HELP registrystats_collect_duration_seconds Collection cycle duration",
+		"# TYPE registrystats_collect_duration_seconds histogram",
 		"# HELP registrystats_image_pulls_total Total pull count per image",
+		"# TYPE registrystats_image_pulls_total gauge",
 	}
 	for _, line := range want {
 		if !strings.Contains(body, line) {
-			t.Errorf("New() exposition missing HELP line %q:\n%s", line, body)
+			t.Errorf("New() exposition missing metadata line %q:\n%s", line, body)
 		}
 	}
 }
@@ -211,13 +217,25 @@ func TestSetImage_preservesSurvivingSeriesDuringConcurrentScrape(t *testing.T) {
 
 func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	m := New()
+	m.RecordHTTP(webhttp.RequestMetric{
+		Method:  http.MethodGet,
+		Path:    "/metrics",
+		Status:  http.StatusOK,
+		Latency: time.Second,
+	})
 	m.MintCollectSources([]string{"dockerhub"})
+	m.ObserveCollectDuration(time.Second)
 	m.SetImage([]ImageMetric{{Registry: "dockerhub", Owner: "owner", Repo: "repo", Pulls: 1}})
 	body := scrapeBody(t, m)
 
 	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
 	consumerSeries := make(map[string]bool)
-	for _, path := range []string{"../../grafana-dashboard.json", "../../alerts/promql.yaml"} {
+	for _, path := range []string{
+		"../../README.md",
+		"../../alerts/logql.yaml",
+		"../../alerts/promql.yaml",
+		"../../grafana-dashboard.json",
+	} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("Setup: read shipped metric consumer %s: %v", path, err)

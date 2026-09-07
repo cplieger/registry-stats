@@ -36,8 +36,8 @@ type Config struct {
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
 }
 
-// attrValue is the slog key invalid whole-value fallback warnings use for
-// the supplied value. A skipped repo-list entry carries "input" instead: it
+// attrValue is the slog key a warning about the whole environment value
+// uses for that value. A skipped repo-list entry carries "input" instead: it
 // is one token out of the value, not the value.
 const attrValue = "value"
 
@@ -107,15 +107,11 @@ func PollInterval() (time.Duration, []Warning) {
 func Load() (Config, []Warning) {
 	pollInterval, warns := PollInterval()
 
-	rawLogLevel := envx.String("LOG_LEVEL")
-	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
+	logLevel, logLevelOK := slogx.ParseLevel(envx.String("LOG_LEVEL"), slog.LevelInfo)
 	if !logLevelOK {
 		warns = append(warns, Warning{
-			Msg: "invalid LOG_LEVEL, using default",
-			Attrs: []slog.Attr{
-				slog.String(attrValue, rawLogLevel),
-				slog.String("default", "info"),
-			},
+			Msg:   "invalid LOG_LEVEL, using default",
+			Attrs: []slog.Attr{slog.String("default", "info")},
 		})
 	}
 
@@ -211,6 +207,9 @@ func repoName(reg registry.ID, owner, repo string) (string, error) {
 	if reg != registry.GHCR {
 		if !urlsafe.IsSafeURLSegment(repo) {
 			return "", errors.New("repository not a safe URL segment")
+		}
+		if err := urlsafe.CheckReference(owner, repo); err != nil {
+			return "", err
 		}
 		return repo, nil
 	}

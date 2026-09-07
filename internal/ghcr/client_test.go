@@ -47,7 +47,7 @@ func TestNewClient_customLogger_isUsed(t *testing.T) {
 
 	var injectedBuf bytes.Buffer
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&injectedBuf)))
-	_, _, _, _ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+	_ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
 	if logs := defaultBuf.String(); logs != "" {
 		t.Errorf("default logger captured records from Collect(retryable failure):\n%s", logs)
@@ -69,7 +69,7 @@ func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
 	}))
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
-	_, _, _, _ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+	_ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
 	logs := buf.String()
 	if !strings.Contains(logs, "ghcr scrape failed") {
@@ -97,6 +97,8 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			stamps = append(stamps, time.Now())
 			switch r.URL.Path {
+			case "/orgs/owner/packages":
+				w.WriteHeader(http.StatusNotFound)
 			case "/owner":
 				_, _ = w.Write([]byte(`<div data-total-pages="1"></div>` +
 					packageLink(userOwner, "owner", "pkg1") +
@@ -113,13 +115,17 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 
 		start := time.Now()
-		entries, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
+		collection := c.Collect(t.Context(), refs)
+		entries := collection.Entries
+		fetched := collection.Fetched
+		attempted := collection.Attempted
+		listingFailed := collection.ListingFailed
 		if fetched != 2 || attempted != 2 || listingFailed || len(entries) != 2 {
 			t.Fatalf("Collect(wildcard) = (%d entries, fetched %d, attempted %d, listingFailed %v), want (2, 2, 2, false)",
 				len(entries), fetched, attempted, listingFailed)
 		}
-		if len(stamps) != 3 {
-			t.Fatalf("handler saw %d requests, want 3 (one listing and two packages)", len(stamps))
+		if len(stamps) != 4 {
+			t.Fatalf("handler saw %d requests, want 4 (one account-kind probe, one listing, and two packages)", len(stamps))
 		}
 		if !stamps[0].Equal(start) {
 			t.Errorf("first request issued at %v, want no clock advance from %v", stamps[0], start)
@@ -143,7 +149,8 @@ func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
-	_, _, attempted, _ := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	attempted := collection.Attempted
 
 	if attempted != 0 {
 		t.Fatalf("precondition: attempted = %d, want 0 (no packages scraped)", attempted)
@@ -157,7 +164,9 @@ func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	c := NewClient(noMarkerServer(t).Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
-	_, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	attempted := collection.Attempted
+	listingFailed := collection.ListingFailed
 
 	if attempted != 2 {
 		t.Fatalf("precondition: attempted = %d, want 2", attempted)
@@ -183,7 +192,8 @@ func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "good"}, {Owner: "owner", Repo: "bad"}}
-	_, _, attempted, _ := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	attempted := collection.Attempted
 
 	if attempted != 2 {
 		t.Fatalf("precondition: attempted = %d, want 2", attempted)
@@ -207,7 +217,9 @@ func TestCollect_whollyFailedListing(t *testing.T) {
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
-	entries, _, _, listingFailed := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	entries := collection.Entries
+	listingFailed := collection.ListingFailed
 
 	if !listingFailed {
 		t.Error("Collect listingFailed = false, want true for a wholly failed wildcard listing")
@@ -231,7 +243,10 @@ func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "ok"}, {Owner: "owner", Repo: "fail"}}
-	_, fetched, attempted, listingFailed := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	fetched := collection.Fetched
+	attempted := collection.Attempted
+	listingFailed := collection.ListingFailed
 
 	if fetched != 1 || attempted != 2 {
 		t.Fatalf("Collect with one successful and one failed scrape = (fetched %d, attempted %d), want (1, 2)", fetched, attempted)
@@ -255,7 +270,10 @@ func TestCollect_clientTimeoutDoesNotSetListingFailed(t *testing.T) {
 	client.Timeout = 5 * time.Millisecond
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "slow"}, {Owner: "owner", Repo: "fast"}}
-	entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	entries := collection.Entries
+	attempted := collection.Attempted
+	listingFailed := collection.ListingFailed
 
 	if attempted != 2 {
 		t.Errorf("Collect after a client timeout attempted = %d, want 2", attempted)
@@ -285,7 +303,10 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 
 	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
-	entries, _, attempted, listingFailed := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
+	entries := collection.Entries
+	attempted := collection.Attempted
+	listingFailed := collection.ListingFailed
 
 	if attempted != 1 {
 		t.Fatalf("precondition: attempted = %d, want 1 (only the explicit pkg1 was scraped)", attempted)
@@ -318,7 +339,10 @@ func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	entries, _, attempted, listingFailed := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+	collection := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
+	entries := collection.Entries
+	attempted := collection.Attempted
+	listingFailed := collection.ListingFailed
 
 	if attempted != 0 {
 		t.Errorf("Collect attempted = %d, want 0 (ctx cancelled before the first scrape)", attempted)
@@ -355,7 +379,10 @@ func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 
 		time.AfterFunc(time.Minute, cancel)
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
-		entries, _, attempted, listingFailed := c.Collect(ctx, refs)
+		collection := c.Collect(ctx, refs)
+		entries := collection.Entries
+		attempted := collection.Attempted
+		listingFailed := collection.ListingFailed
 
 		if attempted != 1 || len(entries) != 1 {
 			t.Errorf("Collect(cancelled in the second pacing wait) = (%d entries, attempted %d), want (1, 1)",

@@ -66,8 +66,8 @@ func TestParsePackageList_interleavedMarkupIsInvariant(t *testing.T) {
 			interleaved.WriteString(noise[i])
 		}
 
-		wantNames, wantRefused, _ := parsePackageList(plain.String(), "owner", userOwner)
-		gotNames, gotRefused, _ := parsePackageList(interleaved.String(), "owner", userOwner)
+		wantNames, wantRefused, _, _ := parsePackageList(plain.String(), "owner", userOwner)
+		gotNames, gotRefused, _, _ := parsePackageList(interleaved.String(), "owner", userOwner)
 		if !slices.Equal(gotNames, wantNames) || gotRefused.Count != wantRefused.Count {
 			t.Fatalf("parsePackageList(interleaved markup) = (%v, %d refusals), want (%v, %d refusals)",
 				gotNames, gotRefused.Count, wantNames, wantRefused.Count)

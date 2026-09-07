@@ -73,6 +73,32 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 }
 
+func TestClient_ListRepos_ReportsMidWalkPopulationChange(t *testing.T) {
+	page1 := make([]map[string]any, 0, pageSize)
+	for i := range pageSize {
+		page1 = append(page1, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 100, "results": page1, "next": "page2"})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 99, "results": []map[string]any{}, "next": ""})
+		}
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if !shapeChanged(err) {
+		t.Errorf("listRepos(total changed mid-walk) error = %v, want a shape-change error", err)
+	}
+	if len(repos) != 99 || advertised != 100 {
+		t.Errorf("listRepos(total changed mid-walk) = (%d repos, advertised %d), want (99, 100)", len(repos), advertised)
+	}
+}
+
 func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
@@ -123,15 +149,19 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
 	refs := []registry.RepoRef{{Owner: "o", Repo: "*"}}
-	_, _, attempted, _ := c.Collect(t.Context(), refs)
+	collection := c.Collect(t.Context(), refs)
 
 	if ownerPages != 2 {
 		t.Errorf("owner-listing requests = %d, want 2 (update if maxOwnerPages changes)", ownerPages)
 	}
-	if attempted != 0 {
-		t.Errorf("attempted = %d, want 0 (listing rows are not fetches)", attempted)
+	if collection.Attempted != 0 {
+		t.Errorf("attempted = %d, want 0 (listing rows are not fetches)", collection.Attempted)
 	}
 	logs := buf.String()
+	// RegistryStatsCollectionIncomplete in alerts/logql.yaml consumes this literal.
+	if !strings.Contains(logs, `level=WARN msg="docker hub owner listing hit page cap; results may be truncated"`) {
+		t.Errorf("Collect stopping at the page cap did not emit the alert-keyed WARN; logs:\n%s", logs)
+	}
 	if !strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
 		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=2") ||
 		!strings.Contains(logs, "advertised=1000") {
@@ -421,15 +451,15 @@ func TestClient_Collect_InternalBodyCapOverridesCaller(t *testing.T) {
 		Logger:    logger,
 		RetryOpts: []httpx.GetOption{httpx.WithMaxBodyBytes(2 << 20)},
 	})
-	entries, _, attempted, listingFailed := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 
-	if !listingFailed {
+	if !collection.ListingFailed {
 		t.Error("Collect() listingFailed = false, want true for a body past the internal cap")
 	}
-	if len(entries) != 0 || attempted != 0 {
-		t.Errorf("Collect() past the internal body cap = (%d entries, attempted=%d), want (0, 0)", len(entries), attempted)
+	if len(collection.Entries) != 0 || collection.Attempted != 0 {
+		t.Errorf("Collect() past the internal body cap = (%d entries, attempted=%d), want (0, 0)", len(collection.Entries), collection.Attempted)
 	}
-	if !strings.Contains(buf.String(), "shape_change=true") {
-		t.Errorf("Collect() past the internal body cap did not classify a shape change; logs:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "level=ERROR") {
+		t.Errorf("Collect() past the internal body cap did not log at ERROR; logs:\n%s", buf.String())
 	}
 }

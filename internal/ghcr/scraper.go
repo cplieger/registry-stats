@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,8 +52,12 @@ const maxListingCandidates = 100
 // Fifty is a round limit above the largest measured total of 23 pages.
 const maxListingPages = 50
 
-// advertisedPagesAttr is the only value that can prove the walk read every
-// page GitHub says exists. It is absent for a single-page listing.
+// maxUnboundedScans bounds terminator lookups that read the remaining page.
+// Five live pages carrying 1,075-1,808 start tags each measured zero.
+const maxUnboundedScans = 8
+
+// advertisedPagesAttr is one of two listing-completeness signals, and is the
+// one GitHub omits for a single-page listing.
 const advertisedPagesAttr = "data-total-pages"
 
 // maxRefusalSampleBytes bounds both the retained page slice and the sanitized
@@ -73,10 +78,10 @@ const (
 
 // listingURL builds the listing URL for one owner kind and 1-based page.
 // The ecosystem filter makes data-total-pages countable because an unfiltered
-// total includes package types these container links do not enumerate.
-// The user form is what /users/<owner>/packages redirects to, and the
-// redirect drops the query — requesting the redirecting form would make
-// every page re-fetch page 1.
+// total includes package types these container links do not enumerate. The
+// organization form does not redirect. For an organization, the user form
+// redirects to a profile page and drops the listing query, so callers probe the
+// organization form first.
 func listingURL(kind ownerKind, owner string, page int) string {
 	if kind == orgOwner {
 		return fmt.Sprintf("https://github.com/orgs/%s/packages?ecosystem=container&page=%d", owner, page)
@@ -159,29 +164,25 @@ func (r refusals) refuse(candidate string) refusals {
 // error is returned when neither account form yields names; a later-page
 // failure returns names already collected alongside the error.
 func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) ([]string, refusals, error) {
-	names, refused, err := c.readListing(ctx, p, owner, userOwner)
-	if len(names) > 0 {
-		return names, refused, err
+	orgNames, refused, orgErr := c.readListing(ctx, p, owner, orgOwner)
+	if len(orgNames) > 0 {
+		return orgNames, refused, orgErr
 	}
 
-	// A user-form read that produced no names settles nothing about the
-	// account kind, and one that failed settles less, so the org form is
-	// asked either way. Two org-form answers make the user form's zero links
-	// the final word: a 404, which proves the owner is a user account, and a
-	// clean read with no links, which is an organization publishing nothing.
-	// emptyListingError names both causes because neither is distinguishable
-	// from changed listing markup.
-	orgNames, orgRefused, orgErr := c.readListing(ctx, p, owner, orgOwner)
-	refused = refused.merge(orgRefused)
+	// The organization form is the kind probe: names identify an organization
+	// and a 404 identifies a user. If it yields no names, the user form is still
+	// tried so an organization-form failure cannot hide a valid user listing.
+	names, userRefused, err := c.readListing(ctx, p, owner, userOwner)
+	refused = refused.merge(userRefused)
 	switch {
-	case len(orgNames) > 0:
-		return orgNames, refused, orgErr
-	case err != nil:
-		return nil, refused, err
-	case orgErr == nil || isNotFound(orgErr):
+	case len(names) > 0:
+		return names, refused, err
+	case orgErr != nil && !isNotFound(orgErr):
+		return nil, refused, orgErr
+	case err == nil:
 		return nil, refused, emptyListingError(owner)
 	default:
-		return nil, refused, orgErr
+		return nil, refused, err
 	}
 }
 
@@ -200,10 +201,10 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 // readListing walks one owner's listing in kind's URL form from page 1 up
 // to the cap. An advertised page count stops the walk after every page GitHub
 // says exists; without one, a later page with no package link ends the listing.
-// Refused candidates make a page partial only if it adds no usable name; mixed
-// pages continue and return the refusal summary for caller reporting. Other
-// early stops return names already collected. A non-cancelled partial warns
-// after collecting names; reaching the cap always warns.
+// Each usable printed package count is checked against that page's distinct
+// names plus refusals. Refused candidates make a page partial only if it adds
+// no usable name; mixed pages continue and report refusals. Other early stops
+// return collected names. A non-cancelled partial warns; the cap always warns.
 func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
 		names      []string
@@ -216,23 +217,35 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		pageNames, pageRefused, pageTotal := parsePackageList(html, owner, kind)
+		pageNames, pageRefused, pageTotal, err := parsePackageList(html, owner, kind)
+		if err != nil {
+			return c.partialListing(ctx, owner, page, names, refused, err)
+		}
 		candidates := len(pageNames) + pageRefused.Count
 		refused = refused.merge(pageRefused)
 		if candidates > maxListingCandidates {
 			return c.partialListing(ctx, owner, page, names, refused,
 				fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates))
 		}
+		stated, statedOK := statedPackages(html)
+		if statedOK {
+			accounted := len(slices.Compact(slices.Sorted(slices.Values(pageNames)))) + pageRefused.Count
+			if stated != accounted {
+				return c.partialListing(ctx, owner, page, names, refused,
+					fmt.Errorf("%w: listing page %d states %d packages against %d accounted for",
+						errHTMLFormatChanged, page, stated, accounted))
+			}
+		}
 		kept, added := appendUnseenNames(names, seen, pageNames)
 		names = kept
-		if advertised == 0 {
+		if pageTotal > 0 {
+			// Each page states the total for the set as it stands when that page
+			// is served, so a benign publish or delete between two paced fetches
+			// repaginates rather than drifting.
 			advertised = pageTotal
-		} else if pageTotal != advertised {
-			return c.partialListing(ctx, owner, page, names, refused,
-				fmt.Errorf("%w: listing page %d advertises %d pages against %d earlier", errHTMLFormatChanged, page, pageTotal, advertised))
 		}
 		if added == 0 {
-			if err := emptyPageError(page, advertised, pageNames, pageRefused); err != nil {
+			if err := emptyPageError(page, advertised, pageNames, pageRefused, stated, statedOK); err != nil {
 				return c.partialListing(ctx, owner, page, names, refused, err)
 			}
 			return names, refused, nil
@@ -248,10 +261,12 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 
 // emptyPageError names why a listing page that added no new name is a format
 // change, or returns nil when the page is the listing's clean end.
-func emptyPageError(page, advertised int, pageNames []string, pageRefused refusals) error {
+func emptyPageError(page, advertised int, pageNames []string, pageRefused refusals, stated int, statedOK bool) error {
 	switch {
 	case pageRefused.Count > 0:
 		return fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page)
+	case statedOK && stated == 0:
+		return nil
 	case len(pageNames) > 0:
 		return fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames))
 	case page < advertised:
@@ -350,9 +365,9 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 	if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
 		return "", "", 0, false
 	}
-	// An attribute name must start at a boundary: the byte before it is the
-	// '<' that opens the tag, or whitespace. A name that begins after any
-	// other byte, a stray '<' inside the tag included, refuses the tag.
+	// An attribute name must start after whitespace or a '<'. The check bounds the
+	// name to bytes that could begin one; nextAttributeName has already skipped
+	// valueless attributes, so a name reached through one is still read.
 	if before := eq - len(name) - 1; before < 0 ||
 		(tag[before] != '<' && !strings.ContainsRune(htmlWhitespace, rune(tag[before]))) {
 		return "", "", 0, false
@@ -371,6 +386,27 @@ func readAttribute(tag string, start int) (name, value string, next int, ok bool
 	return name, value, next, true
 }
 
+// equalASCIIFold compares ASCII case without Unicode simple folding, which
+// would let non-ASCII near-spellings match parser literals.
+func equalASCIIFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	for i := range len(s) {
+		if lowerASCII(s[i]) != lowerASCII(t[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerASCII(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + 'a' - 'A'
+	}
+	return b
+}
+
 // startsTagName reports whether b is the ASCII letter that opens a start tag.
 func startsTagName(b byte) bool {
 	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
@@ -379,49 +415,57 @@ func startsTagName(b byte) bool {
 // nextStartTag reads the markup at or after cursor. emit is true only for a
 // start tag; next is where scanning resumes; ok is false at end of input.
 //
-// GitHub serves an XSS canary comment whose body is a single quote, a double
-// quote, and a backtick. Skipping a terminated comment at its "-->" delimiter
-// keeps those bytes from becoming attribute quotes. An unterminated comment or
-// malformed start tag advances one byte so later tags remain readable.
-func nextStartTag(html string, cursor int) (tag string, next int, emit, ok bool) {
+// A terminated comment is skipped at its "-->" delimiter because commented-out
+// markup is not markup: a link inside one would add a ghost package name, and a
+// data-total-pages inside one a wrong page total. An unterminated comment or malformed
+// start tag advances one byte so later tags remain readable.
+func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanned, ok bool) {
 	i := strings.IndexByte(html[cursor:], '<')
 	if i < 0 {
-		return "", 0, false, false
+		return "", 0, false, false, false
 	}
 	open := cursor + i
-	// A comment ends at its own delimiter, and quotes inside it mean nothing.
 	if rest, found := strings.CutPrefix(html[open:], "<!--"); found {
 		if end := strings.Index(rest, "-->"); end >= 0 {
-			return "", open + len("<!--") + end + len("-->"), false, true
+			return "", open + len("<!--") + end + len("-->"), false, false, true
 		}
+		return "", open + 1, false, true, true
 	}
-	// Only a start tag's attribute values can carry a '>', so only a start tag's
-	// end may be found by tracking quotes. Anything else — an end tag, a
-	// processing instruction, an unterminated comment, a '<' in page text —
-	// advances one byte.
+	// A '<' not followed by an ASCII letter advances one byte; so does a
+	// '<'+letter whose apparent end markupTagEnd cannot find. An unterminated
+	// comment returns one byte from its branch, where the failed terminator
+	// lookup is charged to the rescan budget.
 	if open+1 >= len(html) || !startsTagName(html[open+1]) {
-		return "", open + 1, false, true
+		return "", open + 1, false, false, true
 	}
 	tagEnd, found := markupTagEnd(html, open)
 	if !found {
-		return "", open + 1, false, true
+		return "", open + 1, false, true, true
 	}
-	return html[open:tagEnd], tagEnd + 1, true, true
+	return html[open:tagEnd], tagEnd + 1, true, false, true
 }
 
 // startTags yields each span that begins at a '<' followed by an ASCII letter and
-// ends at the first '>' outside a quoted attribute value. End tags, processing
+// ends at the first '>' outside a quoted span. End tags, processing
 // instructions, and terminated comments are skipped. A raw-text element body
 // (script, style, textarea, title) is walked as ordinary markup, including tag-shaped bytes.
-func startTags(html string) iter.Seq[string] {
-	return func(yield func(string) bool) {
+func startTags(html string) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		rescans := 0
 		for cursor := 0; cursor < len(html); {
-			tag, next, emit, ok := nextStartTag(html, cursor)
+			tag, next, emit, rescanned, ok := nextStartTag(html, cursor)
 			if !ok {
 				return
 			}
 			cursor = next
-			if emit && !yield(tag) {
+			if rescanned {
+				rescans++
+				if rescans > maxUnboundedScans {
+					yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxUnboundedScans))
+					return
+				}
+			}
+			if emit && !yield(tag, nil) {
 				return
 			}
 		}
@@ -453,17 +497,25 @@ func tagAttributes(tag string) iter.Seq2[string, string] {
 
 // parsePackageList extracts package names and the advertised page total from
 // one owner's listing page; zero means the attribute was absent or unusable.
-// A name comes only from a real href attribute on a start tag, so page text,
-// terminated comments, and unrelated attributes are not candidates. An
-// unterminated comment body is still walked. Registered owner casing is
-// response data, so the prefix is matched without transforming untrusted HTML.
-// Zero names is not an error here because its meaning depends on the page
-// number, which only the caller knows.
-func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, advertised int) {
+// A name comes from an href on any span the lexical walk emits, page text
+// included; the page's printed package count proves the set GitHub published.
+// Two disagreeing page totals refuse the page. An unterminated comment body is
+// still walked. Registered owner casing is response data, so the prefix is
+// matched without transforming untrusted HTML. Zero names is not an error here
+// because its meaning depends on the page number, which only the caller knows.
+func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, advertised int, err error) {
 	prefix := linkPrefix(kind, owner)
-	for tag := range startTags(html) {
+	for tag, walkErr := range startTags(html) {
+		if walkErr != nil {
+			return names, refused, advertised, walkErr
+		}
 		for name, value := range tagAttributes(tag) {
 			if pages := advertisedPages(name, value); pages > 0 {
+				if advertised != 0 && advertised != pages {
+					return names, refused, 0, fmt.Errorf(
+						"%w: listing page advertises %d pages and %d",
+						errHTMLFormatChanged, advertised, pages)
+				}
 				advertised = pages
 				continue
 			}
@@ -471,21 +523,56 @@ func parsePackageList(html, owner string, kind ownerKind) (names []string, refus
 			if !isPackage {
 				continue
 			}
-			pkg, err := urlsafe.PackageName(owner, raw)
-			if err != nil {
+			pkg, nameErr := urlsafe.PackageName(owner, raw)
+			if nameErr != nil {
 				refused = refused.refuse(raw)
 				continue
 			}
 			names = append(names, strings.Clone(pkg))
 		}
 	}
-	return names, refused, advertised
+	return names, refused, advertised, nil
+}
+
+// statedPackages reports the package count a listing page publishes for
+// itself, and whether the page stated one usably. The count is per page, so it
+// grades that page's population. An absent or ambiguous marker is not usable
+// and is not drift: a heading rename upstream must make this signal go quiet,
+// not fail every poll of every owner.
+func statedPackages(html string) (n int, ok bool) {
+	const marker = "packages"
+	markers := 0
+	for at := 0; ; {
+		i := strings.Index(html[at:], marker)
+		if i < 0 {
+			return n, markers == 1
+		}
+		i += at
+		before := strings.TrimRight(html[:i], htmlWhitespace)
+		after := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
+		if strings.HasPrefix(after, "</") {
+			digitStart := len(before)
+			for digitStart > 0 && '0' <= before[digitStart-1] && before[digitStart-1] <= '9' {
+				digitStart--
+			}
+			if digitStart > 0 && digitStart < len(before) && before[digitStart-1] == '>' {
+				count, err := strconv.Atoi(before[digitStart:])
+				if err == nil {
+					if markers == 0 {
+						n = count
+					}
+					markers++
+				}
+			}
+		}
+		at = i + len(marker)
+	}
 }
 
 // advertisedPages reports a positive page total, or zero for another
 // attribute or an unusable count.
 func advertisedPages(name, value string) int {
-	if !strings.EqualFold(name, advertisedPagesAttr) {
+	if !equalASCIIFold(name, advertisedPagesAttr) {
 		return 0
 	}
 	pages, err := strconv.Atoi(strings.Trim(value, htmlWhitespace))
@@ -497,8 +584,8 @@ func advertisedPages(name, value string) int {
 
 // packageHref reports the package segment carried under prefix.
 func packageHref(name, value, prefix string) (segment string, isPackage bool) {
-	if !strings.EqualFold(name, "href") || len(value) < len(prefix) ||
-		!strings.EqualFold(value[:len(prefix)], prefix) {
+	if !equalASCIIFold(name, "href") || len(value) < len(prefix) ||
+		!equalASCIIFold(value[:len(prefix)], prefix) {
 		return "", false
 	}
 	return value[len(prefix):], true
@@ -510,8 +597,8 @@ func packageHref(name, value, prefix string) (segment string, isPackage bool) {
 // The /users/ form serves both account kinds: GitHub redirects an organization
 // to the repo-scoped package page through the allowlisted redirect policy, so
 // expandWildcard's account kind is deliberately not threaded here.
-func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, owner, pkg string) (int64, error) {
-	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", owner, url.PathEscape(pkg))
+func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, ref registry.RepoRef) (int64, error) {
+	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", ref.Owner, url.PathEscape(ref.Repo))
 	html, err := c.fetchHTML(ctx, p, pageURL)
 	if err != nil {
 		return 0, err
@@ -540,7 +627,7 @@ func parseDownloads(html string) (int64, error) {
 	afterMarker := rest[markerEnd+1:]
 	countIdx := markerEnd + 1 + len(afterMarker) - len(strings.TrimLeft(afterMarker, htmlWhitespace))
 	const countTag = "<h3"
-	if len(rest)-countIdx < len(countTag) || !strings.EqualFold(rest[countIdx:countIdx+len(countTag)], countTag) {
+	if len(rest)-countIdx < len(countTag) || !equalASCIIFold(rest[countIdx:countIdx+len(countTag)], countTag) {
 		return 0, errHTMLFormatChanged
 	}
 	afterName := rest[countIdx+len(countTag):]
@@ -597,13 +684,11 @@ func markerText(html string) (idx, n int) {
 }
 
 // titleAttribute returns the h3 start tag's single title attribute value.
-// Every valued attribute in the tag must be name="value" or name='value': an
-// unquoted value or a second title refuses the tag, and so does a > inside a
-// quoted value, which truncates tag before this runs. All three are legal or
-// near-legal HTML that GitHub does not currently serve, and refusing them is
-// deliberate — a count read out of a tag this function cannot fully account
-// for is worse than no count, and the caller reports the refusal as format
-// drift.
+// An unquoted value, a second title, and a '>' inside a quoted value each
+// refuse the tag. Stray markup before the title is not refused:
+// nextAttributeName reads it as a valueless attribute, so the count is still
+// read. GitHub serves neither shape; what bounds a wrong number is
+// parseDownloads' unique-marker refusal and the positional h3, not this walk.
 func titleAttribute(tag string) (string, bool) {
 	var (
 		title string
@@ -617,7 +702,7 @@ func titleAttribute(tag string) (string, bool) {
 		if name == "" {
 			return title, found
 		}
-		if strings.EqualFold(name, "title") {
+		if equalASCIIFold(name, "title") {
 			if found {
 				return "", false
 			}

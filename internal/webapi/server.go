@@ -32,13 +32,18 @@ func New(d Deps) *http.Server {
 	mux.Handle("GET /api/health", webhttp.ReadinessHandler(d.Ready))
 	mux.HandleFunc("GET /metrics", d.Metrics.Handler())
 
-	// Logging is outermost so recovered panics are recorded as 500 responses.
+	// Logging is outermost, so the recovery below decides the logged status.
 	handler := webhttp.Chain(mux,
 		webhttp.Logging(
 			webhttp.WithLogger(d.Logger),
 			webhttp.ProbeLogLevel("/api/health", "/metrics"),
 			webhttp.WithRecordRouteMetric(d.Metrics.RecordHTTP),
 		),
+		// Recoverer buys legibility, not survival: net/http's (*conn).serve
+		// already recovers every handler panic except ErrAbortHandler (go1.27.0,
+		// src/net/http/server.go), so without it the process still lives - the
+		// connection drops and the access line above reports the status
+		// recorder's default 200 instead of a truthful 500.
 		webhttp.Recoverer(webhttp.WithRecoverLogger(d.Logger)),
 		webhttp.SecurityHeaders(),
 	)

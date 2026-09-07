@@ -24,11 +24,12 @@
 # labels are starting points.
 #
 # These rules assume the default LOG_LEVEL=info.
-# LOG_LEVEL=error silences RegistryStatsCollectionIncomplete because every
-# named incomplete-set line is below ERROR. RegistryStatsConfigRejected's
-# startup records work at every LOG_LEVEL because they are emitted before the
-# configured level is applied. At LOG_LEVEL=error, the recurring no-repos WARN
-# is suppressed, so that alert clears when its startup record ages out of the
+# LOG_LEVEL=error silences RegistryStatsCollectionIncomplete except for Docker
+# Hub listing and fetch failures caused by response-schema changes, which emit
+# at ERROR; the rule keeps matching them because it selects on the message, not
+# the level. RegistryStatsConfigRejected's startup records work at every
+# LOG_LEVEL because they are emitted before the configured level is applied.
+# At LOG_LEVEL=error, the recurring no-repos WARN is suppressed, so that alert clears when its startup record ages out of the
 # one-hour window. Before this rewrite, an operator running LOG_LEVEL=error had
 # no reachable true RegistryStatsCollectionIncomplete firing and exactly one
 # reachable false one: a startup WARN emitted before the configured level was
@@ -38,14 +39,15 @@
 groups:
   - name: registry-stats
     rules:
-      # These messages cover configuration that yields nothing to poll. A ref
-      # that fails validation is skipped with a WARN at parse time; a run with
-      # no usable ref logs an ERROR at startup plus a WARN every cycle. Neither
-      # has a metric: a ref that never parsed produces no series, and with both
+      # The two repo-ref messages cover configuration that yields nothing to
+      # poll; the two POLL_INTERVAL_HOURS messages mean polling continues on
+      # a corrected interval. A ref that fails validation is skipped with a
+      # WARN at parse time; a run with no usable ref logs an ERROR at startup
+      # plus a WARN every cycle. Neither has a metric: a ref that never parsed
+      # produces no series, and with both
       # lists empty registrystats_collects_total has no series either, so
       # RegistryStatsCollectStalled cannot fire.
       - alert: RegistryStatsConfigRejected
-        # yamllint disable rule:line-length
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
@@ -53,7 +55,6 @@ groups:
             | logfmt rs_msg="msg"
             | rs_msg =~ ".*(no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped).*" [1h]
           )) > 0
-        # yamllint enable rule:line-length
         for: 0m
         labels:
           severity: warning
@@ -72,13 +73,22 @@ groups:
             ask for until the value is fixed. A skip line is logged once per
             start, so this clears one window after a restart with a corrected
             value; the no-repos line repeats every cycle.
+      # Keyed on the LEVEL, not on each message, so one rule covers serving and
+      # collection errors alike. Both comparisons are case-sensitive: the slog
+      # text handler renders the level uppercase, so a lowercase matcher on
+      # either line silently matches nothing. The /api/health 503 term is
+      # required rather than cosmetic -- the readiness endpoint answers 503 on
+      # every cold boot until the first collect completes, and again during the
+      # drain, and webhttp's ProbeLogLevel preset reports a 5xx at Error. The
+      # term is anchored to the access line's own msg so webhttp's hook-failure
+      # diagnostics for the same request still reach this rule.
       - alert: RegistryStatsError
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"} |= `level=ERROR`
-            | logfmt rs_level="level", rs_path="path", rs_status="status"
+            | logfmt rs_level="level", rs_msg="msg", rs_path="path", rs_status="status"
             | rs_level = "ERROR"
-            | rs_path != "/api/health" or rs_status != "503" [1h]
+            | rs_msg != "http" or rs_path != "/api/health" or rs_status != "503" [1h]
           )) > 0
         for: 0m
         labels:
@@ -101,10 +111,12 @@ groups:
       # per-repo Docker Hub fetch and GHCR scrape lines remove one image series.
       # `ghcr listing refused package candidates` catches the nil-error case
       # where a listing returns usable refs but omits published candidates,
-      # which no counter can see. On a wholly failed listing or page-cap path,
-      # the same line accompanies another member that already fires; because the
-      # condition is greater than zero, the extra match cannot change whether
-      # this rule fires. A MAJORITY of GHCR package failures, and a GHCR listing
+      # which no counter can see. On the page-cap path it accompanies `hit page
+      # cap`, and because the condition is greater than zero the extra match
+      # cannot change whether this rule fires. On a wholly failed listing it is
+      # this rule's only match: that path emits `ghcr package listing failed`,
+      # which this rule does not match, and RegistryStatsSourceDegraded reports
+      # the outage. A MAJORITY of GHCR package failures, and a GHCR listing
       # that fails WHOLLY, both flip the source unhealthy, so
       # RegistryStatsSourceDegraded owns them through
       # registrystats_collect_errors_total; one failed explicit ref is a
@@ -112,7 +124,6 @@ groups:
       # candidates are what this rule exists for. Docker Hub repositories found
       # through a listing sit outside the fetch ratio.
       - alert: RegistryStatsCollectionIncomplete
-        # yamllint disable rule:line-length
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
@@ -120,7 +131,6 @@ groups:
             | logfmt rs_msg="msg"
             | rs_msg =~ ".*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed).*" [2h]
           )) > 0
-        # yamllint enable rule:line-length
         for: 0m
         labels:
           severity: warning

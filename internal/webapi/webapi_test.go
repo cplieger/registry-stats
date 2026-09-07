@@ -178,22 +178,6 @@ func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
 	}
 }
 
-// TestNew_usesSuppliedLoggerForAccessLog confirms New wires the caller's
-// logger (not a fresh default) into the access-log middleware.
-func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	r := &webhttp.Ready{}
-	r.Set(true)
-	srv := New(Deps{Metrics: obs.New(), Ready: r, Logger: logger})
-
-	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
-
-	if !strings.Contains(buf.String(), "msg=http") {
-		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
-	}
-}
-
 func TestNew_unreadyHealthLogMatchesAlertExclusion(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))

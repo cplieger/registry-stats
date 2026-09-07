@@ -43,7 +43,7 @@ func main() {
 			// slogx first: the stdlib default handler emits no level=ERROR field, which
 			// is what the shipped log rules match on.
 			slogx.Setup(slogx.Options{})
-			slog.Error("unknown command", "command", os.Args[1], "supported", "health")
+			slog.Error("unknown command", "supported", "health")
 			os.Exit(2)
 		}
 	}
@@ -57,17 +57,14 @@ func main() {
 // run wires dependencies and serves until a signal or server error.
 func run() error {
 	levelVar := slogx.Setup(slogx.Options{})
-	cfg, warns := config.Load()
-	// Emit before applying LOG_LEVEL so error-level configuration cannot hide its own warning.
-	logWarnings(warns)
-	levelVar.Set(cfg.LogLevel)
+	marker := health.NewMarker(health.DefaultPath)
+	cfg := loadConfig(levelVar)
 	logConfig(&cfg)
 	m := obs.New()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	marker := health.NewMarker(health.DefaultPath)
 	// A marker inherited from a prior process must not report healthy before this one binds.
 	marker.Set(false)
 	defer marker.Cleanup()
@@ -113,22 +110,10 @@ func run() error {
 	}
 
 	bgDone := make(chan struct{})
-	if cfg.PollInterval == 0 {
-		slog.Info("one-shot mode, collecting once then serving")
-		go func() {
-			defer close(bgDone)
-			collect(ctx)
-		}()
-	} else {
-		slog.Info("scheduled mode", "interval", cfg.PollInterval)
-		go func() {
-			defer close(bgDone)
-			scheduler.RunLoop(ctx, collect, scheduler.LoopOptions{
-				Interval:    cfg.PollInterval,
-				FireOnStart: true,
-			})
-		}()
-	}
+	go func() {
+		defer close(bgDone)
+		collectLoop(ctx, cfg.PollInterval, collect)
+	}()
 
 	preDrain := func(context.Context) {
 		slog.Info("shutting down", "cause", context.Cause(ctx))
@@ -137,7 +122,7 @@ func run() error {
 
 	waitForCollect := func(ctx context.Context) {
 		if !webhttp.AwaitDone(ctx, bgDone) {
-			slog.Warn("collect goroutines did not finish before shutdown deadline")
+			slog.Warn("collect loop did not finish before shutdown deadline")
 		}
 	}
 	serveExit := func(shutdownCtx context.Context) {
@@ -149,6 +134,28 @@ func run() error {
 		webhttp.WithShutdownGrace(10*time.Second),
 		webhttp.WithPreDrain(preDrain),
 		webhttp.WithServeExit(serveExit))
+}
+
+func collectLoop(ctx context.Context, interval time.Duration, collect func(context.Context)) {
+	if interval == 0 {
+		slog.Info("one-shot mode, collecting once then serving")
+		collect(ctx)
+		return
+	}
+	slog.Info("scheduled mode", "interval", interval)
+	scheduler.RunLoop(ctx, collect, scheduler.LoopOptions{
+		Interval:    interval,
+		FireOnStart: true,
+	})
+}
+
+// loadConfig parses configuration and emits its diagnostics before the parsed
+// LOG_LEVEL applies, so an error-level setting cannot hide the warning that explains it.
+func loadConfig(levelVar *slog.LevelVar) config.Config {
+	cfg, warns := config.Load()
+	logWarnings(warns)
+	levelVar.Set(cfg.LogLevel)
+	return cfg
 }
 
 func logWarnings(warns []config.Warning) {
@@ -239,12 +246,6 @@ type healthSignal interface {
 }
 
 func logConfig(cfg *config.Config) {
-	for _, r := range cfg.DockerHubRepos {
-		slog.Info("docker hub repo", "ref", r.Owner+"/"+r.Repo)
-	}
-	for _, r := range cfg.GHCRRepos {
-		slog.Info("ghcr package", "ref", r.Owner+"/"+r.Repo)
-	}
 	slog.Info("configuration loaded",
 		"docker_hub_refs", len(cfg.DockerHubRepos),
 		"ghcr_refs", len(cfg.GHCRRepos),
