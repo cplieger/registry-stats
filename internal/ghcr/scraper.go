@@ -221,20 +221,10 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		candidates := len(pageNames) + pageRefused.Count
 		refused = refused.merge(pageRefused)
-		if candidates > maxListingCandidates {
-			return c.partialListing(ctx, owner, page, names, refused,
-				fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates))
-		}
-		stated, statedOK := statedPackages(html)
-		if statedOK {
-			accounted := len(slices.Compact(slices.Sorted(slices.Values(pageNames)))) + pageRefused.Count
-			if stated != accounted {
-				return c.partialListing(ctx, owner, page, names, refused,
-					fmt.Errorf("%w: listing page %d states %d packages against %d accounted for",
-						errHTMLFormatChanged, page, stated, accounted))
-			}
+		stated, statedOK, err := listingPagePopulation(html, page, pageNames, pageRefused)
+		if err != nil {
+			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
 		kept, added := appendUnseenNames(names, seen, pageNames)
 		names = kept
@@ -244,19 +234,41 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 			// repaginates rather than drifting.
 			advertised = pageTotal
 		}
-		if added == 0 {
-			if err := emptyPageError(page, advertised, pageNames, pageRefused, stated, statedOK); err != nil {
-				return c.partialListing(ctx, owner, page, names, refused, err)
-			}
-			return names, refused, nil
+		complete, err := listingPageComplete(page, advertised, added, pageNames, pageRefused, stated, statedOK)
+		if err != nil {
+			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		if page == advertised {
+		if complete {
 			return names, refused, nil
 		}
 	}
 	c.opts.Logger.Warn("ghcr owner listing hit page cap; results truncated",
 		"owner", owner, "max_pages", maxListingPages, "advertised_pages", advertised)
 	return names, refused, nil
+}
+
+func listingPagePopulation(html string, page int, names []string, refused refusals) (stated int, statedOK bool, err error) {
+	candidates := len(names) + refused.Count
+	if candidates > maxListingCandidates {
+		return 0, false, fmt.Errorf("%w: listing page %d carried %d package candidates", errHTMLFormatChanged, page, candidates)
+	}
+	stated, statedOK = statedPackages(html)
+	if !statedOK {
+		return stated, false, nil
+	}
+	accounted := len(slices.Compact(slices.Sorted(slices.Values(names)))) + refused.Count
+	if stated != accounted {
+		return stated, true, fmt.Errorf("%w: listing page %d states %d packages against %d accounted for",
+			errHTMLFormatChanged, page, stated, accounted)
+	}
+	return stated, true, nil
+}
+
+func listingPageComplete(page, advertised, added int, names []string, refused refusals, stated int, statedOK bool) (bool, error) {
+	if added == 0 {
+		return true, emptyPageError(page, advertised, names, refused, stated, statedOK)
+	}
+	return page == advertised, nil
 }
 
 // emptyPageError names why a listing page that added no new name is a format
@@ -460,10 +472,10 @@ func startTags(html string) iter.Seq2[string, error] {
 			cursor = next
 			if rescanned {
 				rescans++
-				if rescans > maxUnboundedScans {
-					yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxUnboundedScans))
-					return
-				}
+			}
+			if rescans > maxUnboundedScans {
+				yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxUnboundedScans))
+				return
 			}
 			if emit && !yield(tag, nil) {
 				return
@@ -509,29 +521,42 @@ func parsePackageList(html, owner string, kind ownerKind) (names []string, refus
 		if walkErr != nil {
 			return names, refused, advertised, walkErr
 		}
-		for name, value := range tagAttributes(tag) {
-			if pages := advertisedPages(name, value); pages > 0 {
-				if advertised != 0 && advertised != pages {
-					return names, refused, 0, fmt.Errorf(
-						"%w: listing page advertises %d pages and %d",
-						errHTMLFormatChanged, advertised, pages)
-				}
-				advertised = pages
-				continue
-			}
-			raw, isPackage := packageHref(name, value, prefix)
-			if !isPackage {
-				continue
-			}
-			pkg, nameErr := urlsafe.PackageName(owner, raw)
-			if nameErr != nil {
-				refused = refused.refuse(raw)
-				continue
-			}
-			names = append(names, strings.Clone(pkg))
+		tagNames, tagRefused, pageTotal, tagErr := parsePackageTag(tag, owner, prefix, advertised)
+		names = append(names, tagNames...)
+		refused = refused.merge(tagRefused)
+		if tagErr != nil {
+			return names, refused, 0, tagErr
 		}
+		advertised = pageTotal
 	}
 	return names, refused, advertised, nil
+}
+
+func parsePackageTag(tag, owner, prefix string, advertised int) (names []string, refused refusals, pageTotal int, err error) {
+	pageTotal = advertised
+	for name, value := range tagAttributes(tag) {
+		if pages := advertisedPages(name, value); pages > 0 {
+			if pageTotal != 0 && pageTotal != pages {
+				return names, refused, 0, fmt.Errorf(
+					"%w: listing page advertises %d pages and %d",
+					errHTMLFormatChanged, pageTotal, pages,
+				)
+			}
+			pageTotal = pages
+			continue
+		}
+		raw, isPackage := packageHref(name, value, prefix)
+		if !isPackage {
+			continue
+		}
+		pkg, nameErr := urlsafe.PackageName(owner, raw)
+		if nameErr != nil {
+			refused = refused.refuse(raw)
+			continue
+		}
+		names = append(names, strings.Clone(pkg))
+	}
+	return names, refused, pageTotal, nil
 }
 
 // statedPackages reports the package count a listing page publishes for
@@ -548,25 +573,31 @@ func statedPackages(html string) (n int, ok bool) {
 			return n, markers == 1
 		}
 		i += at
-		before := strings.TrimRight(html[:i], htmlWhitespace)
-		after := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
-		if strings.HasPrefix(after, "</") {
-			digitStart := len(before)
-			for digitStart > 0 && '0' <= before[digitStart-1] && before[digitStart-1] <= '9' {
-				digitStart--
+		if count, found := statedPackageCount(html, i, len(marker)); found {
+			if markers == 0 {
+				n = count
 			}
-			if digitStart > 0 && digitStart < len(before) && before[digitStart-1] == '>' {
-				count, err := strconv.Atoi(before[digitStart:])
-				if err == nil {
-					if markers == 0 {
-						n = count
-					}
-					markers++
-				}
-			}
+			markers++
 		}
 		at = i + len(marker)
 	}
+}
+
+func statedPackageCount(html string, markerAt, markerLen int) (int, bool) {
+	before := strings.TrimRight(html[:markerAt], htmlWhitespace)
+	after := strings.TrimLeft(html[markerAt+markerLen:], htmlWhitespace)
+	if !strings.HasPrefix(after, "</") {
+		return 0, false
+	}
+	digitStart := len(before)
+	for digitStart > 0 && '0' <= before[digitStart-1] && before[digitStart-1] <= '9' {
+		digitStart--
+	}
+	if digitStart == 0 || digitStart == len(before) || before[digitStart-1] != '>' {
+		return 0, false
+	}
+	count, err := strconv.Atoi(before[digitStart:])
+	return count, err == nil
 }
 
 // advertisedPages reports a positive page total, or zero for another

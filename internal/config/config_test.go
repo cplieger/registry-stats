@@ -340,7 +340,7 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 
 	want := map[string][]slog.Attr{
 		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {slog.String("value", "notanumber")},
-		"invalid LOG_LEVEL, using default":                    {slog.String("default", "info")},
+		"invalid LOG_LEVEL, using default":                     {slog.String("default", "info")},
 	}
 	got := make(map[string][]slog.Attr, len(warns))
 	for _, w := range warns {

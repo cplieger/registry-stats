@@ -235,9 +235,9 @@ func TestClient_Collect_WildcardListingFailure(t *testing.T) {
 				logger, buf := captureLogger()
 				c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 				collection := c.Collect(t.Context(), wildcard)
-		entries := collection.Entries
-		attempted := collection.Attempted
-		listingFailed := collection.ListingFailed
+				entries := collection.Entries
+				attempted := collection.Attempted
+				listingFailed := collection.ListingFailed
 
 				if listingFailed {
 					t.Error("listingFailed = true, want false for a partial listing failure")
@@ -367,10 +367,10 @@ func TestClient_Collect_PartialExplicitFailureLogsRepo(t *testing.T) {
 			c := dockerhub.NewClient(srv.Client(), dockerhub.Options{RetryOpts: shortRetry(), Logger: logger})
 			refs := []registry.RepoRef{{Owner: "bad", Repo: "app"}, {Owner: "good", Repo: "app"}}
 			collection := c.Collect(t.Context(), refs)
-	entries := collection.Entries
-	fetched := collection.Fetched
-	attempted := collection.Attempted
-	listingFailed := collection.ListingFailed
+			entries := collection.Entries
+			fetched := collection.Fetched
+			attempted := collection.Attempted
+			listingFailed := collection.ListingFailed
 
 			if fetched != 1 || attempted != 2 || listingFailed {
 				t.Errorf("Collect partial %s = (fetched=%d, attempted=%d, listingFailed=%v), want (1, 2, false)", tt.name, fetched, attempted, listingFailed)
