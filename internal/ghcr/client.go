@@ -37,16 +37,18 @@ const (
 // RequestTimeout bounds each attempt made by the shared production client.
 const RequestTimeout = 30 * time.Second
 
-const (
-	documentedPackagesAtPageCap = 1500
-	maximumGHCRFetches           = 1 + maxListingPages + documentedPackagesAtPageCap
-	maximumDockerHubFetches      = 2
-	maximumFetchDuration         = time.Duration(httpx.DefaultMaxAttempts)*RequestTimeout + time.Duration(httpx.DefaultMaxAttempts-1)*httpx.RetryAfterCap
-
-	// MaximumCycleDuration bounds one cycle at the documented registry ceilings.
-	// Docker Hub's two listing fetches run before GHCR; publication follows both.
-	MaximumCycleDuration = time.Duration(maximumGHCRFetches+maximumDockerHubFetches)*maximumFetchDuration + time.Duration(maximumGHCRFetches-1)*(DefaultMinPacing+DefaultPacingJitter)
-)
+// MaximumCycleDuration is the longest one collection cycle may take before the
+// liveness probe stops believing the loop is working.
+//
+// It is a stated allowance, not a computed supremum. A wildcard walk at the
+// documented ceiling (fifty listing pages, ~1,500 packages, one paced fetch
+// each) runs about 2h10m at the 5s pacing maximum, and the remaining margin
+// covers request service time, transient retries and several configured owners.
+// Summing the per-fetch retry budget over every fetch instead would exceed
+// ninety hours, which arms a deadline nothing can trip: a cycle that needs that
+// long is not slow, it is wedged, and reporting exactly that is what the probe
+// is for.
+const MaximumCycleDuration = 5 * time.Hour
 
 // Client is the GitHub Container Registry source (it satisfies
 // collect.Source at the wiring site in main). Construct via NewClient; the zero value is not usable.

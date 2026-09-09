@@ -128,7 +128,7 @@ func TestMain_healthProbeUsesCycleBudget(t *testing.T) {
 		}
 	})
 
-	const maximumCycleDuration = 92*time.Hour + 44*time.Minute + 40*time.Second
+	const maximumCycleDuration = 5 * time.Hour
 	tests := []struct {
 		name     string
 		interval string
