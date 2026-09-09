@@ -38,7 +38,7 @@ func main() {
 		case "health":
 			// The serving process reports configuration warnings; the frequent probe stays silent.
 			interval, _ := config.PollInterval()
-			health.RunProbe(health.DefaultPath, health.WithMaxAge(3*interval))
+			health.RunProbe(health.DefaultPath, health.WithMaxAge(healthMaxAge(interval)))
 		default:
 			// slogx first: the stdlib default handler emits no level=ERROR field, which
 			// is what the shipped log rules match on.
@@ -52,6 +52,13 @@ func main() {
 		slog.Error("registry-stats exited with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func healthMaxAge(interval time.Duration) time.Duration {
+	if interval == 0 {
+		return 0
+	}
+	return interval + ghcr.MaximumCycleDuration
 }
 
 // run wires dependencies and serves until a signal or server error.
@@ -85,11 +92,7 @@ func run() error {
 	}
 	slog.Info("http server starting", "addr", ln.Addr().String())
 
-	// Registry hosts redirect across the Docker and GitHub host families.
-	httpClient := &http.Client{
-		Timeout:       30 * time.Second,
-		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
-	}
+	httpClient := registryClient()
 	defer httpClient.CloseIdleConnections()
 
 	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
@@ -172,6 +175,10 @@ func logWarnings(warns []config.Warning) {
 }
 
 // publication serializes cycle publication against shutdown clearing readiness.
+// It owns the per-cycle phase of the three operator signals -- the image gauges,
+// the liveness marker and the readiness gate -- and is not their only writer:
+// run() owns boot liveness, cleared pre-bind and re-armed once the listener is up,
+// so the container is healthy before the first cycle finishes.
 type publication struct {
 	marker healthSignal
 	m      *obs.Metrics
@@ -221,6 +228,17 @@ func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
 		return cfg.GHCRRepos
 	}
 	return nil
+}
+
+// registryClient is the one outbound client both registry readers share.
+// CheckRedirect is the SSRF allowlist: without it net/http follows up to
+// ten redirects to any host, on two readers that fetch URLs an upstream
+// page controls.
+func registryClient() *http.Client {
+	return &http.Client{
+		Timeout:       ghcr.RequestTimeout,
+		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
+	}
 }
 
 // activeSources returns the sources with at least one configured

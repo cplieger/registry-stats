@@ -131,6 +131,37 @@ func TestRun_success_logs_lifecycle(t *testing.T) {
 	}
 }
 
+func TestRun_refLessSourceIsSkipped(t *testing.T) {
+	m := obs.New()
+	src := newFakeDockerHub()
+	src.entries = []registry.Entry{{Owner: "owner", Repo: "unexpected", Pulls: 1}}
+	src.fetched = 1
+	src.attempted = 1
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	images := collect.Run(t.Context(), collect.Options{
+		Metrics: m,
+		Sources: []collect.Source{src},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef { return nil },
+	})
+
+	if len(images) != 0 {
+		t.Errorf("Run(ref-less source) returned %d images, want 0", len(images))
+	}
+	if logs := buf.String(); !strings.Contains(logs, `level=WARN msg="no repos configured"`) {
+		t.Errorf("Run(ref-less source) logs = %q, want configuration warning", logs)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	m.Handler()(w, r)
+	if body := w.Body.String(); strings.Contains(body, `registrystats_collects_total{source="dockerhub"}`) {
+		t.Errorf("Run(ref-less source) minted a collect series:\n%s", body)
+	}
+}
+
 // TestRun_records_counters_for_invoked_sources pins the counters the shipped
 // RegistryStatsCollectStalled and RegistryStatsSourceDegraded rules read: an
 // invoked healthy source moves only collects_total, an invoked unhealthy one
@@ -625,6 +656,33 @@ func TestRun_degraded_cycle_names_failing_source(t *testing.T) {
 	}
 	if strings.Contains(logs, `msg="source reported unhealthy" source=dockerhub`) {
 		t.Errorf("Run() degraded-cycle logs attribute failure to serving Docker Hub source: %q", logs)
+	}
+}
+
+func TestRun_degraded_serving_cycle_stays_below_error_level(t *testing.T) {
+	src := newFakeDockerHub()
+	src.entries = []registry.Entry{{Owner: "owner", Repo: "app", Pulls: 1}}
+	src.fetched = 1
+	src.attempted = 1
+	src.listingFailed = true
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
+		Sources: []collect.Source{src},
+		Logger:  logger,
+		RefsFor: func(registry.ID) []registry.RepoRef {
+			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		},
+	})
+
+	logs := buf.String()
+	if !strings.Contains(logs, `level=WARN msg="source reported unhealthy"`) {
+		t.Errorf("Run(degraded serving source) logs = %q, want WARN source-health record", logs)
+	}
+	if strings.Contains(logs, "level=ERROR") {
+		t.Errorf("Run(degraded serving source) logs = %q, want no ERROR record", logs)
 	}
 }
 

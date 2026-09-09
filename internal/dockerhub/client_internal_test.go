@@ -91,11 +91,47 @@ func TestClient_ListRepos_ReportsMidWalkPopulationChange(t *testing.T) {
 	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
 
 	repos, advertised, err := c.listRepos(t.Context(), "o")
-	if !shapeChanged(err) {
-		t.Errorf("listRepos(total changed mid-walk) error = %v, want a shape-change error", err)
+	if !errors.Is(err, errListingMoved) {
+		t.Errorf("listRepos(total changed mid-walk) error = %v, want errListingMoved", err)
+	}
+	if shapeChanged(err) {
+		t.Errorf("listRepos(total changed mid-walk) error = %v, want a cause outside shapeChanged so it reports at WARN", err)
 	}
 	if len(repos) != 99 || advertised != 100 {
 		t.Errorf("listRepos(total changed mid-walk) = (%d repos, advertised %d), want (99, 100)", len(repos), advertised)
+	}
+}
+
+func TestClient_ListRepos_ReportsMidWalkPopulationChangeWhenCountsMatch(t *testing.T) {
+	page1 := make([]map[string]any, 0, pageSize)
+	for i := range pageSize {
+		page1 = append(page1, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 100, "results": page1, "next": "page2"})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"count": 101,
+				"results": []map[string]any{
+					{"name": "r98", "pull_count": 1},
+					{"name": "r99", "pull_count": 1},
+				},
+				"next": "",
+			})
+		}
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if !errors.Is(err, errListingMoved) {
+		t.Errorf("listRepos(total changed with matching retained count) error = %v, want errListingMoved", err)
+	}
+	if len(repos) != 100 || advertised != 100 {
+		t.Errorf("listRepos(total changed with matching retained count) = (%d repos, advertised %d), want (100, 100)", len(repos), advertised)
 	}
 }
 
@@ -162,10 +198,36 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	if !strings.Contains(logs, `level=WARN msg="docker hub owner listing hit page cap; results may be truncated"`) {
 		t.Errorf("Collect stopping at the page cap did not emit the alert-keyed WARN; logs:\n%s", logs)
 	}
+	if !strings.Contains(logs, "page_rows=2") {
+		t.Errorf("Collect stopping at the page cap did not report the 2 rows its pages carried; logs:\n%s", logs)
+	}
 	if !strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
 		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=2") ||
 		!strings.Contains(logs, "advertised=1000") {
 		t.Errorf("Collect stopping at the page cap did not report 2 of 1000 collected; logs:\n%s", logs)
+	}
+}
+
+func TestClient_ListRepos_RejectsMoreReposThanAdvertisedAtPageCap(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
+			"results": []map[string]any{
+				{"name": "r" + r.URL.Query().Get("page"), "pull_count": 1},
+			},
+			"next": "keep-going",
+		})
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if !shapeChanged(err) {
+		t.Errorf("listRepos(page-capped count 1 with 2 repos) error = %v, want a shape-change error", err)
+	}
+	if len(repos) != 2 || advertised != 1 {
+		t.Errorf("listRepos(page-capped count 1 with 2 repos) = (%d repos, advertised %d), want (2, 1)", len(repos), advertised)
 	}
 }
 
@@ -461,5 +523,28 @@ func TestClient_Collect_InternalBodyCapOverridesCaller(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "level=ERROR") {
 		t.Errorf("Collect() past the internal body cap did not log at ERROR; logs:\n%s", buf.String())
+	}
+}
+
+func TestClient_Collect_ExhaustedRetryStaysAtDebug(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := NewClient(srv.Client(), Options{Logger: logger, RetryOpts: shortRetry()})
+	c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "app"}})
+
+	// httpx levels its own terminal line at Warn for a multi-attempt
+	// budget, so this package keeps it at Debug: the operator-facing line
+	// for a failed Docker Hub read is this package's own, and
+	// RegistryStatsCollectionIncomplete already matches it.
+	logs := buf.String()
+	if !strings.Contains(logs, `level=DEBUG msg="http retries exhausted"`) {
+		t.Errorf("Collect() retry exhaustion did not stay at DEBUG; logs:\n%s", logs)
+	}
+	if strings.Contains(logs, `level=WARN msg="http retries exhausted"`) {
+		t.Errorf("Collect() retry exhaustion reached WARN, duplicating the client's own line; logs:\n%s", logs)
 	}
 }

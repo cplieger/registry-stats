@@ -163,6 +163,23 @@ func TestParseRepoRefs_acceptsOnlyExactWildcard(t *testing.T) {
 	}
 }
 
+func TestParseRepoRefs_rejectsEncodedWildcard(t *testing.T) {
+	refs, warns := parseRepoRefs("owner/%2A", registry.GHCR)
+	if len(refs) != 0 {
+		t.Errorf("parseRepoRefs(%q, GHCR) refs = %+v, want none", "owner/%2A", refs)
+	}
+	wantWarns := []Warning{{
+		Msg: "skipping unusable repo ref",
+		Attrs: []slog.Attr{
+			slog.String("input", "owner/%2A"),
+			slog.String("reason", "path element not a safe URL segment"),
+		},
+	}}
+	if !slices.EqualFunc(warns, wantWarns, warningEqual) {
+		t.Errorf("parseRepoRefs(%q, GHCR) warnings = %+v, want %+v", "owner/%2A", warns, wantWarns)
+	}
+}
+
 func TestParseRepoRefs_warnsForEveryRejectedTokenOnce(t *testing.T) {
 	input := "good/one,bad, ,owner/bad?repo,good/one,also-bad,ok/two,owner/bad%repo"
 	refs, warns := parseRepoRefs(input, registry.GHCR)

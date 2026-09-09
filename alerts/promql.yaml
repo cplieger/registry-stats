@@ -83,20 +83,28 @@ groups:
             the counter has no series then, so RegistryStatsConfigRejected
             owns that case.
       # The app's own per-source verdict. registry-stats increments
-      # collect_errors_total once for a cycle in which a wildcard owner listing
-      # wholly fails or more than half of the source's per-image fetch attempts
-      # fail. Docker Hub rows whose counts come from an owner listing count on
-      # neither side of that fetch-attempt ratio. A minority of per-image fetch
-      # failures deliberately does not move this counter, which is what
-      # RegistryStatsCollectionIncomplete covers.
+      # registrystats_collect_errors_total once for a cycle in which a wildcard
+      # owner listing wholly fails or more than half of the source's per-image
+      # fetch attempts fail. Docker Hub rows whose counts come from an owner
+      # listing count on neither side of that fetch-attempt ratio. A minority
+      # of per-image fetch failures deliberately does not move this counter,
+      # which is what RegistryStatsCollectionIncomplete covers.
       #
-      # Both per-source counters are pre-minted at zero for every configured
-      # source at process start, so increase() has an earlier sample to
-      # subtract from and the single-failure case, the one worth knowing about,
-      # fires. A source with no configured refs has no series at all, so this
-      # cannot fire for a registry the deployment never polls.
+      # Both per-source counters are pre-minted in process memory, but that zero
+      # is not a scrape sample. If the first failure happens before the first
+      # scrape, the first observed sample is already positive and increase()
+      # has no earlier sample to subtract. The uptime arm covers that startup
+      # window; the ordinary increase arm covers later failures. A source with
+      # no configured refs has no series, so this cannot fire for a registry the
+      # deployment never polls.
       - alert: RegistryStatsSourceDegraded
-        expr: increase(registrystats_collect_errors_total[3h]) > 0
+        expr: |
+          increase(registrystats_collect_errors_total[3h]) > 0
+          or (
+            registrystats_collect_errors_total > 0
+            and on (job, instance)
+            (time() - process_start_time_seconds < 3 * 60 * 60)
+          )
         for: 0m
         labels:
           severity: warning
@@ -115,9 +123,9 @@ groups:
             failure, or a page-format change.
       # registrystats_image_pulls_total is exported as a GAUGE despite the
       # `_total` suffix, so range queries on it use `delta()` (as
-      # grafana-dashboard.json:214 does) and never `rate()`/`increase()`, whose
-      # counter-reset correction inflates the result across exactly the downward
-      # restatement this rule detects.
+      # grafana-dashboard.json's delta(...[1d]) panel does) and never
+      # `rate()`/`increase()`, whose counter-reset correction inflates the
+      # result across exactly the downward restatement this rule detects.
       - alert: RegistryStatsPullCountRegressed
         expr: registrystats_image_pulls_total < max_over_time(registrystats_image_pulls_total[2d])
         for: 30m

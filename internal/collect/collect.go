@@ -13,6 +13,9 @@ import (
 
 // Source collects registry-specific statistics. Source must return a known
 // registry.ID; registry.Collection defines the returned cycle accounting.
+// A successful Collect returns entries whose Owner and Repo are non-empty:
+// obs keys the published gauge on that pair, and every construction gate
+// rejects the empty string.
 type Source interface {
 	Source() registry.ID
 	Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection
@@ -29,11 +32,12 @@ type Options struct {
 }
 
 // Run orchestrates a single collection cycle: it invokes each source's
-// Collect, stamps each entry with its source's registry label, and returns
-// the combined per-image records. The caller owns the health marker and derives
-// it from the returned set. A
-// cancelled cycle stops early and returns what it collected, with no error,
-// so a caller that publishes the set must check ctx.Err() first.
+// Collect (skipping a source with no refs), stamps each entry with its
+// source's registry label, and returns the combined per-image records.
+// The caller owns the health marker and derives it from the returned
+// set. A cancelled cycle stops early and returns what it collected,
+// with no error, so a caller that publishes the set must check
+// ctx.Err() first.
 func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	var images []obs.ImageMetric
 
@@ -42,6 +46,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	start := time.Now()
 	logger.Info("starting collection")
 	var degraded bool
+	var invokedAnySource bool
 
 	for _, src := range opts.Sources {
 		if ctx.Err() != nil {
@@ -53,6 +58,10 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 			break
 		}
 		refs := opts.RefsFor(src.Source())
+		if len(refs) == 0 {
+			continue
+		}
+		invokedAnySource = true
 		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, src, refs)
 		if !srcHealthy {
 			degraded = true
@@ -68,7 +77,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 
 	if len(images) == 0 {
 		switch {
-		case len(opts.Sources) == 0:
+		case !invokedAnySource:
 			// RegistryStatsConfigRejected (alerts/logql.yaml) matches the text of the
 			// "no repos configured" WARN; reword it there and here together.
 			logger.Warn("no repos configured")

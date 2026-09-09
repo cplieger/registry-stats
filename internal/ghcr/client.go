@@ -10,7 +10,6 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/runesafe/v2"
 )
 
 // Options configures GHCR-specific scraper policy. Zero pacing fields select
@@ -33,6 +32,20 @@ type Options struct {
 const (
 	DefaultMinPacing    = 2 * time.Second
 	DefaultPacingJitter = 3 * time.Second
+)
+
+// RequestTimeout bounds each attempt made by the shared production client.
+const RequestTimeout = 30 * time.Second
+
+const (
+	documentedPackagesAtPageCap = 1500
+	maximumGHCRFetches           = 1 + maxListingPages + documentedPackagesAtPageCap
+	maximumDockerHubFetches      = 2
+	maximumFetchDuration         = time.Duration(httpx.DefaultMaxAttempts)*RequestTimeout + time.Duration(httpx.DefaultMaxAttempts-1)*httpx.RetryAfterCap
+
+	// MaximumCycleDuration bounds one cycle at the documented registry ceilings.
+	// Docker Hub's two listing fetches run before GHCR; publication follows both.
+	MaximumCycleDuration = time.Duration(maximumGHCRFetches+maximumDockerHubFetches)*maximumFetchDuration + time.Duration(maximumGHCRFetches-1)*(DefaultMinPacing+DefaultPacingJitter)
 )
 
 // Client is the GitHub Container Registry source (it satisfies
@@ -151,7 +164,7 @@ func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoR
 			return registry.Entry{}, err
 		}
 		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo,
-			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			"error", errTextForLog(err))
 		return registry.Entry{}, err
 	}
 	c.opts.Logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)

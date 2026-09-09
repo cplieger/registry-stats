@@ -40,10 +40,10 @@ func New(d Deps) *http.Server {
 			webhttp.WithRecordRouteMetric(d.Metrics.RecordHTTP),
 		),
 		// Recoverer buys legibility, not survival: net/http's (*conn).serve
-		// already recovers every handler panic except ErrAbortHandler (go1.27.0,
-		// src/net/http/server.go), so without it the process still lives - the
-		// connection drops and the access line above reports the status
-		// recorder's default 200 instead of a truthful 500.
+		// recovers every handler panic but suppresses ErrAbortHandler's entire panic
+		// log line (go1.27.0, src/net/http/server.go), so without it the process
+		// still lives - the connection drops and the access line above reports the
+		// status recorder's default 200 instead of a truthful 500.
 		webhttp.Recoverer(webhttp.WithRecoverLogger(d.Logger)),
 		webhttp.SecurityHeaders(),
 	)

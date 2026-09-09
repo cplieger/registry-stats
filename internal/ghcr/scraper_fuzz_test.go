@@ -48,9 +48,9 @@ func FuzzParsePackageList(f *testing.F) {
 	f.Add(`<a href="/users/owner/packages/container/package/a%2fb">nested name</a>`, "owner")
 	f.Add(`<a href="/users/owner/packages/container/package/..%2f..%2f">traversal</a>`, "owner")
 	f.Fuzz(func(t *testing.T, html, owner string) {
-		pkgs, refused, _, _ := parsePackageList(html, owner, userOwner)
+		pkgs, refused, _ := parsePackageList(html, owner, userOwner)
 		for _, name := range pkgs {
-			canonical, err := urlsafe.PackageName(owner, url.PathEscape(name))
+			canonical, err := urlsafe.PackageName(urlsafe.Owner(owner), url.PathEscape(name))
 			if err != nil || canonical != name {
 				t.Errorf("parsePackageList(%q, %q) returned unsafe name %q", html, owner, name)
 			}
@@ -59,7 +59,7 @@ func FuzzParsePackageList(f *testing.F) {
 			t.Errorf("parsePackageList(%q, %q) sampled %d bytes, want at most %d", html, owner, len(refused.Sample), maxRefusalSampleBytes)
 		}
 		if refused.Count > 0 && len(html) <= maxRefusalSampleBytes {
-			if _, err := urlsafe.PackageName(owner, refused.Sample); err == nil {
+			if _, err := urlsafe.PackageName(urlsafe.Owner(owner), refused.Sample); err == nil {
 				t.Errorf("parsePackageList(%q, %q) sampled %q as refused, but it is a safe package token", html, owner, refused.Sample)
 			}
 		}

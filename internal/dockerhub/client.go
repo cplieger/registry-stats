@@ -105,6 +105,13 @@ func (c *Client) collectWildcards(ctx context.Context, refs []registry.RepoRef) 
 	return results, seen, listingFailed
 }
 
+// errTextForLog bounds an upstream error string in a log attribute: long
+// enough to diagnose a Docker Hub failure, short enough that one upstream
+// message cannot dominate the alert-keyed line.
+func errTextForLog(err error) string {
+	return runesafe.SanitizeSingleLineBounded(err.Error(), 256)
+}
+
 // collectWildcardRef lists one owner's public repos, recording each repo in
 // the shared seen map (mutated in place) so collectExplicit can skip a ref this
 // expansion already covered. listingFailed reports a wholesale listing outage
@@ -117,16 +124,16 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 		// A stop is not a classification.
 	case err != nil && len(repos) == 0:
 		listingFailed = true
-		c.logger.Log(ctx, listingLevel(err), "docker hub listing wholly failed",
+		c.logger.Log(ctx, failureLevel(err), "docker hub listing wholly failed",
 			"owner", owner,
 			"advertised", advertised,
-			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			"error", errTextForLog(err))
 	case err != nil:
-		c.logger.Log(ctx, listingLevel(err), "docker hub listing partially failed",
+		c.logger.Log(ctx, failureLevel(err), "docker hub listing partially failed",
 			"owner", owner,
 			"repos", len(repos),
 			"advertised", advertised,
-			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			"error", errTextForLog(err))
 	case len(repos) == 0:
 		c.logger.Error("docker hub wildcard expanded no repos", "owner", owner, "repos", 0, "advertised", advertised)
 	default:
@@ -165,11 +172,11 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 			if ctx.Err() != nil {
 				// A stop, not a registry failure.
 				c.logger.Debug("docker hub fetch cancelled", "repo", name,
-					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+					"error", errTextForLog(err))
 				return results, attempted
 			}
-			c.logger.Log(ctx, listingLevel(err), "docker hub fetch failed", "repo", name,
-				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			c.logger.Log(ctx, failureLevel(err), "docker hub fetch failed", "repo", name,
+				"error", errTextForLog(err))
 			continue
 		}
 
@@ -177,7 +184,7 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 		if err != nil {
 			c.logger.Error("docker hub parse failed",
 				"repo", name,
-				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+				"error", errTextForLog(err))
 			continue
 		}
 
@@ -193,15 +200,15 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 
 // listRepos paginates the Docker Hub owner listing endpoint. advertised is the
 // total its first page publishes, so the caller can report how much of the
-// owner this walk holds. A completed walk whose retained distinct repositories
-// differ from that total is an error, and the cause is one of three: a row the
-// name check dropped, a listing that changed between page requests, or an
-// upstream total that does not match what it served. Offset pagination cannot
-// tell them apart, so the snapshot may be mixed and may have skipped the row on
-// the page boundary; a walk that stopped early returns what it collected with advertised set.
+// owner this walk holds. Which sentinel classifies a failed walk, and why, is
+// on errListingMoved and errResponseUnparsable. A walk stopped at the page cap
+// returns what it collected, reporting the rows its pages carried so a row
+// lost to a cross-page repeat is not read as truncation.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
 	seen := make(map[registry.RepoRef]bool)
 	complete := false
+	moved := false
+	pageRows := 0
 
 	for page := 1; page <= maxOwnerPages; page++ {
 		if ctx.Err() != nil {
@@ -217,9 +224,13 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		if err != nil {
 			return entries, advertised, fmt.Errorf("parse repo list page %d: %w", page, err)
 		}
-		if page == 1 {
+		switch {
+		case page == 1:
 			advertised = pageTotal
+		case pageTotal != advertised:
+			moved = true
 		}
+		pageRows += len(pageRepos)
 		entries = appendDistinct(entries, seen, pageRepos)
 
 		if !more {
@@ -228,13 +239,22 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		}
 	}
 	if !complete {
+		if len(entries) > advertised {
+			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d its first page advertised, on a walk stopped at the page cap",
+				errResponseUnparsable, len(entries), advertised)
+		}
 		c.logger.Warn("docker hub owner listing hit page cap; results may be truncated",
-			"owner", owner, "repos", len(entries), "advertised", advertised, "max_pages", maxOwnerPages)
+			"owner", owner, "repos", len(entries), "page_rows", pageRows,
+			"advertised", advertised, "max_pages", maxOwnerPages)
 		return entries, advertised, nil
 	}
+	if moved {
+		return entries, advertised, fmt.Errorf("%w: yielded %d retained distinct repositories against the %d its first page advertised, and a later page advertised a different total",
+			errListingMoved, len(entries), advertised)
+	}
 	if len(entries) != advertised {
-		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d its first page advertised; the listing may have changed while it was being read",
-			errResponseUnparsable, len(entries), advertised)
+		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories from the %d rows its pages carried, against the %d every page advertised",
+			errResponseUnparsable, len(entries), pageRows, advertised)
 	}
 
 	return entries, advertised, nil
@@ -277,15 +297,12 @@ func parseRepoMeta(data []byte) (int64, error) {
 }
 
 // parseRepoListPage parses one page of the Docker Hub owner-listing
-// response. The upstream "next" token is an absolute URL the caller
-// does not follow, composing each request from its own page index
-// instead. total is the owner's repository count as the envelope
-// advertises it, and it is REQUIRED: it is the only value that can
-// prove a completed walk collected everything, which listRepos owns.
-// The whole PAGE fails on an over-count response, a missing total,
-// any retained result without a usable pull_count, or every result
-// dropped as unsafe; zero repos with a nil error and a zero total
-// reads as a legitimately empty owner.
+// response. The upstream "next" token is an absolute URL the caller does
+// not follow, composing each request from its own page index instead.
+// total is the owner's repository count as the envelope advertises it,
+// and it is REQUIRED: it is the only value that can prove a completed
+// walk collected everything, which listRepos owns. Zero repos with a nil
+// error and a zero total reads as a legitimately empty owner.
 func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, more bool, total int, err error) {
 	var resp struct {
 		Count   *int   `json:"count"`
@@ -336,6 +353,12 @@ var errPullCountInvalid = errors.New("pull count missing or negative")
 // urlsafe.IsSafeURLSegment before publication as a metric label value.
 var errRepoNameUnsafe = errors.New("listed repo names rejected as unsafe")
 
+// errListingMoved classifies a completed owner walk when a later page
+// advertises a different total from the first: upstream described two
+// populations, so the listing moved between requests. Every response decoded
+// and each was self-consistent, so this is not a format-change signal.
+var errListingMoved = errors.New("docker hub owner listing moved between page requests")
+
 // errResponseUnparsable classifies any post-200 schema failure as a
 // format-change signal rather than a transport one: a json/v2 decode
 // rejection, or a decoded envelope that contradicts what was asked
@@ -351,7 +374,7 @@ func shapeChanged(err error) bool {
 		errors.Is(err, errResponseUnparsable)
 }
 
-func listingLevel(err error) slog.Level {
+func failureLevel(err error) slog.Level {
 	if shapeChanged(err) {
 		return slog.LevelError
 	}

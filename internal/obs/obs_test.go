@@ -46,6 +46,7 @@ func TestMetricsHandler(t *testing.T) {
 		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
 		`registrystats_http_request_duration_seconds_bucket{le="0.025"}`,
 		`registrystats_collect_duration_seconds_bucket{le="5"} 1`,
+		`registrystats_collect_duration_seconds_bucket{le="10800"} 1`,
 		`registrystats_collect_duration_seconds_count`,
 		`go_goroutines`,
 		`process_uptime_seconds`,
@@ -231,6 +232,7 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
 	consumerSeries := make(map[string]bool)
 	for _, path := range []string{
+		"../../CONTRIBUTING.md",
 		"../../README.md",
 		"../../alerts/logql.yaml",
 		"../../alerts/promql.yaml",

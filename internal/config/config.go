@@ -36,18 +36,11 @@ type Config struct {
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
 }
 
-// attrValue is the slog key a warning about the whole environment value
-// uses for that value. A skipped repo-list entry carries "input" instead: it
-// is one token out of the value, not the value.
+// attrValue is the slog key for a warning's whole environment value.
 const attrValue = "value"
 
-// Warning is a non-fatal configuration note for the caller to log. Attrs
-// carries structured attributes rather than a pre-rendered sentence, so
-// attribute-keyed queries keep working. Attrs holds only top-level string
-// or int attributes: no groups, so a caller can bound a string value
-// without resolving one. A string attribute may carry raw environment-derived
-// input, and a caller that emits one owns capping and sanitizing it first
-// (runesafe.SanitizeSingleLineCapped).
+// Warning carries a non-fatal configuration message and top-level string or
+// int attributes. This package never logs.
 type Warning struct {
 	// Rewording a Msg silently disarms any alerts/logql.yaml rule matching
 	// it: RegistryStatsConfigRejected matches three of the five below.
@@ -177,8 +170,8 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	return refs, warns
 }
 
-// resolveRef returns the canonical lower-case ref because lower case is the
-// spelling both registries accept: Docker Hub requires it, while GHCR is
+// resolveRef returns the canonical lower-case ref because Docker Hub 404s an
+// upper-case ref, ghcr.io will not register one, and the fold makes deduplication
 // case-insensitive. A non-nil error names the refusing rule and is not a sentinel.
 func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 	owner, repo, ok := strings.Cut(token, "/")
@@ -188,7 +181,7 @@ func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 	if !urlsafe.IsSafeURLSegment(owner) {
 		return registry.RepoRef{}, errors.New("owner not a safe URL segment")
 	}
-	name, err := repoName(reg, owner, repo)
+	name, err := repoName(reg, urlsafe.Owner(owner), repo)
 	if err != nil {
 		return registry.RepoRef{}, err
 	}
@@ -200,7 +193,7 @@ func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 
 // repoName accepts a wildcard for either registry, one safe segment for Docker
 // Hub, and a decoded safe package name for GHCR.
-func repoName(reg registry.ID, owner, repo string) (string, error) {
+func repoName(reg registry.ID, owner urlsafe.Owner, repo string) (string, error) {
 	if repo == "*" {
 		return repo, nil
 	}

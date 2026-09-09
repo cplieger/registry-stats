@@ -100,9 +100,12 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 			case "/orgs/owner/packages":
 				w.WriteHeader(http.StatusNotFound)
 			case "/owner":
-				_, _ = w.Write([]byte(`<div data-total-pages="1"></div>` +
-					packageLink(userOwner, "owner", "pkg1") +
-					packageLink(userOwner, "owner", "pkg2")))
+				if r.URL.Query().Get("page") == "1" {
+					_, _ = w.Write([]byte(packageLink(userOwner, "owner", "pkg1") +
+						packageLink(userOwner, "owner", "pkg2")))
+					return
+				}
+				_, _ = w.Write([]byte(`<span>0 packages</span>`))
 			case "/users/owner/packages/container/package/pkg1", "/users/owner/packages/container/package/pkg2":
 				_, _ = w.Write([]byte(downloadsHTML("11")))
 			default:
@@ -124,8 +127,8 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 			t.Fatalf("Collect(wildcard) = (%d entries, fetched %d, attempted %d, listingFailed %v), want (2, 2, 2, false)",
 				len(entries), fetched, attempted, listingFailed)
 		}
-		if len(stamps) != 4 {
-			t.Fatalf("handler saw %d requests, want 4 (one account-kind probe, one listing, and two packages)", len(stamps))
+		if len(stamps) != 5 {
+			t.Fatalf("handler saw %d requests, want 5 (one account-kind probe, two listing pages, and two packages)", len(stamps))
 		}
 		if !stamps[0].Equal(start) {
 			t.Errorf("first request issued at %v, want no clock advance from %v", stamps[0], start)
@@ -229,6 +232,42 @@ func TestCollect_whollyFailedListing(t *testing.T) {
 	}
 }
 
+func TestCollect_EarlierWildcardFailureSurvivesLaterSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/bad/packages", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("GET /bad", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("GET /orgs/good/packages", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_, _ = w.Write([]byte(packageLink(orgOwner, "good", "pkg")))
+		case "2":
+			_, _ = w.Write([]byte(`<span>0 packages</span>`))
+		default:
+			t.Errorf("good listing requested page %q, want page 1 or 2", r.URL.Query().Get("page"))
+		}
+	})
+	mux.HandleFunc("GET /users/good/packages/container/package/pkg", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(downloadsHTML("7")))
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+
+	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "*"}})
+	if !collection.ListingFailed {
+		t.Error("Collect(failed wildcard, successful wildcard) ListingFailed = false, want true")
+	}
+	if collection.Attempted != 1 || collection.Fetched != 1 || len(collection.Entries) != 1 {
+		t.Fatalf("Collect(failed wildcard, successful wildcard) = (%d attempted, %d fetched, %d entries), want (1, 1, 1)", collection.Attempted, collection.Fetched, len(collection.Entries))
+	}
+	if got := collection.Entries[0]; got.Owner != "good" || got.Repo != "pkg" || got.Pulls != 7 {
+		t.Errorf("Collect(failed wildcard, successful wildcard) entry = %+v, want good/pkg with 7 pulls", got)
+	}
+}
+
 // TestCollect_packageFailuresDoNotSetListingFailed verifies that failures
 // scraping explicit packages do not masquerade as a wildcard-listing outage.
 func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
@@ -267,7 +306,7 @@ func TestCollect_clientTimeoutDoesNotSetListingFailed(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 
 	client := srv.Client()
-	client.Timeout = 5 * time.Millisecond
+	client.Timeout = 250 * time.Millisecond
 	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "slow"}, {Owner: "owner", Repo: "fast"}}
 	collection := c.Collect(t.Context(), refs)

@@ -120,7 +120,7 @@ here.
   rejects duplicate object members and matches field names exactly, and
   `pull_count` / `count` are required (`*int64` / `*int`): absent, null or
   negative is an error. That is deliberate and load-bearing:
-  `image_pulls_total` is cumulative, so a silently-substituted 0 reads
+  `registrystats_image_pulls_total` is cumulative, so a silently-substituted 0 reads
   downstream as a pull-count regression rather than as missing data. A
   missing `pull_count` on an owner-listing result fails the whole page, which
   surfaces as "listing wholly failed" plus an unhealthy cycle; dropping the

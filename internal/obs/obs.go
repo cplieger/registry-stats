@@ -27,10 +27,9 @@ type Metrics struct {
 }
 
 // New constructs an isolated metrics registry.
-// The names below are the published series, read as literal text by every
-// shipped consumer TestMetricsHandler_publishesSeriesUsedByShippedConsumers
-// enumerates; it fails on a rename that strands one. CONTRIBUTING.md carries
-// only the rename-proof registrystats_* glob and stays outside that list.
+// The names below are the series every shipped document names as literal
+// text; TestMetricsHandler_publishesSeriesUsedByShippedConsumers fails on
+// a rename that strands one.
 func New() *Metrics {
 	m := &Metrics{
 		registry: metrics.NewRegistry("registrystats"),
@@ -53,12 +52,12 @@ func New() *Metrics {
 			"http_request_duration_seconds",
 			"HTTP request latency",
 		),
-		// GHCR requests are paced 2-5s apart and both registry readers are sequential,
-		// so these bounds span sub-second cycles through one default poll interval.
+		// A wildcard cycle at the documented fifty-page cap issues about 1,550 paced
+		// GHCR fetches: 1.5h expected, 2.2h at the 5s pacing maximum, plus Docker Hub.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",
-			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600}),
+			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600, 10800}),
 		),
 		// _total on a gauge is a deliberate deviation: the name is the published
 		// series, and the mirrored registry total can be restated downward, which
@@ -118,7 +117,7 @@ type ImageMetric struct {
 
 // SetImage replaces the image gauge data for one collect cycle.
 // images is the whole population this cycle MEASURED: every key absent from it is retired, so an absent series means
-// this cycle did not measure that image - either it is gone, or the source could not finish enumerating its population.
+// this cycle did not measure that image; RegistryStatsCollectionIncomplete (alerts/logql.yaml) names the causes it covers.
 // Current values are Set in place and departed series Deleted one by one rather than Reset+Set, so a series present in
 // both cycles is never missing from a concurrent scrape; an overlapping scrape may still read one cycle stale.
 func (m *Metrics) SetImage(images []ImageMetric) {

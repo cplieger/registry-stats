@@ -80,7 +80,7 @@ func TestPackageName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := PackageName(tt.owner, tt.token)
+			got, err := PackageName(Owner(tt.owner), tt.token)
 			if got != tt.want || (err != nil) != (tt.want == "") {
 				t.Errorf("PackageName(%q, %q) = (%q, %v), want %q", tt.owner, tt.token, got, err, tt.want)
 			}
@@ -148,7 +148,7 @@ func FuzzPackageName_decodesBeforeValidatingElements(f *testing.F) {
 			}
 		}
 
-		got, err := PackageName(owner, token)
+		got, err := PackageName(Owner(owner), token)
 		if (err == nil) != wantOK {
 			t.Fatalf("PackageName(%q, %q) = (%q, %v), accepted = %v", owner, token, got, err, wantOK)
 		}

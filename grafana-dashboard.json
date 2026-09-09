@@ -58,7 +58,7 @@
     {
       "id": 10,
       "title": "Total Downloads",
-      "description": "Sum of all downloads across all tracked packages and registries",
+      "description": "Sum of all downloads across all tracked packages and registries. Registry-reported request counts, not completed transfers or users.",
       "type": "stat",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -200,7 +200,7 @@
     {
       "id": 3,
       "title": "Daily Download Delta",
-      "description": "New downloads per day per repo",
+      "description": "New downloads per day per repo. Registry-reported request counts, not completed transfers: on GHCR a manifest GET increments the total, so automated digest and manifest reads move this series.",
       "type": "timeseries",
       "gridPos": { "h": 13, "w": 12, "x": 12, "y": 10 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },

@@ -24,11 +24,16 @@
 # labels are starting points.
 #
 # These rules assume the default LOG_LEVEL=info.
-# LOG_LEVEL=error silences RegistryStatsCollectionIncomplete except for Docker
-# Hub listing and fetch failures caused by response-schema changes, which emit
-# at ERROR; the rule keeps matching them because it selects on the message, not
-# the level. RegistryStatsConfigRejected's startup records work at every
-# LOG_LEVEL because they are emitted before the configured level is applied.
+# LOG_LEVEL=error silences RegistryStatsCollectionIncomplete except for records whose
+# cause is markup or response-schema drift: Docker Hub listing and fetch failures and
+# GHCR partial listings emit at ERROR on those causes and remain matched by message.
+# The alternation below enumerates only series-omission lines that can also emit at
+# WARN. A Docker Hub metadata response that decodes without a usable pull count emits
+# `docker hub parse failed` at ERROR unconditionally, so RegistryStatsError owns it by
+# level. A GHCR listing that fails WHOLLY also emits at ERROR on that cause, but its
+# message is not one of the five this rule keys on, so RegistryStatsError owns it.
+# RegistryStatsConfigRejected's startup records work at every LOG_LEVEL because they
+# are emitted before the configured level is applied.
 # At LOG_LEVEL=error, the recurring no-repos WARN is suppressed, so that alert clears when its startup record ages out of the
 # one-hour window. Before this rewrite, an operator running LOG_LEVEL=error had
 # no reachable true RegistryStatsCollectionIncomplete firing and exactly one
@@ -109,10 +114,12 @@ groups:
       # reports those omissions whether or not the source-level health threshold
       # is crossed; RegistryStatsSourceDegraded may fire concurrently. The
       # per-repo Docker Hub fetch and GHCR scrape lines remove one image series.
-      # `ghcr listing refused package candidates` catches the nil-error case
-      # where a listing returns usable refs but omits published candidates,
-      # which no counter can see. On the page-cap path it accompanies `hit page
-      # cap`, and because the condition is greater than zero the extra match
+      # A per-repo Docker Hub parse failure removes one identically, but its
+      # `docker hub parse failed` record is always ERROR and RegistryStatsError
+      # owns it by level. `ghcr listing refused package candidates` catches the
+      # nil-error case where a listing returns usable refs but omits published
+      # candidates, which no counter can see. On the page-cap path it
+      # accompanies `hit page cap`, and because the condition is greater than zero the extra match
       # cannot change whether this rule fires. On a wholly failed listing it is
       # this rule's only match: that path emits `ghcr package listing failed`,
       # which this rule does not match, and RegistryStatsSourceDegraded reports
@@ -140,10 +147,11 @@ groups:
           description: >
             A collect cycle exported an incomplete set of image series: a
             Docker Hub owner publishes more repositories than an unauthenticated
-            listing can enumerate, a Docker Hub repository fetch failed, a GHCR
-            owner listing hit its page cap or lost a page, GHCR refused one or
-            more published package-link candidates, or a minority of GHCR
-            packages failed to scrape. The affected image series are absent
+            listing can enumerate, a Docker Hub owner listing moved between page
+            requests, so the snapshot may be mixed, a Docker Hub repository fetch
+            failed, a GHCR owner listing hit its page cap or lost a page, GHCR
+            refused one or more published package-link candidates, or a minority
+            of GHCR packages failed to scrape. The affected image series are absent
             from /metrics for that cycle whether or not the source-level health
             threshold is crossed. RegistryStatsSourceDegraded may fire
             concurrently: a majority of per-repo failures or a wholly failed

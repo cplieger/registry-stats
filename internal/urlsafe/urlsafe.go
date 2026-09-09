@@ -28,10 +28,14 @@ func IsSafeURLSegment(s string) bool {
 	return safeSegment.MatchString(s)
 }
 
+// Owner is a registry owner segment as supplied by a caller that has already
+// accepted it with IsSafeURLSegment.
+type Owner string
+
 // CheckReference reports the refusing rule when the slash-joined owner/name
 // repository path exceeds MaxSegmentBytes. Both registry arms call it, so the
 // bound is one rule with one wording rather than a per-registry copy.
-func CheckReference(owner, name string) error {
+func CheckReference(owner Owner, name string) error {
 	if len(owner)+1+len(name) > MaxSegmentBytes {
 		return fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)
 	}
@@ -44,7 +48,7 @@ func CheckReference(owner, name string) error {
 // segment. Errors name the refusing rule for callers to report and are not
 // sentinels. owner is read only for its length, as part of the whole-reference
 // budget; the caller owns putting it through IsSafeURLSegment.
-func PackageName(owner, token string) (name string, err error) {
+func PackageName(owner Owner, token string) (name string, err error) {
 	if strings.Contains(token, "/") {
 		return "", errors.New("raw slash; percent-encode nested names")
 	}

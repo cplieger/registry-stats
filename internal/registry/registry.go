@@ -16,11 +16,10 @@ type Collection struct {
 	// through its own diagnostics, and the published series for the rows it did
 	// not read are absent for that cycle.
 	Entries []Entry
-	// Fetched counts explicit metadata fetches that yielded an entry; wildcard
-	// rows never count as fetched.
+	// Fetched counts per-image metadata fetches that yielded an entry; a row a
+	// listing supplied without its own request counts on neither side.
 	Fetched int
-	// Attempted counts explicit metadata fetches tried; wildcard rows never
-	// count as attempted.
+	// Attempted counts per-image metadata fetches tried, on the same rule.
 	Attempted int
 	// ListingFailed reports an owner listing that could not be read as a listing.
 	ListingFailed bool

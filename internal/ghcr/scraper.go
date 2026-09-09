@@ -52,13 +52,12 @@ const maxListingCandidates = 100
 // Fifty is a round limit above the largest measured total of 23 pages.
 const maxListingPages = 50
 
-// maxUnboundedScans bounds terminator lookups that read the remaining page.
+// maxRescans bounds terminator lookups that read the remaining page.
 // Five live pages carrying 1,075-1,808 start tags each measured zero.
-const maxUnboundedScans = 8
+const maxRescans = 8
 
-// advertisedPagesAttr is one of two listing-completeness signals, and is the
-// one GitHub omits for a single-page listing.
-const advertisedPagesAttr = "data-total-pages"
+// statedPackagesMarker identifies the printed package count for one listing page.
+const statedPackagesMarker = "packages"
 
 // maxRefusalSampleBytes bounds both the retained page slice and the sanitized
 // log attribute. Both caps are needed because invalid UTF-8 expands when
@@ -77,11 +76,10 @@ const (
 )
 
 // listingURL builds the listing URL for one owner kind and 1-based page.
-// The ecosystem filter makes data-total-pages countable because an unfiltered
-// total includes package types these container links do not enumerate. The
-// organization form does not redirect. For an organization, the user form
-// redirects to a profile page and drops the listing query, so callers probe the
-// organization form first.
+// The ecosystem filter keeps the listing links and its printed package count
+// scoped to container packages. The organization form does not redirect. For
+// an organization, the user form redirects to a profile page and drops the
+// listing query, so callers probe the organization form first.
 func listingURL(kind ownerKind, owner string, page int) string {
 	if kind == orgOwner {
 		return fmt.Sprintf("https://github.com/orgs/%s/packages?ecosystem=container&page=%d", owner, page)
@@ -186,30 +184,47 @@ func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) 
 	}
 }
 
+// errTextForLog bounds an upstream error string in a log attribute: long enough
+// to diagnose a GitHub failure, short enough that one upstream message cannot
+// dominate the alert-keyed line.
+func errTextForLog(err error) string {
+	return runesafe.SanitizeSingleLineBounded(err.Error(), 256)
+}
+
 // partialListing returns a failed page with the names already collected. It
-// warns for non-cancelled partial results because alerts/logql.yaml keys on the
-// message text.
+// levels the record by cause, as the wholesale arm does: markup drift is
+// actionable and reads on the level=ERROR stream, anything else is a WARN.
 func (c *Client) partialListing(ctx context.Context, owner string, page int, names []string, refused refusals, err error) ([]string, refusals, error) {
 	if len(names) > 0 && ctx.Err() == nil {
-		c.opts.Logger.Warn("ghcr owner listing partially failed",
+		level := slog.LevelWarn
+		if errors.Is(err, errHTMLFormatChanged) {
+			level = slog.LevelError
+		}
+		c.opts.Logger.Log(ctx, level, "ghcr owner listing partially failed",
 			"owner", owner, "packages", len(names), "page", page,
-			"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+			"error", errTextForLog(err))
 	}
 	return names, refused, err
 }
 
 // readListing walks one owner's listing in kind's URL form from page 1 up
-// to the cap. An advertised page count stops the walk after every page GitHub
-// says exists; without one, a later page with no package link ends the listing.
-// Each usable printed package count is checked against that page's distinct
-// names plus refusals. Refused candidates make a page partial only if it adds
-// no usable name; mixed pages continue and report refusals. Other early stops
-// return collected names. A non-cancelled partial warns; the cap always warns.
+// to the cap. A page with no new package name ends the listing and is graded by
+// emptyPageError. Each usable printed package count is checked against that
+// page's distinct names plus refusals. Refused candidates make a page partial
+// only if it adds no usable name; mixed pages continue and report refusals.
+// Other early stops return collected names. A non-cancelled partial is logged
+// at the cause's level; the cap always warns.
+// Each page is an independent GET against a listing GitHub may change
+// between them, so one cycle's enumeration is a snapshot and not a
+// transaction. A package shifted backward across the read cursor by a
+// mid-walk delete is absent for that cycle with no signal available, and
+// one deleted mid-walk may still be published for it; both self-heal at
+// the next poll, and an absent series already means "not measured this
+// cycle" per obs.SetImage's retirement contract.
 func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
-		names      []string
-		refused    refusals
-		advertised int
+		names   []string
+		refused refusals
 	)
 	seen := make(map[string]bool)
 	for page := 1; page <= maxListingPages; page++ {
@@ -217,7 +232,7 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		pageNames, pageRefused, pageTotal, err := parsePackageList(html, owner, kind)
+		pageNames, pageRefused, err := parsePackageList(html, owner, kind)
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
@@ -228,22 +243,27 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		}
 		kept, added := appendUnseenNames(names, seen, pageNames)
 		names = kept
-		if pageTotal > 0 {
-			// Each page states the total for the set as it stands when that page
-			// is served, so a benign publish or delete between two paced fetches
-			// repaginates rather than drifting.
-			advertised = pageTotal
+		acct := pageAccounting{
+			page:     page,
+			added:    added,
+			names:    pageNames,
+			refused:  pageRefused,
+			stated:   stated,
+			statedOK: statedOK,
 		}
-		complete, err := listingPageComplete(page, advertised, added, pageNames, pageRefused, stated, statedOK)
+		complete, err := listingPageComplete(&acct)
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
 		if complete {
+			if len(names) == 0 && acct.statedOK && acct.stated == 0 {
+				return nil, refused, confirmedEmptyListingError(owner)
+			}
 			return names, refused, nil
 		}
 	}
 	c.opts.Logger.Warn("ghcr owner listing hit page cap; results truncated",
-		"owner", owner, "max_pages", maxListingPages, "advertised_pages", advertised)
+		"owner", owner, "max_pages", maxListingPages)
 	return names, refused, nil
 }
 
@@ -264,25 +284,32 @@ func listingPagePopulation(html string, page int, names []string, refused refusa
 	return stated, true, nil
 }
 
-func listingPageComplete(page, advertised, added int, names []string, refused refusals, stated int, statedOK bool) (bool, error) {
-	if added == 0 {
-		return true, emptyPageError(page, advertised, names, refused, stated, statedOK)
+type pageAccounting struct {
+	names    []string
+	refused  refusals
+	page     int
+	added    int
+	stated   int
+	statedOK bool
+}
+
+func listingPageComplete(acct *pageAccounting) (bool, error) {
+	if acct.added == 0 {
+		return true, emptyPageError(acct)
 	}
-	return page == advertised, nil
+	return false, nil
 }
 
 // emptyPageError names why a listing page that added no new name is a format
 // change, or returns nil when the page is the listing's clean end.
-func emptyPageError(page, advertised int, pageNames []string, pageRefused refusals, stated int, statedOK bool) error {
+func emptyPageError(acct *pageAccounting) error {
 	switch {
-	case pageRefused.Count > 0:
-		return fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, page)
-	case statedOK && stated == 0:
+	case acct.refused.Count > 0:
+		return fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, acct.page)
+	case acct.statedOK && acct.stated == 0:
 		return nil
-	case len(pageNames) > 0:
-		return fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, page, len(pageNames))
-	case page < advertised:
-		return fmt.Errorf("%w: listing page %d of the %d advertised served no package names", errHTMLFormatChanged, page, advertised)
+	case len(acct.names) > 0:
+		return fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, acct.page, len(acct.names))
 	}
 	return nil
 }
@@ -303,6 +330,12 @@ func appendUnseenNames(names []string, seen map[string]bool, pageNames []string)
 	return kept, added
 }
 
+// confirmedEmptyListingError reports an owner whose listing page itself
+// states zero container packages, so neither of emptyListingError's causes applies.
+func confirmedEmptyListingError(owner string) error {
+	return fmt.Errorf("%w: %s has no public container packages (the listing states 0)", errEmptyListing, owner)
+}
+
 // emptyListingError names both causes of a first listing page with no
 // package links, the checkable one first, behind the format sentinel.
 func emptyListingError(owner string) error {
@@ -319,21 +352,30 @@ func isNotFound(err error) bool {
 	return false
 }
 
-// markupTagEnd treats ANY quote as opening an attribute value, not only one
-// that follows '='. Deliberate: a stray quote that never re-closes costs only
-// its own tag; one that finds a partner makes the walk skip every start tag
-// through the next '>' after that partner. GitHub serves no unquoted attribute
-// value containing a quote.
+// markupTagEnd treats a quote as opening an attribute value only after '=',
+// matching HTML attribute syntax, so a stray quote cannot extend the tag. An
+// '='-opened value GitHub never closes still swallows following markup; the
+// page's printed package count refuses the resulting short name set.
 func markupTagEnd(html string, start int) (int, bool) {
 	var quote byte
+	afterEq := false
 	for i := start + 1; i < len(html); i++ {
+		c := html[i]
 		switch {
-		case quote != 0 && html[i] == quote:
+		case quote != 0 && c == quote:
 			quote = 0
-		case quote == 0 && (html[i] == '\'' || html[i] == '"'):
-			quote = html[i]
-		case quote == 0 && html[i] == '>':
+			afterEq = false
+		case quote != 0:
+		case c == '=':
+			afterEq = true
+		case afterEq && (c == '\'' || c == '"'):
+			quote = c
+		case afterEq && strings.ContainsRune(htmlWhitespace, rune(c)):
+		case c == '>':
 			return i, true
+		}
+		if quote == 0 && c != '=' && !strings.ContainsRune(htmlWhitespace, rune(c)) {
+			afterEq = false
 		}
 	}
 	return 0, false
@@ -424,26 +466,63 @@ func startsTagName(b byte) bool {
 	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 }
 
+func commentEnd(html string, open int) (int, bool) {
+	rest := html[open+len("<!--"):]
+	// An abruptly closed comment (<!--> or <!--->) ends at its '>'.
+	if after, ok := strings.CutPrefix(rest, ">"); ok {
+		return len(html) - len(after), true
+	}
+	if after, ok := strings.CutPrefix(rest, "->"); ok {
+		return len(html) - len(after), true
+	}
+
+	// A comment ends at "-->", or earlier at the bang close "--!>".
+	end := strings.Index(rest, "-->")
+	scope := rest
+	if end >= 0 {
+		scope = rest[:end]
+	}
+	if bang := strings.Index(scope, "--!>"); bang >= 0 {
+		return open + len("<!--") + bang + len("--!>"), true
+	}
+	if end >= 0 {
+		return open + len("<!--") + end + len("-->"), true
+	}
+	return 0, false
+}
+
 // nextStartTag reads the markup at or after cursor. emit is true only for a
 // start tag; next is where scanning resumes; ok is false at end of input.
 //
-// A terminated comment is skipped at its "-->" delimiter because commented-out
-// markup is not markup: a link inside one would add a ghost package name, and a
-// data-total-pages inside one a wrong page total. An unterminated comment or malformed
-// start tag advances one byte so later tags remain readable.
+// A terminated comment is skipped at its comment end ("-->", "--!>", or an
+// abrupt "<!-->"/"<!--->"). A doctype, bogus declaration, CDATA section,
+// processing instruction, or end tag is skipped at its own '>'. Their bodies
+// are not markup, so a link inside one must not add a ghost package name. An
+// unterminated construct or malformed start tag advances one byte so later tags
+// remain readable.
 func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanned, ok bool) {
 	i := strings.IndexByte(html[cursor:], '<')
 	if i < 0 {
 		return "", 0, false, false, false
 	}
 	open := cursor + i
-	if rest, found := strings.CutPrefix(html[open:], "<!--"); found {
-		if end := strings.Index(rest, "-->"); end >= 0 {
-			return "", open + len("<!--") + end + len("-->"), false, false, true
+	if strings.HasPrefix(html[open:], "<!--") {
+		if end, found := commentEnd(html, open); found {
+			return "", end, false, false, true
 		}
 		return "", open + 1, false, true, true
 	}
-	// A '<' not followed by an ASCII letter advances one byte; so does a
+	// A '<' that cannot open a start tag opens no markup either: a doctype, a bogus
+	// declaration, a CDATA section in HTML content, a processing instruction and an
+	// end tag all end at their own '>', so their bodies are not markup. An
+	// unterminated one is charged to the rescan budget, as an unterminated comment is.
+	if open+1 < len(html) && (html[open+1] == '!' || html[open+1] == '?' || html[open+1] == '/') {
+		if end := strings.IndexByte(html[open:], '>'); end >= 0 {
+			return "", open + end + 1, false, false, true
+		}
+		return "", open + 1, false, true, true
+	}
+	// Any other '<' not followed by an ASCII letter advances one byte; so does a
 	// '<'+letter whose apparent end markupTagEnd cannot find. An unterminated
 	// comment returns one byte from its branch, where the failed terminator
 	// lookup is charged to the rescan budget.
@@ -461,6 +540,8 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanne
 // ends at the first '>' outside a quoted span. End tags, processing
 // instructions, and terminated comments are skipped. A raw-text element body
 // (script, style, textarea, title) is walked as ordinary markup, including tag-shaped bytes.
+// More than maxRescans terminator lookups that run to end of input end
+// the walk with errHTMLFormatChanged instead of a span.
 func startTags(html string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		rescans := 0
@@ -473,8 +554,8 @@ func startTags(html string) iter.Seq2[string, error] {
 			if rescanned {
 				rescans++
 			}
-			if rescans > maxUnboundedScans {
-				yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxUnboundedScans))
+			if rescans > maxRescans {
+				yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxRescans))
 				return
 			}
 			if emit && !yield(tag, nil) {
@@ -507,56 +588,40 @@ func tagAttributes(tag string) iter.Seq2[string, string] {
 	}
 }
 
-// parsePackageList extracts package names and the advertised page total from
-// one owner's listing page; zero means the attribute was absent or unusable.
-// A name comes from an href on any span the lexical walk emits, page text
+// parsePackageList extracts package names from one owner's listing page. A
+// name comes from an href on any span the lexical walk emits, page text
 // included; the page's printed package count proves the set GitHub published.
-// Two disagreeing page totals refuse the page. An unterminated comment body is
-// still walked. Registered owner casing is response data, so the prefix is
-// matched without transforming untrusted HTML. Zero names is not an error here
-// because its meaning depends on the page number, which only the caller knows.
-func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, advertised int, err error) {
+// An unterminated comment body is still walked. Registered owner casing is
+// response data, so the prefix is matched without transforming untrusted HTML.
+// Zero names is not an error here because its meaning depends on the page
+// number, which only the caller knows.
+func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, err error) {
 	prefix := linkPrefix(kind, owner)
 	for tag, walkErr := range startTags(html) {
 		if walkErr != nil {
-			return names, refused, advertised, walkErr
+			return names, refused, walkErr
 		}
-		tagNames, tagRefused, pageTotal, tagErr := parsePackageTag(tag, owner, prefix, advertised)
+		tagNames, tagRefused := parsePackageTag(tag, owner, prefix)
 		names = append(names, tagNames...)
 		refused = refused.merge(tagRefused)
-		if tagErr != nil {
-			return names, refused, 0, tagErr
-		}
-		advertised = pageTotal
 	}
-	return names, refused, advertised, nil
+	return names, refused, nil
 }
 
-func parsePackageTag(tag, owner, prefix string, advertised int) (names []string, refused refusals, pageTotal int, err error) {
-	pageTotal = advertised
+func parsePackageTag(tag, owner, prefix string) (names []string, refused refusals) {
 	for name, value := range tagAttributes(tag) {
-		if pages := advertisedPages(name, value); pages > 0 {
-			if pageTotal != 0 && pageTotal != pages {
-				return names, refused, 0, fmt.Errorf(
-					"%w: listing page advertises %d pages and %d",
-					errHTMLFormatChanged, pageTotal, pages,
-				)
-			}
-			pageTotal = pages
-			continue
-		}
 		raw, isPackage := packageHref(name, value, prefix)
 		if !isPackage {
 			continue
 		}
-		pkg, nameErr := urlsafe.PackageName(owner, raw)
+		pkg, nameErr := urlsafe.PackageName(urlsafe.Owner(owner), raw)
 		if nameErr != nil {
 			refused = refused.refuse(raw)
 			continue
 		}
 		names = append(names, strings.Clone(pkg))
 	}
-	return names, refused, pageTotal, nil
+	return names, refused
 }
 
 // statedPackages reports the package count a listing page publishes for
@@ -565,27 +630,26 @@ func parsePackageTag(tag, owner, prefix string, advertised int) (names []string,
 // and is not drift: a heading rename upstream must make this signal go quiet,
 // not fail every poll of every owner.
 func statedPackages(html string) (n int, ok bool) {
-	const marker = "packages"
 	markers := 0
 	for at := 0; ; {
-		i := strings.Index(html[at:], marker)
+		i := strings.Index(html[at:], statedPackagesMarker)
 		if i < 0 {
 			return n, markers == 1
 		}
 		i += at
-		if count, found := statedPackageCount(html, i, len(marker)); found {
+		if count, found := statedPackageCount(html, i); found {
 			if markers == 0 {
 				n = count
 			}
 			markers++
 		}
-		at = i + len(marker)
+		at = i + len(statedPackagesMarker)
 	}
 }
 
-func statedPackageCount(html string, markerAt, markerLen int) (int, bool) {
+func statedPackageCount(html string, markerAt int) (int, bool) {
 	before := strings.TrimRight(html[:markerAt], htmlWhitespace)
-	after := strings.TrimLeft(html[markerAt+markerLen:], htmlWhitespace)
+	after := strings.TrimLeft(html[markerAt+len(statedPackagesMarker):], htmlWhitespace)
 	if !strings.HasPrefix(after, "</") {
 		return 0, false
 	}
@@ -598,19 +662,6 @@ func statedPackageCount(html string, markerAt, markerLen int) (int, bool) {
 	}
 	count, err := strconv.Atoi(before[digitStart:])
 	return count, err == nil
-}
-
-// advertisedPages reports a positive page total, or zero for another
-// attribute or an unusable count.
-func advertisedPages(name, value string) int {
-	if !equalASCIIFold(name, advertisedPagesAttr) {
-		return 0
-	}
-	pages, err := strconv.Atoi(strings.Trim(value, htmlWhitespace))
-	if err != nil || pages < 1 {
-		return 0
-	}
-	return pages
 }
 
 // packageHref reports the package segment carried under prefix.
@@ -690,10 +741,10 @@ func parseDownloads(html string) (int64, error) {
 // markerText returns the first plausible "Total downloads" occurrence and
 // the number found. A plausible occurrence is bounded like element text: the
 // previous non-whitespace byte closes a start tag and the next bytes begin an
-// element's closing tag. It does not track markup context, so a comment or
-// script body with that shape counts too. If the real marker is also present,
-// parseDownloads rejects the duplicate; if the false shape is the only one,
-// its count is read, a shape GitHub does not serve.
+// element's closing tag. It skips comments but does not track raw-text element
+// context, so a script body with that shape counts too. If the real marker is
+// also present, parseDownloads rejects the duplicate; if the false shape is the
+// only one, its count is read, a shape GitHub does not serve.
 func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
 	for at := 0; ; {
@@ -702,6 +753,13 @@ func markerText(html string) (idx, n int) {
 			return idx, n
 		}
 		i += at
+		if open := strings.LastIndex(html[:i], "<!--"); open >= 0 {
+			end, terminated := commentEnd(html, open)
+			if !terminated || end > i {
+				at = i + len(marker)
+				continue
+			}
+		}
 		before := strings.TrimRight(html[:i], htmlWhitespace)
 		rest := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
 		if strings.HasSuffix(before, ">") && strings.HasPrefix(rest, "</") {
@@ -770,7 +828,7 @@ func (c *Client) expandWildcard(
 			// failure. Logging it at ERROR would fire a false alert on the
 			// level=error stream on every SIGTERM landing mid-listing.
 			c.opts.Logger.Debug("ghcr package listing cancelled", "owner", ref.Owner,
-				"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+				"error", errTextForLog(err))
 			return out, false
 		}
 		listingWhollyFailed = len(names) == 0
@@ -778,14 +836,14 @@ func (c *Client) expandWildcard(
 			switch {
 			case errors.Is(err, errHTMLFormatChanged) && !errors.Is(err, errEmptyListing):
 				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
-					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256),
+					"error", errTextForLog(err),
 					"report_at", "https://github.com/cplieger/registry-stats/issues")
 			case errors.Is(err, errEmptyListing):
 				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
-					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+					"error", errTextForLog(err))
 			default:
 				c.opts.Logger.Warn("ghcr package listing failed", "owner", ref.Owner,
-					"error", runesafe.SanitizeSingleLineBounded(err.Error(), 256))
+					"error", errTextForLog(err))
 			}
 		}
 		return c.appendPackages(names, ref.Owner, seen, out), listingWhollyFailed
@@ -803,14 +861,11 @@ func (*Client) appendPackages(
 	packages []registry.RepoRef,
 ) []registry.RepoRef {
 	for _, name := range names {
-		ref := registry.RepoRef{Owner: owner, Repo: name}
-		// Keep the registry spelling in the request and label, but fold the
-		// key to match config's canonical explicit refs.
-		key := registry.RepoRef{Owner: owner, Repo: strings.ToLower(name)}
-		if seen[key] {
+		ref := registry.RepoRef{Owner: owner, Repo: strings.ToLower(name)}
+		if seen[ref] {
 			continue
 		}
-		seen[key] = true
+		seen[ref] = true
 		packages = append(packages, ref)
 	}
 	return packages
@@ -818,7 +873,7 @@ func (*Client) appendPackages(
 
 // buildPackageList expands wildcard refs (owner/*) by scraping the owner's
 // packages listing, then appends explicit refs unless already covered by a
-// wildcard. Wildcard keys are folded to the config-canonical explicit spelling,
+// wildcard. Wildcard refs are folded to the config-canonical explicit spelling,
 // so a case-preserving listing still covers its explicit twin.
 // listingWhollyFailed is true when any owner's listing errored with no names.
 func (c *Client) buildPackageList(

@@ -27,6 +27,36 @@ import (
 	"github.com/cplieger/webhttp/v2"
 )
 
+// TestRegistryClient_refusesOffAllowlistRedirect pins the SSRF
+// containment the readers' docs attribute to this client: a redirect to
+// a host outside the Docker/GitHub allowlist is refused rather than
+// followed.
+func TestRegistryClient_refusesOffAllowlistRedirect(t *testing.T) {
+	var targetHits atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			targetHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+	defer target.Close()
+
+	src := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
+	defer src.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, src.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := registryClient().Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Errorf("registryClient() followed a redirect to %s; want it refused", target.URL)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("off-allowlist redirect target was reached %d time(s), want 0", got)
+	}
+}
+
 func TestCollectLoop_modes(t *testing.T) {
 	t.Run("one_shot", func(t *testing.T) {
 		calls := 0
@@ -63,7 +93,7 @@ func TestCollectLoop_modes(t *testing.T) {
 	})
 }
 
-func TestMain_healthProbeUsesThreePollIntervals(t *testing.T) {
+func TestMain_healthProbeUsesCycleBudget(t *testing.T) {
 	const helperEnv = "REGISTRY_STATS_HEALTH_PROBE_HELPER"
 	if os.Getenv(helperEnv) == "1" {
 		os.Args = []string{os.Args[0], "health"}
@@ -98,15 +128,17 @@ func TestMain_healthProbeUsesThreePollIntervals(t *testing.T) {
 		}
 	})
 
+	const maximumCycleDuration = 92*time.Hour + 44*time.Minute + 40*time.Second
 	tests := []struct {
 		name     string
 		interval string
 		age      time.Duration
 		wantCode int
 	}{
-		{name: "inside_three_intervals", interval: "1", age: 3*time.Hour - 5*time.Minute, wantCode: 0},
-		{name: "outside_three_intervals", interval: "1", age: 3*time.Hour + 5*time.Minute, wantCode: 1},
-		{name: "one_shot_has_no_deadline", interval: "0", age: 24 * time.Hour, wantCode: 0},
+		{name: "inside_cycle_budget", interval: "1", age: maximumCycleDuration + time.Hour - 5*time.Minute, wantCode: 0},
+		{name: "outside_cycle_budget", interval: "1", age: maximumCycleDuration + time.Hour + 5*time.Minute, wantCode: 1},
+		{name: "configured_interval_is_added", interval: "2", age: maximumCycleDuration + 90*time.Minute, wantCode: 0},
+		{name: "one_shot_has_no_deadline", interval: "0", age: maximumCycleDuration + 24*time.Hour, wantCode: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,7 +150,7 @@ func TestMain_healthProbeUsesThreePollIntervals(t *testing.T) {
 				t.Fatalf("age health marker: %v", err)
 			}
 
-			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMain_healthProbeUsesThreePollIntervals$")
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMain_healthProbeUsesCycleBudget$")
 			cmd.Env = append(os.Environ(), helperEnv+"=1", "POLL_INTERVAL_HOURS="+tt.interval)
 			output, err := cmd.CombinedOutput()
 			gotCode := 0
