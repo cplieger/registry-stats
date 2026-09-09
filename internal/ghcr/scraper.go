@@ -496,10 +496,11 @@ func commentEnd(html string, open int) (int, bool) {
 //
 // A terminated comment is skipped at its comment end ("-->", "--!>", or an
 // abrupt "<!-->"/"<!--->"). A doctype, bogus declaration, CDATA section,
-// processing instruction, or end tag is skipped at its own '>'. Their bodies
-// are not markup, so a link inside one must not add a ghost package name. An
-// unterminated construct or malformed start tag advances one byte so later tags
-// remain readable.
+// processing instruction, or nameless end tag is skipped at its own '>'; a
+// named end tag is read like a start tag, because HTML gives it the same
+// attribute syntax. Their bodies are not markup, so a link inside one must not
+// add a ghost package name. An unterminated construct or malformed start tag
+// advances one byte so later tags remain readable.
 func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanned, ok bool) {
 	i := strings.IndexByte(html[cursor:], '<')
 	if i < 0 {
@@ -512,9 +513,18 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanne
 		}
 		return "", open + 1, false, true, true
 	}
+	// An end tag carries the same attribute syntax as a start tag, so a '>'
+	// inside one of its quoted values does not end it; it is read like a
+	// start tag and yielded to nobody.
+	if open+2 < len(html) && html[open+1] == '/' && startsTagName(html[open+2]) {
+		if end, found := markupTagEnd(html, open); found {
+			return "", end + 1, false, false, true
+		}
+		return "", open + 1, false, true, true
+	}
 	// A '<' that cannot open a start tag opens no markup either: a doctype, a bogus
-	// declaration, a CDATA section in HTML content, a processing instruction and an
-	// end tag all end at their own '>', so their bodies are not markup. An
+	// declaration, a CDATA section in HTML content, a processing instruction and a
+	// nameless end tag all end at their own '>', so their bodies are not markup. An
 	// unterminated one is charged to the rescan budget, as an unterminated comment is.
 	if open+1 < len(html) && (html[open+1] == '!' || html[open+1] == '?' || html[open+1] == '/') {
 		if end := strings.IndexByte(html[open:], '>'); end >= 0 {
@@ -747,18 +757,33 @@ func parseDownloads(html string) (int64, error) {
 // only one, its count is read, a shape GitHub does not serve.
 func markerText(html string) (idx, n int) {
 	const marker = "Total downloads"
+	// The marker search only moves forward, so each comment is scanned
+	// once: a new "<!--" can only be in the window since the previous
+	// occurrence, and a marker inside a comment resumes at that comment's
+	// end.
+	scanned, commentOpen, commentAt := 0, -1, 0
 	for at := 0; ; {
 		i := strings.Index(html[at:], marker)
 		if i < 0 {
 			return idx, n
 		}
 		i += at
-		if open := strings.LastIndex(html[:i], "<!--"); open >= 0 {
-			end, terminated := commentEnd(html, open)
-			if !terminated || end > i {
-				at = i + len(marker)
-				continue
+		if last := strings.LastIndex(html[scanned:i], "<!--"); last >= 0 {
+			commentOpen = scanned + last
+		}
+		scanned = i
+		if commentOpen >= commentAt {
+			end, terminated := commentEnd(html, commentOpen)
+			if !terminated {
+				// An unterminated comment runs to end of input, so no later
+				// occurrence is element text either.
+				return idx, n
 			}
+			commentAt = end
+		}
+		if commentAt > i {
+			at, scanned = commentAt, commentAt
+			continue
 		}
 		before := strings.TrimRight(html[:i], htmlWhitespace)
 		rest := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)

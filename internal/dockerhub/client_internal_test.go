@@ -231,6 +231,35 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertisedAtPageCap(t *testing.T) 
 	}
 }
 
+func TestClient_ListRepos_PageCapWithMovedTotalIsNotAFormatChange(t *testing.T) {
+	page := func(n, count int) map[string]any {
+		rows := make([]map[string]any, 0, pageSize)
+		for i := range pageSize {
+			rows = append(rows, map[string]any{"name": "p" + strconv.Itoa(n) + "r" + strconv.Itoa(i), "pull_count": 1})
+		}
+		return map[string]any{"count": count, "results": rows, "next": "keep-going"}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(page(1, 150))
+		case "2":
+			_ = json.NewEncoder(w).Encode(page(2, 900))
+		}
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if err != nil {
+		t.Errorf("listRepos(page cap after the owner grew) error = %v, want nil: no page contradicted its own total", err)
+	}
+	if len(repos) != 2*pageSize || advertised != 150 {
+		t.Errorf("listRepos(page cap after the owner grew) = (%d repos, advertised %d), want (%d, 150)", len(repos), advertised, 2*pageSize)
+	}
+}
+
 func TestClient_ListRepos_RejectsMoreReposThanAdvertised(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, _ *http.Request) {

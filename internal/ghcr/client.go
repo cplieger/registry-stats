@@ -38,16 +38,11 @@ const (
 const RequestTimeout = 30 * time.Second
 
 // MaximumCycleDuration is the longest one collection cycle may take before the
-// liveness probe stops believing the loop is working.
-//
-// It is a stated allowance, not a computed supremum. A wildcard walk at the
-// documented ceiling (fifty listing pages, ~1,500 packages, one paced fetch
-// each) runs about 2h10m at the 5s pacing maximum, and the remaining margin
-// covers request service time, transient retries and several configured owners.
-// Summing the per-fetch retry budget over every fetch instead would exceed
-// ninety hours, which arms a deadline nothing can trip: a cycle that needs that
-// long is not slow, it is wedged, and reporting exactly that is what the probe
-// is for.
+// liveness probe stops believing the loop is working. It is a stated allowance,
+// not a computed supremum: one wildcard owner at the documented ceiling (fifty
+// listing pages, ~1,500 packages, one paced fetch each) walks in about 2h10m at
+// the 5s pacing maximum, and a cycle needing many hours beyond that is wedged
+// rather than slow.
 const MaximumCycleDuration = 5 * time.Hour
 
 // Client is the GitHub Container Registry source (it satisfies

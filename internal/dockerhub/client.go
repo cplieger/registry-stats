@@ -25,8 +25,7 @@ import (
 // is the largest size with a legal second page and maxOwnerPages stops there;
 // reaching the cap means this walk holds only part of the owner.
 // listingElemCap refuses a page that served far more rows than pageSize asked
-// for: it is the only bound on rows accepted when the walk ends on the page
-// cap, which returns them without comparing against the advertised total.
+// for, before any cross-page accounting runs.
 // responseBodyCap bounds every response this client reads, listing pages and
 // per-repo metadata alike; the largest measured upstream page is about 75 KB.
 const (
@@ -200,15 +199,19 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 
 // listRepos paginates the Docker Hub owner listing endpoint. advertised is the
 // total its first page publishes, so the caller can report how much of the
-// owner this walk holds. Which sentinel classifies a failed walk, and why, is
-// on errListingMoved and errResponseUnparsable. A walk stopped at the page cap
-// returns what it collected, reporting the rows its pages carried so a row
-// lost to a cross-page repeat is not read as truncation.
+// owner this walk holds. Which sentinel classifies a failed walk is on
+// errListingMoved and errResponseUnparsable. A walk stopped at the page cap
+// returns what it collected, reporting the rows its pages carried so a row lost
+// to a cross-page repeat is not read as truncation. A nil error means the
+// totals reconciled: offset pagination cannot see a repository deleted before
+// the page boundary and one added after it, so the snapshot may still be mixed.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
 	seen := make(map[registry.RepoRef]bool)
 	complete := false
 	moved := false
+	laterTotal := 0
 	pageRows := 0
+	advertisedMax := 0
 
 	for page := 1; page <= maxOwnerPages; page++ {
 		if ctx.Err() != nil {
@@ -229,7 +232,9 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 			advertised = pageTotal
 		case pageTotal != advertised:
 			moved = true
+			laterTotal = pageTotal
 		}
+		advertisedMax = max(advertisedMax, pageTotal)
 		pageRows += len(pageRepos)
 		entries = appendDistinct(entries, seen, pageRepos)
 
@@ -239,9 +244,9 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		}
 	}
 	if !complete {
-		if len(entries) > advertised {
-			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d its first page advertised, on a walk stopped at the page cap",
-				errResponseUnparsable, len(entries), advertised)
+		if len(entries) > advertisedMax {
+			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d the most any page advertised, on a walk stopped at the page cap",
+				errResponseUnparsable, len(entries), advertisedMax)
 		}
 		c.logger.Warn("docker hub owner listing hit page cap; results may be truncated",
 			"owner", owner, "repos", len(entries), "page_rows", pageRows,
@@ -249,8 +254,8 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		return entries, advertised, nil
 	}
 	if moved {
-		return entries, advertised, fmt.Errorf("%w: yielded %d retained distinct repositories against the %d its first page advertised, and a later page advertised a different total",
-			errListingMoved, len(entries), advertised)
+		return entries, advertised, fmt.Errorf("%w: yielded %d retained distinct repositories against the %d its first page advertised, and a later page advertised %d",
+			errListingMoved, len(entries), advertised, laterTotal)
 	}
 	if len(entries) != advertised {
 		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories from the %d rows its pages carried, against the %d every page advertised",
