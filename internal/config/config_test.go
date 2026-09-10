@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,6 +164,32 @@ func TestParseRepoRefs_acceptsOnlyExactWildcard(t *testing.T) {
 	}
 }
 
+func TestParseRepoRefs_boundsWildcardWholeReference(t *testing.T) {
+	for _, reg := range []registry.ID{registry.DockerHub, registry.GHCR} {
+		t.Run(reg.String(), func(t *testing.T) {
+			inBudgetOwner := strings.Repeat("a", 253)
+			refs, warns := parseRepoRefs(inBudgetOwner+"/*", reg)
+			wantRefs := []registry.RepoRef{{Owner: inBudgetOwner, Repo: "*"}}
+			if !slices.Equal(refs, wantRefs) || len(warns) != 0 {
+				t.Errorf("parseRepoRefs(255-byte wildcard, %v) = (%+v, %+v), want (%+v, no warnings)", reg, refs, warns, wantRefs)
+			}
+
+			overBudgetOwner := strings.Repeat("a", 255)
+			refs, warns = parseRepoRefs(overBudgetOwner+"/*", reg)
+			wantWarns := []Warning{{
+				Msg: "skipping unusable repo ref",
+				Attrs: []slog.Attr{
+					slog.String("input", overBudgetOwner+"/*"),
+					slog.String("reason", "owner/repository reference over 255 bytes"),
+				},
+			}}
+			if len(refs) != 0 || !slices.EqualFunc(warns, wantWarns, warningEqual) {
+				t.Errorf("parseRepoRefs(257-byte wildcard, %v) = (%+v, %+v), want (no refs, %+v)", reg, refs, warns, wantWarns)
+			}
+		})
+	}
+}
+
 func TestParseRepoRefs_rejectsEncodedWildcard(t *testing.T) {
 	refs, warns := parseRepoRefs("owner/%2A", registry.GHCR)
 	if len(refs) != 0 {
@@ -277,6 +304,46 @@ func TestLoadAndPollInterval_neverLog(t *testing.T) {
 	}
 }
 
+func TestLoadAndPollInterval_agree(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		unset bool
+	}{
+		{name: "unset", unset: true},
+		{name: "empty"},
+		{name: "zero", value: "0"},
+		{name: "one", value: "1"},
+		{name: "negative", value: "-1"},
+		{name: "non_numeric", value: "invalid"},
+		{name: "exact_max", value: strconv.Itoa(clampMaxPollHours)},
+		{name: "above_max", value: strconv.Itoa(clampMaxPollHours + 1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "LOG_LEVEL", "LISTEN_ADDR"} {
+				t.Setenv(key, "")
+			}
+			t.Setenv("POLL_INTERVAL_HOURS", tt.value)
+			if tt.unset {
+				if err := os.Unsetenv("POLL_INTERVAL_HOURS"); err != nil {
+					t.Fatalf("Unsetenv(POLL_INTERVAL_HOURS): %v", err)
+				}
+			}
+
+			interval, intervalWarns := PollInterval()
+			cfg, loadWarns := Load()
+
+			if cfg.PollInterval != interval {
+				t.Errorf("Load().PollInterval with %s environment = %v, PollInterval() = %v", tt.name, cfg.PollInterval, interval)
+			}
+			if !slices.EqualFunc(loadWarns, intervalWarns, warningEqual) {
+				t.Errorf("Load() warnings with %s environment = %+v, PollInterval() warnings = %+v", tt.name, loadWarns, intervalWarns)
+			}
+		})
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "GHCR_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
@@ -326,7 +393,10 @@ func TestLoadZeroValues(t *testing.T) {
 	}
 }
 
-// clampMaxPollHours mirrors Load's clamp threshold (24 * 365).
+// clampMaxPollHours is written out rather than derived from PollInterval's own
+// maxPollHours, because an oracle taken from the code under test would accept
+// any threshold. The two clamp tests below bracket this value from both sides,
+// so the copies cannot drift apart.
 const clampMaxPollHours = 24 * 365
 
 // warningsContain reports whether any returned Warning's message contains
@@ -357,7 +427,10 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 
 	want := map[string][]slog.Attr{
 		"invalid POLL_INTERVAL_HOURS, using default of 1 hour": {slog.String("value", "notanumber")},
-		"invalid LOG_LEVEL, using default":                     {slog.String("default", "info")},
+		"invalid LOG_LEVEL, using default": {
+			slog.String("value", "bogus"),
+			slog.String("default", "info"),
+		},
 	}
 	got := make(map[string][]slog.Attr, len(warns))
 	for _, w := range warns {
@@ -385,6 +458,51 @@ func TestWarningsCarryStructuredAttrs(t *testing.T) {
 	}}
 	if !slices.EqualFunc(warns, wantNegative, warningEqual) {
 		t.Errorf("Load(POLL_INTERVAL_HOURS=-5) warnings = %+v, want %+v", warns, wantNegative)
+	}
+}
+
+func TestWarningMessages_matchConfigRejectedAlert(t *testing.T) {
+	alertBytes, err := os.ReadFile("../../alerts/logql.yaml")
+	if err != nil {
+		t.Fatalf("ReadFile(alerts/logql.yaml): %v", err)
+	}
+	const alertName = "- alert: RegistryStatsConfigRejected"
+	alertText := string(alertBytes)
+	start := strings.Index(alertText, alertName)
+	if start < 0 {
+		t.Fatalf("alerts/logql.yaml has no %s block", alertName)
+	}
+	rule := alertText[start:]
+	if end := strings.Index(rule[1:], "\n      - alert:"); end >= 0 {
+		rule = rule[:end+1]
+	}
+
+	tests := []struct {
+		name   string
+		poll   string
+		repos  string
+		phrase string
+	}{
+		{name: "invalid_interval", poll: "invalid", phrase: "invalid POLL_INTERVAL_HOURS"},
+		{name: "clamped_interval", poll: strconv.Itoa(clampMaxPollHours + 1), phrase: "POLL_INTERVAL_HOURS clamped"},
+		{name: "rejected_repo", repos: "bad", phrase: "skipping unusable repo ref"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("POLL_INTERVAL_HOURS", tt.poll)
+			t.Setenv("DOCKERHUB_REPOS", tt.repos)
+			for _, key := range []string{"GHCR_REPOS", "LOG_LEVEL", "LISTEN_ADDR"} {
+				t.Setenv(key, "")
+			}
+
+			_, warns := Load()
+			if !slices.ContainsFunc(warns, func(w Warning) bool { return strings.Contains(w.Msg, tt.phrase) }) {
+				t.Errorf("Load(%s) warnings = %+v, want a message containing %q", tt.name, warns, tt.phrase)
+			}
+			if !strings.Contains(rule, tt.phrase) {
+				t.Errorf("RegistryStatsConfigRejected does not match emitted phrase %q", tt.phrase)
+			}
+		})
 	}
 }
 

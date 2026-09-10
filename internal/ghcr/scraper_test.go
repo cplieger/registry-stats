@@ -132,6 +132,7 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 		{"attribute name ending in title", `<span>Total downloads</span><h3 data-title="9">27.8K</h3>`},
 		{"element name beginning with h3", `<span>Total downloads</span><h3x title="9">27.8K</h3x>`},
 		{"two download-count markers", downloadsHTML("1") + downloadsHTML("2")},
+		{"real marker and a raw-text marker", `<script>>Total downloads</script><h3 title="999">999</h3>` + downloadsHTML("7")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,6 +170,24 @@ func TestParseDownloads_CommentEndBeforeRealMarker(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseDownloads_CommentOverlapKeepsDocumentOrder(t *testing.T) {
+	t.Run("one_real_marker", func(t *testing.T) {
+		html := `<!--x<!--!>` + downloadsHTML("7")
+		count, err := parseDownloads(html)
+		if err != nil || count != 7 {
+			t.Errorf("parseDownloads(comment overlap + one marker) = (%d, %v), want (7, nil)", count, err)
+		}
+	})
+
+	t.Run("two_real_markers", func(t *testing.T) {
+		html := downloadsHTML("1") + `<!--x<!--!>` + downloadsHTML("2")
+		count, err := parseDownloads(html)
+		if !errors.Is(err, errHTMLFormatChanged) {
+			t.Errorf("parseDownloads(two markers around comment overlap) = (%d, %v), want errHTMLFormatChanged", count, err)
+		}
+	})
 }
 
 func TestParsePackageList_Valid(t *testing.T) {
@@ -246,6 +265,17 @@ func TestParsePackageList_RefusesUnsafeDecodedNames(t *testing.T) {
 		if len(got) != 0 || refused.Count != 1 {
 			t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", encoded, got, refused)
 		}
+	}
+}
+
+func TestParsePackageList_RefusesInvalidUTF8Name(t *testing.T) {
+	const token = "%FF"
+	html := `<a href="/users/owner/packages/container/package/` + token + `">package</a>`
+
+	got, refused, _ := parsePackageList(html, "owner", userOwner)
+
+	if len(got) != 0 || refused.Count != 1 {
+		t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", token, got, refused)
 	}
 }
 
@@ -396,19 +426,13 @@ func TestParsePackageList_KeepsFirstInformativeSample(t *testing.T) {
 	}
 }
 
-// TestFetchHTML_SendsBrowserHeaders verifies that fetchHTML installs
-// the browser-like User-Agent / Accept / Accept-Language triplet
-// GitHub requires for anonymous GHCR pages.
-func TestFetchHTML_SendsBrowserHeaders(t *testing.T) {
+func TestFetchHTML_SendsRequestHeaders(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("User-Agent") == "" {
-			t.Error("expected User-Agent header")
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("User-Agent = %q, want %q", got, userAgent)
 		}
 		if r.Header.Get("Accept") != "text/html" {
 			t.Errorf("Accept = %q, want text/html", r.Header.Get("Accept"))
-		}
-		if r.Header.Get("Accept-Language") == "" {
-			t.Error("expected Accept-Language header")
 		}
 		w.Write([]byte("<html>test</html>"))
 	}))
@@ -669,8 +693,16 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("scrapePackageList = %v, want %v (every page, in listing order)", got, tt.want)
 			}
-			if logs := buf.String(); strings.Contains(logs, "hit page cap") || strings.Contains(logs, "partially failed") {
+			logs := buf.String()
+			if strings.Contains(logs, "hit page cap") || strings.Contains(logs, "partially failed") {
 				t.Errorf("a listing that ended normally warned; logs:\n%s", logs)
+			}
+			warning := `level=WARN msg="ghcr listing page states no usable package count; completeness unchecked" owner=owner page=`
+			if got := strings.Count(logs, warning); got != tt.wantPages {
+				t.Errorf("listing without usable package counts emitted %d completeness WARNs, want %d; logs:\n%s", got, tt.wantPages, logs)
+			}
+			if !strings.Contains(logs, fmt.Sprintf("%s%d", warning, tt.wantPages)) {
+				t.Errorf("listing completeness WARNs omitted final page %d; logs:\n%s", tt.wantPages, logs)
 			}
 			if asked["1"] != 2 {
 				t.Errorf("page 1 requested %d times, want 2 (one account-kind probe and one user listing)", asked["1"])
@@ -939,7 +971,7 @@ func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
 }
 
 // TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError pins
-// scrapePackageList's default arm for an organization-form transport failure.
+// scrapePackageList's organization-error arm.
 func TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError(t *testing.T) {
 	orgCalls := 0
 	mux := http.NewServeMux()
@@ -953,8 +985,9 @@ func TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError(t *te
 	c := listingClient(t, mux, testsupport.QuietLogger())
 
 	_, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
-	if err == nil {
-		t.Fatal("scrapePackageList error = nil, want organization page-1 failure")
+	statusErr, ok := errors.AsType[*httpx.StatusError](err)
+	if !ok || statusErr.Code != http.StatusInternalServerError {
+		t.Fatalf("scrapePackageList error = %v, want organization page-1 HTTP status 500", err)
 	}
 	if orgCalls == 0 {
 		t.Error("scrapePackageList made no organization-form request")
@@ -1003,6 +1036,31 @@ func TestClient_ScrapePackageList_ConfirmedEmptyNamesOnlyActualCause(t *testing.
 	}
 	if !strings.Contains(err.Error(), "the listing states 0") {
 		t.Errorf("scrapePackageList error = %q, want confirmed zero-package diagnostic", err)
+	}
+}
+
+func TestClient_Collect_ConfirmedEmptyWildcardIsNotFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<span>0 packages</span>`))
+	})
+	mux.HandleFunc("GET /orgs/nobody/packages", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	var buf bytes.Buffer
+	c := listingClient(t, mux, capturingLogger(&buf))
+
+	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "nobody", Repo: "*"}})
+	if len(collection.Entries) != 0 || collection.Fetched != 0 || collection.Attempted != 0 || collection.ListingFailed {
+		t.Errorf("Collect(confirmed-empty wildcard) = %+v, want an empty successful collection", collection)
+	}
+	logs := buf.String()
+	const warn = `level=WARN msg="ghcr owner has no public container packages" owner=nobody`
+	if got := strings.Count(logs, warn); got != 1 {
+		t.Errorf("Collect(confirmed-empty wildcard) WARN count = %d, want 1; logs:\n%s", got, logs)
+	}
+	if strings.Contains(logs, `level=ERROR msg="ghcr package listing failed"`) {
+		t.Errorf("Collect(confirmed-empty wildcard) entered the ERROR alert stream; logs:\n%s", logs)
 	}
 }
 
@@ -1119,6 +1177,14 @@ func TestParsePackageList_QuotedGreaterThanPreservesLaterAttributes(t *testing.T
 	}
 }
 
+func TestParsePackageList_UppercaseTagWithQuotedGreaterThan(t *testing.T) {
+	html := `<A data-note="1 > 0" HREF="/users/owner/packages/container/package/upper">`
+	got, refused, err := parsePackageList(html, "owner", userOwner)
+	if err != nil || !slices.Equal(got, []string{"upper"}) || refused.Count != 0 {
+		t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want ([upper], no refusals, nil)", html, got, refused, err)
+	}
+}
+
 // Commented-out markup is not markup: a terminated comment's body is
 // skipped whole, so a package link inside one is invisible and the canary's
 // bare quotes never open an attribute value.
@@ -1199,20 +1265,20 @@ func TestParsePackageList_StrayQuoteDoesNotExtendTag(t *testing.T) {
 	}
 }
 
-// The rescan budget is charged per unterminated-comment recovery: eight are
-// tolerated, the ninth ends the listing as format drift. Both arms are here
-// because in-band tolerance is what makes a missing charge invisible, and the
-// second also pins that the refused page publishes nothing: the link after the
-// openers was available to emit and is not emitted.
-func TestParsePackageList_RescanBudgetExhaustionIsFormatDrift(t *testing.T) {
+// TestParsePackageList_UnterminatedConstructIsFormatDrift pins that the first
+// unterminated comment ends the listing before links in its body can be emitted.
+func TestParsePackageList_UnterminatedConstructIsFormatDrift(t *testing.T) {
 	link := packageLink(userOwner, "owner", "real")
 
-	got, _, err := parsePackageList(strings.Repeat("<!--", 8)+link, "owner", userOwner)
-	if !slices.Equal(got, []string{"real"}) || err != nil {
-		t.Errorf("parsePackageList(8 unterminated comments + link) = (%v, %v), want ([real], <nil>)", got, err)
+	got, refused, err := parsePackageList("<!--"+link, "owner", userOwner)
+	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
+		t.Errorf("parsePackageList(unterminated comment + link) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
+	}
+	if refused.Count != 0 {
+		t.Errorf("parsePackageList(unterminated comment + link) refusals = %+v, want no partial result", refused)
 	}
 
-	got, refused, err := parsePackageList(strings.Repeat("<!--", 9)+link, "owner", userOwner)
+	got, refused, err = parsePackageList(strings.Repeat("<!--", 9)+link, "owner", userOwner)
 	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
 		t.Errorf("parsePackageList(9 unterminated comments + link) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
 	}
@@ -1221,14 +1287,25 @@ func TestParsePackageList_RescanBudgetExhaustionIsFormatDrift(t *testing.T) {
 	}
 }
 
-// The rescan budget is charged per malformed-start-tag recovery too, not only per
-// unterminated comment: eight failed tag-end lookups are tolerated, the ninth ends
-// the listing as format drift. Each opener's value quote is never closed, so its
-// terminator lookup runs to end of input.
-func TestParsePackageList_MalformedTagRescanBudgetExhaustionIsFormatDrift(t *testing.T) {
-	got, _, err := parsePackageList(strings.Repeat(`<a x="`, 8), "owner", userOwner)
-	if len(got) != 0 || err != nil {
-		t.Errorf("parsePackageList(8 malformed tags) = (%v, %v), want ([], <nil>)", got, err)
+func TestParsePackageList_UnterminatedConstructReportsOffset(t *testing.T) {
+	_, _, err := parsePackageList("hello <!--x", "owner", userOwner)
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("parsePackageList(unterminated construct at byte 6) error = %v, want errHTMLFormatChanged", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "byte 6") {
+		t.Errorf("parsePackageList(unterminated construct at byte 6) error = %q, want construct offset", got)
+	}
+}
+
+// TestParsePackageList_UnterminatedTagIsFormatDrift pins the same failure mode
+// for a start tag whose quoted attribute value has no terminator.
+func TestParsePackageList_UnterminatedTagIsFormatDrift(t *testing.T) {
+	got, refused, err := parsePackageList(`<a x="`, "owner", userOwner)
+	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
+		t.Errorf("parsePackageList(unterminated tag) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
+	}
+	if refused.Count != 0 {
+		t.Errorf("parsePackageList(unterminated tag) refusals = %+v, want no partial result", refused)
 	}
 
 	got, _, err = parsePackageList(strings.Repeat(`<a x="`, 9), "owner", userOwner)

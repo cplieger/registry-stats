@@ -58,6 +58,42 @@ func TestNew_readinessEndpoint(t *testing.T) {
 	}
 }
 
+type panicOnceReadiness struct{ calls int }
+
+func (r *panicOnceReadiness) Ready() bool {
+	r.calls++
+	if r.calls == 1 {
+		panic("readiness boom")
+	}
+	return true
+}
+
+func TestNew_recoversHandlerPanicWithTruthfulAccessStatus(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv := New(Deps{Metrics: obs.New(), Ready: &panicOnceReadiness{}, Logger: logger})
+
+	first := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+
+	if first.Code != http.StatusInternalServerError {
+		t.Errorf("GET /api/health after handler panic status = %d, want %d", first.Code, http.StatusInternalServerError)
+	}
+	logs := buf.String()
+	if count := strings.Count(logs, "msg=http"); count != 1 {
+		t.Errorf("GET /api/health panic access record count = %d, want 1; logs: %q", count, logs)
+	}
+	if !strings.Contains(logs, "status=500") {
+		t.Errorf("GET /api/health panic access status is not 500; logs: %q", logs)
+	}
+
+	second := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if second.Code != http.StatusOK {
+		t.Errorf("GET /api/health after recovered panic status = %d, want %d", second.Code, http.StatusOK)
+	}
+}
+
 // TestNew_boundsRequestReadAndWrite pins the guarantee the library does not
 // make: webhttp leaves ReadTimeout and WriteTimeout unset, so dropping either
 // option turns a bounded request into an unbounded one. ReadHeaderTimeout and
@@ -198,5 +234,21 @@ func TestNew_unreadyHealthLogMatchesAlertExclusion(t *testing.T) {
 	}
 	if !strings.Contains(logs, "path=/api/health status=503") {
 		t.Errorf("GET /api/health access record does not match the shipped exclusion; logs: %q", logs)
+	}
+}
+
+func TestNew_successfulMetricsScrapeIsDebugOnly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: logger})
+
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /metrics status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if logs := buf.String(); logs != "" {
+		t.Errorf("successful GET /metrics emitted an Info access record, want Debug-only; logs: %q", logs)
 	}
 }

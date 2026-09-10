@@ -86,6 +86,8 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.
 
 		attempted++
 		if err != nil {
+			c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo,
+				"error", errTextForLog(err))
 			if errors.Is(err, errHTMLFormatChanged) {
 				pkgParseFailures++
 			}
@@ -147,21 +149,13 @@ func (c *Client) pacingDelay() time.Duration {
 	return pacingMin + jitter
 }
 
-// scrapePackage scrapes one package's download count, reporting the failure
-// itself so the caller only classifies it. The error is errHTMLFormatChanged
-// for format drift and carries ctx.Err() when a shutdown interrupted the
-// scrape; on any error the entry is zero and the caller leaves the package out
-// of results.
+// scrapePackage scrapes one package's download count. The caller reports and
+// classifies failures. The error is errHTMLFormatChanged for format drift and
+// carries ctx.Err() when a shutdown interrupted the scrape; on any error the
+// entry is zero and the caller leaves the package out of results.
 func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoRef) (registry.Entry, error) {
 	downloads, err := c.scrapeDownloads(ctx, p, ref)
 	if err != nil {
-		if ctx.Err() != nil {
-			// collect.Run logs cancellation once for the cycle; suppress the
-			// alert-keyed source failure warning here.
-			return registry.Entry{}, err
-		}
-		c.opts.Logger.Warn("ghcr scrape failed", "package", ref.Owner+"/"+ref.Repo,
-			"error", errTextForLog(err))
 		return registry.Entry{}, err
 	}
 	c.opts.Logger.Debug("ghcr package collected", "package", ref.Owner+"/"+ref.Repo, "downloads", downloads)

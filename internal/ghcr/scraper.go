@@ -43,6 +43,11 @@ const htmlWhitespace = " \t\n\f\r"
 // response is a format signal, not legitimate content.
 const ghcrBodyCap = 2 << 20
 
+// userAgent identifies this client to github.com. Both pages this package
+// reads are served to any agent, so the header is a contact address rather
+// than a gate.
+const userAgent = "registry-stats (+https://github.com/cplieger/registry-stats)"
+
 // maxListingCandidates bounds matching link occurrences plus refused
 // candidates per page, counted before dedup; the largest measured page
 // carried 30 candidates.
@@ -51,10 +56,6 @@ const maxListingCandidates = 100
 // maxListingPages bounds a listing that keeps serving new package names.
 // Fifty is a round limit above the largest measured total of 23 pages.
 const maxListingPages = 50
-
-// maxRescans bounds terminator lookups that read the remaining page.
-// Five live pages carrying 1,075-1,808 start tags each measured zero.
-const maxRescans = 8
 
 // statedPackagesMarker identifies the printed package count for one listing page.
 const statedPackagesMarker = "packages"
@@ -98,8 +99,8 @@ func linkPrefix(kind ownerKind, owner string) string {
 // fetchHTML fetches a GitHub HTML page, spacing requests by c.pacingDelay
 // after the first of the cycle. httpx retries 408, 429, 5xx and transient
 // transport errors per c.opts.RetryOpts; other non-2xx statuses fail fast. The
-// appended browser headers (anonymous GHCR pages gate on User-Agent) and
-// ghcrBodyCap always win, because options are applied left to right.
+// appended request headers and ghcrBodyCap always win, because options are
+// applied left to right.
 func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (string, error) {
 	if err := p.wait(ctx); err != nil {
 		return "", err
@@ -113,9 +114,8 @@ func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (strin
 		httpx.WithLogger(c.opts.Logger),
 		httpx.WithExhaustedLevel(slog.LevelDebug),
 		httpx.WithHeaders(func(req *http.Request) {
-			req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+			req.Header.Set("User-Agent", userAgent)
 			req.Header.Set("Accept", "text/html")
-			req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		}),
 		httpx.WithMaxBodyBytes(ghcrBodyCap),
 	)
@@ -251,7 +251,7 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 			stated:   stated,
 			statedOK: statedOK,
 		}
-		complete, err := listingPageComplete(&acct)
+		complete, err := c.listingPageComplete(owner, &acct)
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
@@ -293,7 +293,13 @@ type pageAccounting struct {
 	statedOK bool
 }
 
-func listingPageComplete(acct *pageAccounting) (bool, error) {
+func (c *Client) listingPageComplete(owner string, acct *pageAccounting) (bool, error) {
+	if !acct.statedOK {
+		// The printed count is the only proof this page was read whole;
+		// without it the walk publishes whatever it found.
+		c.opts.Logger.Warn("ghcr listing page states no usable package count; completeness unchecked",
+			"owner", owner, "page", acct.page)
+	}
 	if acct.added == 0 {
 		return true, emptyPageError(acct)
 	}
@@ -306,8 +312,6 @@ func emptyPageError(acct *pageAccounting) error {
 	switch {
 	case acct.refused.Count > 0:
 		return fmt.Errorf("%w: listing page %d yielded no usable package names", errHTMLFormatChanged, acct.page)
-	case acct.statedOK && acct.stated == 0:
-		return nil
 	case len(acct.names) > 0:
 		return fmt.Errorf("%w: listing page %d re-served %d names already collected", errHTMLFormatChanged, acct.page, len(acct.names))
 	}
@@ -364,13 +368,11 @@ func markupTagEnd(html string, start int) (int, bool) {
 		switch {
 		case quote != 0 && c == quote:
 			quote = 0
-			afterEq = false
 		case quote != 0:
 		case c == '=':
 			afterEq = true
 		case afterEq && (c == '\'' || c == '"'):
 			quote = c
-		case afterEq && strings.ContainsRune(htmlWhitespace, rune(c)):
 		case c == '>':
 			return i, true
 		}
@@ -498,20 +500,29 @@ func commentEnd(html string, open int) (int, bool) {
 // abrupt "<!-->"/"<!--->"). A doctype, bogus declaration, CDATA section,
 // processing instruction, or nameless end tag is skipped at its own '>'; a
 // named end tag is read like a start tag, because HTML gives it the same
-// attribute syntax. Their bodies are not markup, so a link inside one must not
-// add a ghost package name. An unterminated construct or malformed start tag
-// advances one byte so later tags remain readable.
-func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanned, ok bool) {
+// attribute syntax. Each ends at its first '>' even when a quote precedes it,
+// which is where HTML's own doctype and bogus-comment states end them, so bytes
+// after that '>' are markup again and a link there is emitted. A CDATA section
+// in foreign content is the one case that differs: HTML ends that at ']]>', so
+// a link after a '>' in its body is text upstream and a package name here. A
+// construct whose terminator is absent runs to end of input, so the walk ends
+// there rather than resuming inside it; next then carries the construct's own
+// offset.
+func nextStartTag(html string, cursor int) (tag string, next int, emit, unterminated, ok bool) {
 	i := strings.IndexByte(html[cursor:], '<')
 	if i < 0 {
 		return "", 0, false, false, false
 	}
 	open := cursor + i
+	// A '<' that is the input's final byte opens no markup.
+	if open+1 >= len(html) {
+		return "", open + 1, false, false, true
+	}
 	if strings.HasPrefix(html[open:], "<!--") {
 		if end, found := commentEnd(html, open); found {
 			return "", end, false, false, true
 		}
-		return "", open + 1, false, true, true
+		return "", open, false, true, true
 	}
 	// An end tag carries the same attribute syntax as a start tag, so a '>'
 	// inside one of its quoted values does not end it; it is read like a
@@ -520,28 +531,25 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanne
 		if end, found := markupTagEnd(html, open); found {
 			return "", end + 1, false, false, true
 		}
-		return "", open + 1, false, true, true
+		return "", open, false, true, true
 	}
 	// A '<' that cannot open a start tag opens no markup either: a doctype, a bogus
 	// declaration, a CDATA section in HTML content, a processing instruction and a
 	// nameless end tag all end at their own '>', so their bodies are not markup. An
-	// unterminated one is charged to the rescan budget, as an unterminated comment is.
-	if open+1 < len(html) && (html[open+1] == '!' || html[open+1] == '?' || html[open+1] == '/') {
+	// unterminated one ends the walk, as an unterminated comment does.
+	if html[open+1] == '!' || html[open+1] == '?' || html[open+1] == '/' {
 		if end := strings.IndexByte(html[open:], '>'); end >= 0 {
 			return "", open + end + 1, false, false, true
 		}
-		return "", open + 1, false, true, true
+		return "", open, false, true, true
 	}
-	// Any other '<' not followed by an ASCII letter advances one byte; so does a
-	// '<'+letter whose apparent end markupTagEnd cannot find. An unterminated
-	// comment returns one byte from its branch, where the failed terminator
-	// lookup is charged to the rescan budget.
-	if open+1 >= len(html) || !startsTagName(html[open+1]) {
+	// Any other '<' not followed by an ASCII letter advances one byte.
+	if !startsTagName(html[open+1]) {
 		return "", open + 1, false, false, true
 	}
 	tagEnd, found := markupTagEnd(html, open)
 	if !found {
-		return "", open + 1, false, true, true
+		return "", open, false, true, true
 	}
 	return html[open:tagEnd], tagEnd + 1, true, false, true
 }
@@ -550,24 +558,20 @@ func nextStartTag(html string, cursor int) (tag string, next int, emit, rescanne
 // ends at the first '>' outside a quoted span. End tags, processing
 // instructions, and terminated comments are skipped. A raw-text element body
 // (script, style, textarea, title) is walked as ordinary markup, including tag-shaped bytes.
-// More than maxRescans terminator lookups that run to end of input end
-// the walk with errHTMLFormatChanged instead of a span.
+// A terminator lookup that runs to end of input ends the walk with
+// errHTMLFormatChanged instead of a span.
 func startTags(html string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		rescans := 0
 		for cursor := 0; cursor < len(html); {
-			tag, next, emit, rescanned, ok := nextStartTag(html, cursor)
+			tag, next, emit, unterminated, ok := nextStartTag(html, cursor)
 			if !ok {
 				return
 			}
-			cursor = next
-			if rescanned {
-				rescans++
-			}
-			if rescans > maxRescans {
-				yield("", fmt.Errorf("%w: listing markup exhausted the %d-rescan budget", errHTMLFormatChanged, maxRescans))
+			if unterminated {
+				yield("", fmt.Errorf("%w: unterminated markup construct at byte %d", errHTMLFormatChanged, next))
 				return
 			}
+			cursor = next
 			if emit && !yield(tag, nil) {
 				return
 			}
@@ -600,9 +604,10 @@ func tagAttributes(tag string) iter.Seq2[string, string] {
 
 // parsePackageList extracts package names from one owner's listing page. A
 // name comes from an href on any span the lexical walk emits, page text
-// included; the page's printed package count proves the set GitHub published.
-// An unterminated comment body is still walked. Registered owner casing is
-// response data, so the prefix is matched without transforming untrusted HTML.
+// included; the page's printed package count is compared against the set
+// read, and a mismatch refuses the page.
+// Registered owner casing is response data, so the prefix is matched without
+// transforming untrusted HTML.
 // Zero names is not an error here because its meaning depends on the page
 // number, which only the caller knows.
 func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, err error) {
@@ -748,6 +753,19 @@ func parseDownloads(html string) (int64, error) {
 	return count, nil
 }
 
+func nextCommentSpan(html string, cursor int) (start, end int, terminated bool) {
+	offset := strings.Index(html[cursor:], "<!--")
+	if offset < 0 {
+		return len(html), len(html), true
+	}
+	start = cursor + offset
+	end, terminated = commentEnd(html, start)
+	if !terminated {
+		end = len(html)
+	}
+	return start, end, terminated
+}
+
 // markerText returns the first plausible "Total downloads" occurrence and
 // the number found. A plausible occurrence is bounded like element text: the
 // previous non-whitespace byte closes a start tag and the next bytes begin an
@@ -761,28 +779,21 @@ func markerText(html string) (idx, n int) {
 	// once: a new "<!--" can only be in the window since the previous
 	// occurrence, and a marker inside a comment resumes at that comment's
 	// end.
-	scanned, commentOpen, commentAt := 0, -1, 0
+	commentStart, commentAt, terminated := 0, 0, true
 	for at := 0; ; {
 		i := strings.Index(html[at:], marker)
 		if i < 0 {
 			return idx, n
 		}
 		i += at
-		if last := strings.LastIndex(html[scanned:i], "<!--"); last >= 0 {
-			commentOpen = scanned + last
+		if commentAt <= i {
+			commentStart, commentAt, terminated = nextCommentSpan(html, commentAt)
 		}
-		scanned = i
-		if commentOpen >= commentAt {
-			end, terminated := commentEnd(html, commentOpen)
+		if commentStart <= i && i < commentAt {
 			if !terminated {
-				// An unterminated comment runs to end of input, so no later
-				// occurrence is element text either.
 				return idx, n
 			}
-			commentAt = end
-		}
-		if commentAt > i {
-			at, scanned = commentAt, commentAt
+			at = commentAt
 			continue
 		}
 		before := strings.TrimRight(html[:i], htmlWhitespace)
@@ -856,20 +867,23 @@ func (c *Client) expandWildcard(
 				"error", errTextForLog(err))
 			return out, false
 		}
-		listingWhollyFailed = len(names) == 0
+		// A listing that states zero container packages is a definitive
+		// upstream answer, not an unread listing.
+		confirmedEmpty := errors.Is(err, errEmptyListing) && !errors.Is(err, errHTMLFormatChanged)
+		listingWhollyFailed = len(names) == 0 && !confirmedEmpty
 		if listingWhollyFailed {
 			switch {
 			case errors.Is(err, errHTMLFormatChanged) && !errors.Is(err, errEmptyListing):
 				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
 					"error", errTextForLog(err),
 					"report_at", "https://github.com/cplieger/registry-stats/issues")
-			case errors.Is(err, errEmptyListing):
-				c.opts.Logger.Error("ghcr package listing failed", "owner", ref.Owner,
-					"error", errTextForLog(err))
 			default:
 				c.opts.Logger.Warn("ghcr package listing failed", "owner", ref.Owner,
 					"error", errTextForLog(err))
 			}
+		} else if confirmedEmpty {
+			c.opts.Logger.Warn("ghcr owner has no public container packages",
+				"owner", ref.Owner)
 		}
 		return c.appendPackages(names, ref.Owner, seen, out), listingWhollyFailed
 	}

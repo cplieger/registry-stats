@@ -42,6 +42,7 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"results":[{"name":""},{"name":"../evil"},{"name":"ok"}]}`))
 	f.Add([]byte(`{"results":[{"name":"a","pull_count":1},{"name":"b"}]}`))
 	f.Add([]byte(`{"results":[{"name":"a","pull_count":-5}]}`))
+	f.Add([]byte(`{"count":3,"next":"","results":[{"name":"app","pull_count":100},{"name":"","pull_count":1},{"name":"../evil","pull_count":2}]}`))
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {

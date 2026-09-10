@@ -139,13 +139,10 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 		c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos), "advertised", advertised)
 	}
 	for _, repo := range repos {
-		name := repo.Owner + "/" + repo.Repo
-		key := registry.RepoRef{Owner: repo.Owner, Repo: repo.Repo}
-		seen[key] = true
-		results = append(results, repo)
-		c.logger.Debug("docker hub repo collected", "repo", name, "pulls", repo.Pulls)
+		seen[registry.RepoRef{Owner: repo.Owner, Repo: repo.Repo}] = true
+		c.logger.Debug("docker hub repo collected", "repo", repo.Owner+"/"+repo.Repo, "pulls", repo.Pulls)
 	}
-	return results, listingFailed
+	return repos, listingFailed
 }
 
 // collectExplicit fetches each non-wildcard ref unless a wildcard already
@@ -200,11 +197,12 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 // listRepos paginates the Docker Hub owner listing endpoint. advertised is the
 // total its first page publishes, so the caller can report how much of the
 // owner this walk holds. Which sentinel classifies a failed walk is on
-// errListingMoved and errResponseUnparsable. A walk stopped at the page cap
-// returns what it collected, reporting the rows its pages carried so a row lost
-// to a cross-page repeat is not read as truncation. A nil error means the
-// totals reconciled: offset pagination cannot see a repository deleted before
-// the page boundary and one added after it, so the snapshot may still be mixed.
+// errListingMoved and errShapeChanged. A walk stopped at the page cap
+// returns what it collected, reporting the rows its pages carried that passed
+// the repo-name allowlist, so a row lost to a cross-page repeat is not read as
+// truncation. A nil error means the totals reconciled: offset pagination cannot
+// see a repository deleted before the page boundary and one added after it, so
+// the snapshot may still be mixed.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
 	seen := make(map[registry.RepoRef]bool)
 	complete := false
@@ -246,7 +244,7 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 	if !complete {
 		if len(entries) > advertisedMax {
 			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d the most any page advertised, on a walk stopped at the page cap",
-				errResponseUnparsable, len(entries), advertisedMax)
+				errShapeChanged, len(entries), advertisedMax)
 		}
 		c.logger.Warn("docker hub owner listing hit page cap; results may be truncated",
 			"owner", owner, "repos", len(entries), "page_rows", pageRows,
@@ -258,8 +256,8 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 			errListingMoved, len(entries), advertised, laterTotal)
 	}
 	if len(entries) != advertised {
-		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories from the %d rows its pages carried, against the %d every page advertised",
-			errResponseUnparsable, len(entries), pageRows, advertised)
+		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories from the %d name-allowlisted rows its pages carried, against the %d every page advertised",
+			errShapeChanged, len(entries), pageRows, advertised)
 	}
 
 	return entries, advertised, nil
@@ -293,10 +291,10 @@ func parseRepoMeta(data []byte) (int64, error) {
 		PullCount *int64 `json:"pull_count"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+		return 0, fmt.Errorf("%w: %w", errShapeChanged, err)
 	}
 	if resp.PullCount == nil || *resp.PullCount < 0 {
-		return 0, errPullCountInvalid
+		return 0, fmt.Errorf("%w: pull count missing or negative", errShapeChanged)
 	}
 	return *resp.PullCount, nil
 }
@@ -318,45 +316,40 @@ func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, mor
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, false, 0, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+		return nil, false, 0, fmt.Errorf("%w: %w", errShapeChanged, err)
 	}
 	if len(resp.Results) > listingElemCap {
 		return nil, false, 0, fmt.Errorf("%w: listing page carried more than %d results for a page_size=%d request",
-			errResponseUnparsable, listingElemCap, pageSize)
+			errShapeChanged, listingElemCap, pageSize)
+	}
+	if resp.Count == nil || *resp.Count < 0 {
+		return nil, false, 0, fmt.Errorf("%w: listing total missing or negative", errShapeChanged)
+	}
+	if len(resp.Results) > *resp.Count {
+		return nil, false, 0, fmt.Errorf("%w: listing page carried %d results against the %d repositories it advertises for the whole owner",
+			errShapeChanged, len(resp.Results), *resp.Count)
 	}
 	repos := make([]registry.Entry, 0, len(resp.Results))
 	for _, res := range resp.Results {
-		// Repo names become published label values and log attributes, so
-		// they pass the urlsafe allowlist behind errRepoNameUnsafe. Upstream
-		// enforces a narrower rule than that allowlist — measured HTTP 400
-		// "invalid repository" for a name outside [a-z0-9._-] or over 255
-		// characters — so this skip cannot drop a repo Docker Hub will serve;
-		// a renamed name member blanks every result and fails loudly below.
+		// Repo names become published label values and log attributes, so they
+		// pass the urlsafe allowlist behind errShapeChanged. Upstream refuses
+		// with HTTP 400 a name outside [a-z0-9._-], a name over 255 bytes, and
+		// an owner/name joined over 255 bytes, so neither this skip nor the
+		// whole-reference urlsafe.CheckReference every config path applies can
+		// drop a repo Docker Hub will serve - the latter is unreachable here.
 		if !urlsafe.IsSafeURLSegment(res.Name) {
 			continue
 		}
 		if res.PullCount == nil || *res.PullCount < 0 {
-			return nil, false, 0, fmt.Errorf("repo %q: %w", res.Name, errPullCountInvalid)
+			return nil, false, 0, fmt.Errorf("%w: repo %q: pull count missing or negative", errShapeChanged, res.Name)
 		}
 		repos = append(repos, registry.Entry{Owner: owner, Repo: res.Name, Pulls: *res.PullCount})
 	}
 	if len(repos) == 0 && len(resp.Results) > 0 {
-		return nil, false, 0, fmt.Errorf("all %d listed repo names rejected: %w", len(resp.Results), errRepoNameUnsafe)
-	}
-	if resp.Count == nil || *resp.Count < 0 {
-		return nil, false, 0, fmt.Errorf("%w: listing total missing or negative", errResponseUnparsable)
+		return nil, false, 0, fmt.Errorf("%w: all %d listed repo names rejected as unsafe", errShapeChanged, len(resp.Results))
 	}
 	return repos, resp.Next != "", *resp.Count, nil
 }
-
-// errPullCountInvalid is returned when a Docker Hub response decodes as
-// JSON but carries no usable cumulative pull count — a format-change
-// signal, distinct from malformed JSON.
-var errPullCountInvalid = errors.New("pull count missing or negative")
-
-// errRepoNameUnsafe classifies a listing page on which no result name passed
-// urlsafe.IsSafeURLSegment before publication as a metric label value.
-var errRepoNameUnsafe = errors.New("listed repo names rejected as unsafe")
 
 // errListingMoved classifies a completed owner walk when a later page
 // advertises a different total from the first: upstream described two
@@ -364,19 +357,16 @@ var errRepoNameUnsafe = errors.New("listed repo names rejected as unsafe")
 // and each was self-consistent, so this is not a format-change signal.
 var errListingMoved = errors.New("docker hub owner listing moved between page requests")
 
-// errResponseUnparsable classifies any post-200 schema failure as a
+// errShapeChanged classifies every post-200 schema failure as a
 // format-change signal rather than a transport one: a json/v2 decode
-// rejection, or a decoded envelope that contradicts what was asked
-// for. json/v2 is case-sensitive and skips a case-variant member name
-// silently, leaving the field nil, so a required-field sentinel
-// classifies that case: errPullCountInvalid for a repo's own pull_count,
-// and this sentinel for the listing envelope's count.
-var errResponseUnparsable = errors.New("docker hub response did not decode")
+// rejection, or a decoded envelope that contradicts what was asked for.
+// json/v2 is case-sensitive and skips a case-variant member name silently,
+// leaving the field nil, so a required member that decodes to its zero
+// value is classified here rather than read as a value.
+var errShapeChanged = errors.New("docker hub response is not the documented shape")
 
 func shapeChanged(err error) bool {
-	return errors.Is(err, errPullCountInvalid) ||
-		errors.Is(err, errRepoNameUnsafe) ||
-		errors.Is(err, errResponseUnparsable)
+	return errors.Is(err, errShapeChanged)
 }
 
 func failureLevel(err error) slog.Level {
@@ -398,7 +388,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	data, err := httpx.GetBytes(ctx, c.http, url, opts...)
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
-			return nil, fmt.Errorf("%w: %w", errResponseUnparsable, err)
+			return nil, fmt.Errorf("%w: %w", errShapeChanged, err)
 		}
 		return nil, err
 	}

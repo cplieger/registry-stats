@@ -93,14 +93,13 @@ func run() error {
 	slog.Info("http server starting", "addr", ln.Addr().String())
 
 	httpClient := registryClient()
-	defer httpClient.CloseIdleConnections()
 
 	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
 	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
 	sources := []collectpkg.Source{dh, gh}
 
-	active, sourceNames := activeSources(&cfg, sources)
-	m.MintCollectSources(sourceNames)
+	active, sourceIDs := activeSources(&cfg, sources)
+	m.MintCollectSources(sourceIDs)
 	// Healthy before the first cycle: a first collect over two live
 	// registries can outlast the image's 15s HEALTHCHECK start-period, and
 	// runCollect's per-cycle Set(ok) cannot cover the window before a
@@ -109,7 +108,7 @@ func run() error {
 
 	pub := &publication{marker: marker, m: m, ready: &ready}
 	collect := func(ctx context.Context) {
-		runCollect(ctx, &cfg, active, pub)
+		runCollect(ctx, active, pub)
 	}
 
 	bgDone := make(chan struct{})
@@ -186,13 +185,14 @@ type publication struct {
 	mu     sync.Mutex
 }
 
-func (p *publication) publish(ctx context.Context, images []obs.ImageMetric) {
+func (p *publication) publish(ctx context.Context, images []obs.ImageMetric, elapsed time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// SetImage deletes labels absent from a pass, so a cancelled cycle publishes nothing.
 	if ctx.Err() != nil {
 		return
 	}
+	p.m.ObserveCollectDuration(elapsed)
 	p.m.SetImage(images)
 	ok := len(images) > 0
 	p.marker.Set(ok)
@@ -208,16 +208,14 @@ func (p *publication) drain() {
 }
 
 // runCollect executes one cycle and publishes its outcome.
-func runCollect(ctx context.Context, cfg *config.Config, sources []collectpkg.Source, pub *publication) {
+func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication) {
 	start := time.Now()
 	images := collectpkg.Run(ctx, collectpkg.Options{
 		Metrics: pub.m,
 		Sources: sources,
 		Logger:  slog.Default(),
-		RefsFor: func(source registry.ID) []registry.RepoRef { return refsFor(cfg, source) },
 	})
-	pub.m.ObserveCollectDuration(time.Since(start))
-	pub.publish(ctx, images)
+	pub.publish(ctx, images, time.Since(start))
 }
 
 func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
@@ -241,21 +239,21 @@ func registryClient() *http.Client {
 	}
 }
 
-// activeSources returns the sources with at least one configured
-// ref and their metric names. One pass, so a source cannot be
-// invoked without having been pre-minted.
-func activeSources(cfg *config.Config, sources []collectpkg.Source) (active []collectpkg.Source, names []string) {
-	active = make([]collectpkg.Source, 0, len(sources))
-	names = make([]string, 0, len(sources))
+// activeSources returns each source with its configured refs and its metric ID.
+// One pass keeps invocation and pre-minting on the same selected set.
+func activeSources(cfg *config.Config, sources []collectpkg.Source) (active []collectpkg.SourceRefs, ids []registry.ID) {
+	active = make([]collectpkg.SourceRefs, 0, len(sources))
+	ids = make([]registry.ID, 0, len(sources))
 	for _, src := range sources {
 		source := src.Source()
-		if len(refsFor(cfg, source)) == 0 {
+		refs := refsFor(cfg, source)
+		if len(refs) == 0 {
 			continue
 		}
-		active = append(active, src)
-		names = append(names, source.String())
+		active = append(active, collectpkg.SourceRefs{Source: src, Refs: refs})
+		ids = append(ids, source)
 	}
-	return active, names
+	return active, ids
 }
 
 // healthSignal is the write-only liveness contract used by the collect loop.

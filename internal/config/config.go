@@ -100,11 +100,15 @@ func PollInterval() (time.Duration, []Warning) {
 func Load() (Config, []Warning) {
 	pollInterval, warns := PollInterval()
 
-	logLevel, logLevelOK := slogx.ParseLevel(envx.String("LOG_LEVEL"), slog.LevelInfo)
+	rawLogLevel := envx.String("LOG_LEVEL")
+	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
 	if !logLevelOK {
 		warns = append(warns, Warning{
-			Msg:   "invalid LOG_LEVEL, using default",
-			Attrs: []slog.Attr{slog.String("default", "info")},
+			Msg: "invalid LOG_LEVEL, using default",
+			Attrs: []slog.Attr{
+				slog.String(attrValue, rawLogLevel),
+				slog.String("default", "info"),
+			},
 		})
 	}
 
@@ -139,9 +143,6 @@ func Load() (Config, []Warning) {
 // pairs. Invalid entries are skipped and reported with the rule that refused
 // them. Each accepted ref is canonicalized to lower case.
 func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
-	if s == "" {
-		return nil, nil
-	}
 	var refs []registry.RepoRef
 	var warns []Warning
 	seen := make(map[registry.RepoRef]bool)
@@ -195,6 +196,9 @@ func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 // Hub, and a decoded safe package name for GHCR.
 func repoName(reg registry.ID, owner urlsafe.Owner, repo string) (string, error) {
 	if repo == "*" {
+		if err := urlsafe.CheckReference(owner, repo); err != nil {
+			return "", err
+		}
 		return repo, nil
 	}
 	if reg != registry.GHCR {

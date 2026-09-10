@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ import (
 // the orchestrator in isolation from any real HTTP path.
 type fakeSource struct {
 	// lastRefs captures the refs Collect saw so tests can assert the
-	// orchestrator plumbs RefsFor(Source()) through correctly.
+	// orchestrator passes each work item's refs through unchanged.
 	entries       []registry.Entry
 	lastRefs      []registry.RepoRef
 	fetched       int
@@ -60,6 +61,10 @@ func newFakeGHCR() *fakeSource {
 	return &fakeSource{source: registry.GHCR}
 }
 
+func workItem(source collect.Source, refs ...registry.RepoRef) collect.SourceRefs {
+	return collect.SourceRefs{Source: source, Refs: refs}
+}
+
 func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 	ctx := t.Context()
 	dh := newFakeDockerHub()
@@ -78,26 +83,19 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 
 	images := collect.Run(ctx, collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{dh, gh},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(source registry.ID) []registry.RepoRef {
-			switch source {
-			case registry.DockerHub:
-				return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
-			case registry.GHCR:
-				return []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}
-			}
-			return nil
+		Sources: []collect.SourceRefs{
+			{Source: dh, Refs: []registry.RepoRef{{Owner: "owner", Repo: "app"}}},
+			{Source: gh, Refs: []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}},
 		},
+		Logger: testsupport.QuietLogger(),
 	})
 	want := []obs.ImageMetric{
-		{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 42},
-		{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 500},
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 42},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 500},
 	}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("images = %+v, want %+v", images, want)
 	}
-	// RefsFor plumbed through correctly.
 	if len(dh.lastRefs) != 1 || dh.lastRefs[0].Repo != "app" {
 		t.Errorf("dh.lastRefs = %+v, want [{owner app}]", dh.lastRefs)
 	}
@@ -116,11 +114,10 @@ func TestRun_success_logs_lifecycle(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	collect.Run(t.Context(), collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{src},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		Sources: []collect.SourceRefs{
+			workItem(src, registry.RepoRef{Owner: "owner", Repo: "app"}),
 		},
+		Logger: logger,
 	})
 
 	logs := buf.String()
@@ -128,37 +125,6 @@ func TestRun_success_logs_lifecycle(t *testing.T) {
 	completed := strings.Index(logs, `level=INFO msg="collection complete" images=1 duration=`)
 	if started < 0 || completed < 0 || started >= completed {
 		t.Errorf("Run() lifecycle logs = %q, want ordered start and completion with images=1 and duration", logs)
-	}
-}
-
-func TestRun_refLessSourceIsSkipped(t *testing.T) {
-	m := obs.New()
-	src := newFakeDockerHub()
-	src.entries = []registry.Entry{{Owner: "owner", Repo: "unexpected", Pulls: 1}}
-	src.fetched = 1
-	src.attempted = 1
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	images := collect.Run(t.Context(), collect.Options{
-		Metrics: m,
-		Sources: []collect.Source{src},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef { return nil },
-	})
-
-	if len(images) != 0 {
-		t.Errorf("Run(ref-less source) returned %d images, want 0", len(images))
-	}
-	if logs := buf.String(); !strings.Contains(logs, `level=WARN msg="no repos configured"`) {
-		t.Errorf("Run(ref-less source) logs = %q, want configuration warning", logs)
-	}
-
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	w := httptest.NewRecorder()
-	m.Handler()(w, r)
-	if body := w.Body.String(); strings.Contains(body, `registrystats_collects_total{source="dockerhub"}`) {
-		t.Errorf("Run(ref-less source) minted a collect series:\n%s", body)
 	}
 }
 
@@ -190,11 +156,11 @@ func TestRun_records_counters_for_invoked_sources(t *testing.T) {
 
 	collect.Run(t.Context(), collect.Options{
 		Metrics: m,
-		Sources: []collect.Source{dh, gh},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+		Sources: []collect.SourceRefs{
+			workItem(dh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
+			workItem(gh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 		},
+		Logger: testsupport.QuietLogger(),
 	})
 
 	body := scrape()
@@ -214,16 +180,15 @@ func TestRun_records_counters_for_invoked_sources(t *testing.T) {
 
 func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
 	m := obs.New()
-	m.MintCollectSources([]string{"dockerhub"})
+	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	src := newFakeDockerHub()
 
 	collect.Run(t.Context(), collect.Options{
 		Metrics: m,
-		Sources: []collect.Source{src},
-		Logger:  testsupport.QuietLogger(),
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "*"}}
+		Sources: []collect.SourceRefs{
+			workItem(src, registry.RepoRef{Owner: "owner", Repo: "*"}),
 		},
+		Logger: testsupport.QuietLogger(),
 	})
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -264,11 +229,10 @@ func TestRun_derivesSourceHealthFromResults(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			collect.Run(t.Context(), collect.Options{
 				Metrics: obs.New(),
-				Sources: []collect.Source{src},
-				Logger:  logger,
-				RefsFor: func(registry.ID) []registry.RepoRef {
-					return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+				Sources: []collect.SourceRefs{
+					workItem(src, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 				},
+				Logger: logger,
 			})
 
 			unhealthy := strings.Contains(buf.String(), `msg="source reported unhealthy"`)
@@ -294,16 +258,14 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		sources  []collect.Source
-		refsFor  func(registry.ID) []registry.RepoRef
+		sources  []collect.SourceRefs
 		cancel   bool
 		want     string
 		unwanted []string
 	}{
 		{
-			name:    "no_sources_reports_configuration",
-			refsFor: func(registry.ID) []registry.RepoRef { return nil },
-			want:    `level=WARN msg="no repos configured"`,
+			name: "no_sources_reports_configuration",
+			want: `level=WARN msg="no repos configured"`,
 			unwanted: []string{
 				`msg="no images collected, at least one source failed"`,
 				`msg="no images found for the configured refs"`,
@@ -311,10 +273,11 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			},
 		},
 		{
-			name:    "all_sources_failed_reports_failure",
-			sources: []collect.Source{degraded},
-			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
-			want:    `level=ERROR msg="no images collected, at least one source failed"`,
+			name: "all_sources_failed_reports_failure",
+			sources: []collect.SourceRefs{
+				workItem(degraded, registry.RepoRef{Owner: "o", Repo: "r"}),
+			},
+			want: `level=ERROR msg="no images collected, at least one source failed"`,
 			unwanted: []string{
 				`msg="no repos configured"`,
 				`msg="no images found for the configured refs"`,
@@ -322,10 +285,12 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			},
 		},
 		{
-			name:    "mixed_health_without_images_reports_failure",
-			sources: []collect.Source{emptyButHealthy, degraded},
-			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
-			want:    `level=ERROR msg="no images collected, at least one source failed"`,
+			name: "mixed_health_without_images_reports_failure",
+			sources: []collect.SourceRefs{
+				workItem(emptyButHealthy, registry.RepoRef{Owner: "o", Repo: "r"}),
+				workItem(degraded, registry.RepoRef{Owner: "o", Repo: "r"}),
+			},
+			want: `level=ERROR msg="no images collected, at least one source failed"`,
 			unwanted: []string{
 				`msg="no repos configured"`,
 				`msg="no images found for the configured refs"`,
@@ -333,10 +298,11 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			},
 		},
 		{
-			name:    "healthy_but_empty_reports_nothing_to_poll",
-			sources: []collect.Source{emptyButHealthy},
-			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
-			want:    `level=WARN msg="no images found for the configured refs"`,
+			name: "healthy_but_empty_reports_nothing_to_poll",
+			sources: []collect.SourceRefs{
+				workItem(emptyButHealthy, registry.RepoRef{Owner: "o", Repo: "r"}),
+			},
+			want: `level=WARN msg="no images found for the configured refs"`,
 			unwanted: []string{
 				`msg="no images collected, at least one source failed"`,
 				`msg="no repos configured"`,
@@ -344,11 +310,12 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 			},
 		},
 		{
-			name:    "cancelled_cycle_reports_interruption_before_failure",
-			sources: []collect.Source{degraded},
-			refsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
-			cancel:  true,
-			want:    `level=WARN msg="collection interrupted"`,
+			name: "cancelled_cycle_reports_interruption_before_failure",
+			sources: []collect.SourceRefs{
+				workItem(degraded, registry.RepoRef{Owner: "o", Repo: "r"}),
+			},
+			cancel: true,
+			want:   `level=WARN msg="collection interrupted"`,
 			unwanted: []string{
 				`msg="no images collected, at least one source failed"`,
 				`msg="no repos configured"`,
@@ -372,14 +339,15 @@ func TestRun_empty_cycle_log_classifies_cause(t *testing.T) {
 				cancelling := newFakeDockerHub()
 				cancelling.attempted = 2
 				cancelling.cancel = cancel
-				sources = []collect.Source{cancelling}
+				sources = []collect.SourceRefs{
+					workItem(cancelling, registry.RepoRef{Owner: "o", Repo: "r"}),
+				}
 			}
 
 			collect.Run(ctx, collect.Options{
 				Metrics: obs.New(),
 				Sources: sources,
 				Logger:  logger,
-				RefsFor: tt.refsFor,
 			})
 
 			logs := buf.String()
@@ -417,9 +385,11 @@ func TestRun_cancelled_source_moves_no_error_counter(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	collect.Run(ctx, collect.Options{
 		Metrics: m,
-		Sources: []collect.Source{dh, gh},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef { return []registry.RepoRef{{Owner: "o", Repo: "r"}} },
+		Sources: []collect.SourceRefs{
+			workItem(dh, registry.RepoRef{Owner: "o", Repo: "r"}),
+			workItem(gh, registry.RepoRef{Owner: "o", Repo: "r"}),
+		},
+		Logger: logger,
 	})
 
 	if gh.lastRefs != nil {
@@ -456,11 +426,10 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	images := collect.Run(ctx, collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{dh},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		Sources: []collect.SourceRefs{
+			workItem(dh, registry.RepoRef{Owner: "owner", Repo: "app"}),
 		},
+		Logger: logger,
 	})
 
 	if len(images) != 1 {
@@ -495,14 +464,14 @@ func TestRun_degraded_source_does_not_stop_later_source(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	images := collect.Run(t.Context(), collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{failed, serving},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+		Sources: []collect.SourceRefs{
+			workItem(failed, registry.RepoRef{Owner: "owner", Repo: "configured"}),
+			workItem(serving, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 		},
+		Logger: logger,
 	})
 
-	want := []obs.ImageMetric{{Registry: "ghcr", Owner: "owner", Repo: "pkg", Pulls: 9}}
+	want := []obs.ImageMetric{{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 9}}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("Run(unhealthy first, healthy second) images = %+v, want %+v", images, want)
 	}
@@ -525,11 +494,11 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 		collect.Run(t.Context(), collect.Options{
 			Metrics: obs.New(),
-			Sources: []collect.Source{serving, failed},
-			Logger:  logger,
-			RefsFor: func(registry.ID) []registry.RepoRef {
-				return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+			Sources: []collect.SourceRefs{
+				workItem(serving, registry.RepoRef{Owner: "owner", Repo: "configured"}),
+				workItem(failed, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 			},
+			Logger: logger,
 		})
 
 		logs := buf.String()
@@ -550,11 +519,10 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 		collect.Run(t.Context(), collect.Options{
 			Metrics: obs.New(),
-			Sources: []collect.Source{serving},
-			Logger:  logger,
-			RefsFor: func(registry.ID) []registry.RepoRef {
-				return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+			Sources: []collect.SourceRefs{
+				workItem(serving, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 			},
+			Logger: logger,
 		})
 
 		if logs := buf.String(); strings.Contains(logs, `msg="partial collection failure"`) {
@@ -565,7 +533,7 @@ func TestRun_logs_partial_collection_failure_only_for_degraded_cycle(t *testing.
 
 func TestRun_healthy_short_population_is_an_absolute_complete_cycle(t *testing.T) {
 	m := obs.New()
-	m.MintCollectSources([]string{"dockerhub", "ghcr"})
+	m.MintCollectSources([]registry.ID{registry.DockerHub, registry.GHCR})
 
 	dh := newFakeDockerHub()
 	dh.entries = []registry.Entry{{Owner: "owner", Repo: "stable", Pulls: 10}}
@@ -585,11 +553,11 @@ func TestRun_healthy_short_population_is_an_absolute_complete_cycle(t *testing.T
 	run := func() []obs.ImageMetric {
 		return collect.Run(t.Context(), collect.Options{
 			Metrics: m,
-			Sources: []collect.Source{dh, gh},
-			Logger:  logger,
-			RefsFor: func(registry.ID) []registry.RepoRef {
-				return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+			Sources: []collect.SourceRefs{
+				workItem(dh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
+				workItem(gh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 			},
+			Logger: logger,
 		})
 	}
 
@@ -604,8 +572,8 @@ func TestRun_healthy_short_population_is_an_absolute_complete_cycle(t *testing.T
 	images := run()
 
 	want := []obs.ImageMetric{
-		{Registry: "dockerhub", Owner: "owner", Repo: "stable", Pulls: 10},
-		{Registry: "ghcr", Owner: "owner", Repo: "kept", Pulls: 21},
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "stable", Pulls: 10},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "kept", Pulls: 21},
 	}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("Run(short healthy population) images = %+v, want %+v", images, want)
@@ -641,11 +609,11 @@ func TestRun_degraded_cycle_names_failing_source(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	collect.Run(t.Context(), collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{serving, failed},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+		Sources: []collect.SourceRefs{
+			workItem(serving, registry.RepoRef{Owner: "owner", Repo: "configured"}),
+			workItem(failed, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 		},
+		Logger: logger,
 	})
 
 	logs := buf.String()
@@ -670,11 +638,10 @@ func TestRun_degraded_serving_cycle_stays_below_error_level(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	collect.Run(t.Context(), collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{src},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{{Owner: "owner", Repo: "app"}}
+		Sources: []collect.SourceRefs{
+			workItem(src, registry.RepoRef{Owner: "owner", Repo: "app"}),
 		},
+		Logger: logger,
 	})
 
 	logs := buf.String()
@@ -699,17 +666,15 @@ func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	images := collect.Run(t.Context(), collect.Options{
 		Metrics: obs.New(),
-		Sources: []collect.Source{dh},
-		Logger:  logger,
-		RefsFor: func(registry.ID) []registry.RepoRef {
-			return []registry.RepoRef{
-				{Owner: "owner", Repo: "app"},
-				{Owner: "owner", Repo: "gone"},
-			}
+		Sources: []collect.SourceRefs{
+			workItem(dh,
+				registry.RepoRef{Owner: "owner", Repo: "app"},
+				registry.RepoRef{Owner: "owner", Repo: "gone"}),
 		},
+		Logger: logger,
 	})
 
-	want := obs.ImageMetric{Registry: "dockerhub", Owner: "owner", Repo: "app", Pulls: 7}
+	want := obs.ImageMetric{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 7}
 	if len(images) != 1 {
 		t.Fatalf("images = %+v, want one record from the unhealthy source", images)
 	}
@@ -745,11 +710,10 @@ func TestRun_unhealthy_source_logs_listing_failure_cause(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			collect.Run(t.Context(), collect.Options{
 				Metrics: obs.New(),
-				Sources: []collect.Source{src},
-				Logger:  logger,
-				RefsFor: func(registry.ID) []registry.RepoRef {
-					return []registry.RepoRef{{Owner: "owner", Repo: "configured"}}
+				Sources: []collect.SourceRefs{
+					workItem(src, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 				},
+				Logger: logger,
 			})
 
 			logs := buf.String()
@@ -757,5 +721,41 @@ func TestRun_unhealthy_source_logs_listing_failure_cause(t *testing.T) {
 				t.Errorf("Run(%s) logs = %q, want unhealthy record with %s", tt.name, logs, tt.want)
 			}
 		})
+	}
+}
+
+func TestRun_noReposLogMatchesConfigRejectedRule(t *testing.T) {
+	const (
+		configRejected = "- alert: RegistryStatsConfigRejected"
+		nextAlert      = "- alert: RegistryStatsError"
+		matchedMessage = "no repos configured"
+	)
+
+	rules, err := os.ReadFile("../../alerts/logql.yaml")
+	if err != nil {
+		t.Fatalf("Setup: read alerts/logql.yaml: %v", err)
+	}
+	_, rule, ok := strings.Cut(string(rules), configRejected)
+	if !ok {
+		t.Fatalf("alerts/logql.yaml is missing %q", configRejected)
+	}
+	rule, _, ok = strings.Cut(rule, nextAlert)
+	if !ok {
+		t.Fatalf("alerts/logql.yaml is missing %q after %q", nextAlert, configRejected)
+	}
+	if !strings.Contains(rule, matchedMessage) {
+		t.Errorf("%s rule does not match %q", configRejected, matchedMessage)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	collect.Run(t.Context(), collect.Options{
+		Metrics: obs.New(),
+		Logger:  logger,
+	})
+
+	want := `level=WARN msg="` + matchedMessage + `"`
+	if logs := buf.String(); !strings.Contains(logs, want) {
+		t.Errorf("Run(no repos) logs = %q, want record matching %q", logs, want)
 	}
 }

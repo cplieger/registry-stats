@@ -33,8 +33,10 @@ func IsSafeURLSegment(s string) bool {
 type Owner string
 
 // CheckReference reports the refusing rule when the slash-joined owner/name
-// repository path exceeds MaxSegmentBytes. Both registry arms call it, so the
-// bound is one rule with one wording rather than a per-registry copy.
+// repository path exceeds MaxSegmentBytes. config.repoName calls it on both
+// registry arms, so the bound is one rule with one wording rather than a
+// per-registry copy; a caller that discovers a name elsewhere applies it
+// itself or does not.
 func CheckReference(owner Owner, name string) error {
 	if len(owner)+1+len(name) > MaxSegmentBytes {
 		return fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)

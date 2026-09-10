@@ -73,6 +73,41 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 }
 
+func TestClient_ListRepos_RejectsLaterPageContradictingOwnTotal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"count": 1, "results": []map[string]any{{"name": "a", "pull_count": 1}}, "next": "page2",
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"count": 0, "results": []map[string]any{{"name": "b", "pull_count": 2}}, "next": "",
+			})
+		}
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if !shapeChanged(err) {
+		t.Errorf("listRepos(later page carries a row against count 0) error = %v, want a shape-change error", err)
+	}
+	if errors.Is(err, errListingMoved) {
+		t.Errorf("listRepos(later page carries a row against count 0) error = %v, want the page contradiction instead of errListingMoved", err)
+	}
+	if advertised != 1 {
+		t.Errorf("listRepos(later page carries a row against count 0) advertised = %d, want 1", advertised)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("listRepos(later page carries a row against count 0) returned %d repos, want only the valid first-page repo", len(repos))
+	}
+	if repos[0].Repo != "a" {
+		t.Errorf("listRepos(later page carries a row against count 0) repos[0] = %+v, want repo a", repos[0])
+	}
+}
+
 func TestClient_ListRepos_ReportsMidWalkPopulationChange(t *testing.T) {
 	page1 := make([]map[string]any, 0, pageSize)
 	for i := range pageSize {
@@ -348,11 +383,11 @@ func TestParseRepoListPage_requiresPullCount(t *testing.T) {
 		{"missing total fails the page", `{"next":"","results":[]}`, true, true},
 		{"trailing data fails the page", `{"count":0,"results":[]} true`, true, true},
 		{"duplicate results member", `{"results":[],"results":[]}`, true, true},
-		{"one result missing the count fails the page", `{"next":"","results":[{"name":"a","pull_count":1},{"name":"b"}]}`, true, true},
-		{"null count fails the page", `{"results":[{"name":"a","pull_count":null}]}`, true, true},
-		{"negative count fails the page", `{"results":[{"name":"a","pull_count":-5}]}`, true, true},
+		{"one result missing the count fails the page", `{"count":2,"next":"","results":[{"name":"a","pull_count":1},{"name":"b"}]}`, true, true},
+		{"null count fails the page", `{"count":1,"results":[{"name":"a","pull_count":null}]}`, true, true},
+		{"negative count fails the page", `{"count":1,"results":[{"name":"a","pull_count":-5}]}`, true, true},
 		{"an unsafe name is dropped before its count is required", `{"count":2,"results":[{"name":"bad/traversal"},{"name":"a","pull_count":1}]}`, false, false},
-		{"a page of nothing but unsafe names fails", `{"results":[{"name":"bad/traversal"},{"name":"../evil"}]}`, true, true},
+		{"a page of nothing but unsafe names fails", `{"count":2,"results":[{"name":"bad/traversal"},{"name":"../evil"}]}`, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

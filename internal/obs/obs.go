@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cplieger/metrics/v4"
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/webhttp/v2"
 )
 
@@ -52,12 +53,17 @@ func New() *Metrics {
 			"http_request_duration_seconds",
 			"HTTP request latency",
 		),
-		// A wildcard cycle at the documented fifty-page cap issues about 1,550 paced
-		// GHCR fetches: 1.5h expected, 2.2h at the 5s pacing maximum, plus Docker Hub.
+		// A wildcard cycle at the documented fifty-page cap issues about 1,550
+		// paced GHCR fetches: 1.5h expected, 2.2h at the 5s pacing maximum, plus
+		// Docker Hub. The top boundary is ghcr.MaximumCycleDuration, the longest
+		// one cycle is allowed to take; the liveness deadline is that plus the poll
+		// interval, so +Inf reads as "past the allowance" rather than "slow".
+		// Deliberately a literal: obs must not import a registry reader, so the
+		// two numbers move by hand.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",
-			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600, 10800}),
+			metrics.WithBuckets([]float64{0.5, 1, 5, 15, 60, 300, 900, 3600, 10800, 18000}),
 		),
 		// _total on a gauge is a deliberate deviation: the name is the published
 		// series, and the mirrored registry total can be restated downward, which
@@ -82,18 +88,20 @@ func New() *Metrics {
 // MintCollectSources pre-mints the two per-source collect counters at zero, so
 // each configured source has a series from process start and a PromQL
 // increase() over its first failure has an earlier sample to subtract from.
-func (m *Metrics) MintCollectSources(sources []string) {
+func (m *Metrics) MintCollectSources(sources []registry.ID) {
 	for _, source := range sources {
-		m.collectsTotal.Add(0, source)
-		m.collectErrors.Add(0, source)
+		label := source.String()
+		m.collectsTotal.Add(0, label)
+		m.collectErrors.Add(0, label)
 	}
 }
 
 // RecordCollect records an invoked source and whether it failed.
-func (m *Metrics) RecordCollect(source string, failed bool) {
-	m.collectsTotal.Inc(source)
+func (m *Metrics) RecordCollect(source registry.ID, failed bool) {
+	label := source.String()
+	m.collectsTotal.Inc(label)
 	if failed {
-		m.collectErrors.Inc(source)
+		m.collectErrors.Inc(label)
 	}
 }
 
@@ -103,28 +111,31 @@ func (m *Metrics) ObserveCollectDuration(d time.Duration) {
 }
 
 // ImageMetric holds per-image gauge data set after each collect cycle.
-// Registry, Owner and Repo must be distinct after Prometheus label
-// sanitization: metrics/v4 replaces invalid UTF-8 in a label value,
-// so two triples that differ only in bytes that are not valid UTF-8 would
+// Image label triples must remain distinct after metrics/v4 normalizes label values:
+// metrics/v4 replaces invalid UTF-8 in a label value, so two triples that differ only in bytes that are not valid UTF-8 would
 // share one emitted series and the per-cycle diff would delete it.
 // Producers guarantee this via urlsafe.
 type ImageMetric struct {
-	Registry string // "dockerhub" or "ghcr"
+	Registry registry.ID
 	Owner    string
 	Repo     string
 	Pulls    int64
 }
 
 // SetImage replaces the image gauge data for one collect cycle.
-// images is the whole population this cycle MEASURED: every key absent from it is retired, so an absent series means
-// this cycle did not measure that image; RegistryStatsCollectionIncomplete (alerts/logql.yaml) names the causes it covers.
-// Current values are Set in place and departed series Deleted one by one rather than Reset+Set, so a series present in
-// both cycles is never missing from a concurrent scrape; an overlapping scrape may still read one cycle stale.
+// images is the whole population this cycle MEASURED: every key absent
+// from it is retired, so an absent series means this cycle did not
+// measure that image; RegistryStatsCollectionIncomplete
+// (alerts/logql.yaml) names the causes it covers.
+// Current values are Set in place and departed series Deleted one by one
+// rather than Reset+Set, so a series present in both cycles is never missing
+// from a concurrent scrape; an overlapping scrape may still read one cycle stale.
 func (m *Metrics) SetImage(images []ImageMetric) {
 	pulls := make(map[[3]string]bool, len(images))
 	for _, image := range images {
-		key := [3]string{image.Registry, image.Owner, image.Repo}
-		m.imagePulls.Set(float64(image.Pulls), image.Registry, image.Owner, image.Repo)
+		label := image.Registry.String()
+		key := [3]string{label, image.Owner, image.Repo}
+		m.imagePulls.Set(float64(image.Pulls), label, image.Owner, image.Repo)
 		pulls[key] = true
 	}
 	for key := range m.prevPulls {

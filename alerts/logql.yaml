@@ -34,13 +34,8 @@
 # message is not one of the five this rule keys on, so RegistryStatsError owns it.
 # RegistryStatsConfigRejected's startup records work at every LOG_LEVEL because they
 # are emitted before the configured level is applied.
-# At LOG_LEVEL=error, the recurring no-repos WARN is suppressed, so that alert clears when its startup record ages out of the
-# one-hour window. Before this rewrite, an operator running LOG_LEVEL=error had
-# no reachable true RegistryStatsCollectionIncomplete firing and exactly one
-# reachable false one: a startup WARN emitted before the configured level was
-# applied could match when an attribute value spelled one of the rule's phrases;
-# parsing `msg` closes that false positive.
----
+# At LOG_LEVEL=error, the recurring no-repos WARN is suppressed, so that
+# alert clears when its startup record ages out of the one-hour window.
 groups:
   - name: registry-stats
     rules:

@@ -23,8 +23,8 @@ import (
 // Stored gzipped because they are a quarter-megabyte each and the bytes are the point;
 // one value is masked, narrowly and per field, and nothing else is touched: the
 // listing's `authenticity_token` carried a live anonymous-session CSRF value, which no
-// reader here looks at. To recapture, fetch both URLs with a browser User-Agent, mask
-// that one attribute value, and gzip.
+// reader here looks at. To recapture, fetch both URLs (any User-Agent; the pages are
+// served to all), mask that one attribute value, and gzip.
 //
 // The organization form of the listing is deliberately NOT captured: cplieger is a
 // user, so `https://github.com/orgs/cplieger/packages` answers 404 and the production
@@ -123,5 +123,39 @@ func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServedMarkupRawTextBodiesCarryNoLessThanBytes(t *testing.T) {
+	pages := map[string]string{
+		"listing": liveMarkup(t, "live-listing"),
+		"package": liveMarkup(t, "live-package"),
+	}
+	for page, html := range pages {
+		for _, element := range []string{"script", "style", "textarea", "title"} {
+			openToken := "<" + element
+			closeToken := "</" + element + ">"
+			for cursor := 0; ; {
+				open := strings.Index(html[cursor:], openToken)
+				if open < 0 {
+					break
+				}
+				open += cursor
+				bodyStart := strings.IndexByte(html[open:], '>')
+				if bodyStart < 0 {
+					t.Fatalf("served %s page <%s> start tag has no closing '>'", page, element)
+				}
+				bodyStart += open + 1
+				bodyEnd := strings.Index(html[bodyStart:], closeToken)
+				if bodyEnd < 0 {
+					t.Fatalf("served %s page <%s> has no %s", page, element, closeToken)
+				}
+				bodyEnd += bodyStart
+				if strings.Contains(html[bodyStart:bodyEnd], "<") {
+					t.Errorf("served %s page <%s> body contains '<'; this assertion holds the listing arm only, where parsePackageList cannot emit a span without '<'. TestParseDownloads_ReadsTheServedPackagePage pins the package-page arm because markerText gets '>' and '</' from a raw-text element's own tags", page, element)
+				}
+				cursor = bodyEnd + len(closeToken)
+			}
+		}
 	}
 }

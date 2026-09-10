@@ -275,7 +275,10 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 		GHCRRepos:      []registry.RepoRef{{Owner: "o", Repo: "pkg"}},
 	}
 	marker := &mainFakeMarker{}
-	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, &publication{marker: marker, m: obs.New(), ready: &webhttp.Ready{}})
+	runCollect(t.Context(), []collect.SourceRefs{
+		{Source: dh, Refs: cfg.DockerHubRepos},
+		{Source: gh, Refs: cfg.GHCRRepos},
+	}, &publication{marker: marker, m: obs.New(), ready: &webhttp.Ready{}})
 	if !marker.Healthy() {
 		t.Error("runCollect partial success left marker unhealthy, want healthy")
 	}
@@ -295,7 +298,9 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	ready := &webhttp.Ready{}
 	pub := &publication{marker: marker, m: m, ready: ready}
 
-	runCollect(t.Context(), cfg, []collect.Source{source}, pub)
+	runCollect(t.Context(), []collect.SourceRefs{
+		{Source: source, Refs: cfg.DockerHubRepos},
+	}, pub)
 	if !marker.Healthy() {
 		t.Error("runCollect first cycle left marker unhealthy, want healthy")
 	}
@@ -305,7 +310,9 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 
 	source.entries = nil
 	source.listingFailed = true
-	runCollect(t.Context(), cfg, []collect.Source{source}, pub)
+	runCollect(t.Context(), []collect.SourceRefs{
+		{Source: source, Refs: cfg.DockerHubRepos},
+	}, pub)
 
 	if marker.Healthy() {
 		t.Error("runCollect failed cycle left marker healthy, want unhealthy")
@@ -320,8 +327,8 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	}
 }
 
-// TestRunCollect_cancelledCyclePublishesNothing pins both publication guards:
-// a cancelled cycle moves neither health signal and publishes no image label.
+// TestRunCollect_cancelledCyclePublishesNothing pins the publication guard:
+// a cancelled cycle moves no health signal and publishes no metric sample.
 func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	source := &mainFakeSource{
@@ -335,7 +342,9 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 	marker := &mainFakeMarker{}
 	ready := &webhttp.Ready{}
 
-	runCollect(ctx, cfg, []collect.Source{source}, &publication{marker: marker, m: m, ready: ready})
+	runCollect(ctx, []collect.SourceRefs{
+		{Source: source, Refs: cfg.DockerHubRepos},
+	}, &publication{marker: marker, m: m, ready: ready})
 
 	if marker.Healthy() {
 		t.Error("cancelled cycle set the marker healthy, want untouched")
@@ -345,8 +354,12 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if body := rec.Body.String(); strings.Contains(body, `repo="app"`) {
+	body := rec.Body.String()
+	if strings.Contains(body, `repo="app"`) {
 		t.Errorf("cancelled cycle published an image series:\n%s", body)
+	}
+	if !strings.Contains(body, `registrystats_collect_duration_seconds_count 0`) {
+		t.Errorf("cancelled cycle published a duration sample:\n%s", body)
 	}
 }
 
@@ -370,7 +383,10 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	}
 	m := obs.New()
 	marker := &mainFakeMarker{}
-	runCollect(t.Context(), cfg, []collect.Source{dh, gh}, &publication{marker: marker, m: m, ready: &webhttp.Ready{}})
+	runCollect(t.Context(), []collect.SourceRefs{
+		{Source: dh, Refs: cfg.DockerHubRepos},
+		{Source: gh, Refs: cfg.GHCRRepos},
+	}, &publication{marker: marker, m: m, ready: &webhttp.Ready{}})
 	if !marker.Healthy() {
 		t.Error("runCollect image publication left marker unhealthy, want healthy")
 	}
@@ -410,10 +426,12 @@ func (m *mainBlockingMarker) Set(bool) {
 	<-m.release
 }
 
-// TestRunCollect_holdsPubAcrossPublication pins the serialization
-// preDrain depends on: a cycle publishes its outcome under the publication
-// lock, so the shutdown readiness clear cannot land between the cycle's
-// context check and ready.Set(true) and be overwritten by it.
+// TestRunCollect_holdsPubAcrossPublication pins one half of the publication
+// invariant: a cycle holds pub.mu across its whole publish, so no concurrent
+// holder of that lock can interleave. It asserts the lock, not an outcome, so
+// it is sensitive to the primitive. The other half -- a drain inside a
+// publication leaving readiness false -- has no test: a goroutine parked on
+// Mutex.Lock is not durably blocking, so testing/synctest cannot observe it.
 func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 	source := &mainFakeSource{
 		src:     registry.DockerHub,
@@ -429,7 +447,9 @@ func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 	pub := &publication{marker: marker, m: obs.New(), ready: ready}
 	done := make(chan struct{})
 	go func() {
-		runCollect(t.Context(), cfg, []collect.Source{source}, pub)
+		runCollect(t.Context(), []collect.SourceRefs{
+		{Source: source, Refs: cfg.DockerHubRepos},
+	}, pub)
 		close(done)
 	}()
 	<-marker.entered
@@ -451,6 +471,21 @@ func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 // healthcheck will fail after the first collect. Swaps slog.Default to
 // capture, so no t.Parallel.
 func TestLogConfig_noReposLogsError(t *testing.T) {
+	alertBytes, err := os.ReadFile("alerts/logql.yaml")
+	if err != nil {
+		t.Fatalf("ReadFile(alerts/logql.yaml): %v", err)
+	}
+	const alertName = "- alert: RegistryStatsConfigRejected"
+	alertText := string(alertBytes)
+	start := strings.Index(alertText, alertName)
+	if start < 0 {
+		t.Fatalf("alerts/logql.yaml has no %s block", alertName)
+	}
+	rule := alertText[start:]
+	if end := strings.Index(rule[1:], "\n      - alert:"); end >= 0 {
+		rule = rule[:end+1]
+	}
+
 	buf := &bytes.Buffer{}
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
@@ -458,8 +493,12 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 
 	logConfig(&config.Config{})
 
-	if !strings.Contains(buf.String(), "no repos configured") {
+	const phrase = "no repos configured"
+	if !strings.Contains(buf.String(), phrase) {
 		t.Errorf("logConfig with no repos did not emit the expected ERROR; logs:\n%s", buf.String())
+	}
+	if !strings.Contains(rule, phrase) {
+		t.Errorf("RegistryStatsConfigRejected does not match emitted phrase %q", phrase)
 	}
 }
 
@@ -476,8 +515,8 @@ func TestActiveSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		&mainFakeSource{src: registry.GHCR},
 	}
 
-	active, names := activeSources(cfg, sources)
-	m.MintCollectSources(names)
+	active, sourceIDs := activeSources(cfg, sources)
+	m.MintCollectSources(sourceIDs)
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -496,7 +535,7 @@ func TestActiveSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
 	}
 
-	runCollect(t.Context(), cfg, active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
+	runCollect(t.Context(), active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
 	w = httptest.NewRecorder()
 	m.Handler()(w, r)
 	body = w.Body.String()

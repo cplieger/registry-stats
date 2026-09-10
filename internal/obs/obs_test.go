@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/webhttp/v2"
 )
 
@@ -28,12 +29,12 @@ func TestMetricsHandler(t *testing.T) {
 		Status:  http.StatusOK,
 		Latency: 13 * time.Millisecond,
 	})
-	m.RecordCollect("dockerhub", false)
-	m.RecordCollect("ghcr", true)
+	m.RecordCollect(registry.DockerHub, false)
+	m.RecordCollect(registry.GHCR, true)
 	m.ObserveCollectDuration(1420 * time.Millisecond)
 	m.SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "cplieger", Repo: "subflux", Pulls: 1234},
-		{Registry: "ghcr", Owner: "cplieger", Repo: "vibekit", Pulls: 56},
+		{Registry: registry.DockerHub, Owner: "cplieger", Repo: "subflux", Pulls: 1234},
+		{Registry: registry.GHCR, Owner: "cplieger", Repo: "vibekit", Pulls: 56},
 	})
 
 	body := scrapeBody(t, m)
@@ -47,6 +48,7 @@ func TestMetricsHandler(t *testing.T) {
 		`registrystats_http_request_duration_seconds_bucket{le="0.025"}`,
 		`registrystats_collect_duration_seconds_bucket{le="5"} 1`,
 		`registrystats_collect_duration_seconds_bucket{le="10800"} 1`,
+		`registrystats_collect_duration_seconds_bucket{le="18000"} 1`,
 		`registrystats_collect_duration_seconds_count`,
 		`go_goroutines`,
 		`process_uptime_seconds`,
@@ -66,9 +68,9 @@ func TestMetricsHandler_publishesExactMetadata(t *testing.T) {
 		Status:  http.StatusOK,
 		Latency: time.Second,
 	})
-	m.MintCollectSources([]string{"dockerhub"})
+	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	m.ObserveCollectDuration(time.Second)
-	m.SetImage([]ImageMetric{{Registry: "dockerhub", Owner: "owner", Repo: "repo", Pulls: 1}})
+	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
 
 	body := scrapeBody(t, m)
 
@@ -127,11 +129,11 @@ func TestRecordHTTP_recordsLatencyInSeconds(t *testing.T) {
 func TestSetImage_replacesSeriesSet(t *testing.T) {
 	m := New()
 	m.SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 1},
-		{Registry: "dockerhub", Owner: "a", Repo: "y", Pulls: 2},
+		{Registry: registry.DockerHub, Owner: "a", Repo: "x", Pulls: 1},
+		{Registry: registry.DockerHub, Owner: "a", Repo: "y", Pulls: 2},
 	})
 	m.SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "z", Pulls: 3},
+		{Registry: registry.DockerHub, Owner: "a", Repo: "z", Pulls: 3},
 	})
 
 	body := scrapeBody(t, m)
@@ -148,7 +150,7 @@ func TestSetImage_replacesSeriesSet(t *testing.T) {
 func TestSetImage_emptyCycleClearsAll(t *testing.T) {
 	m := New()
 	m.SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "gone", Pulls: 5},
+		{Registry: registry.DockerHub, Owner: "a", Repo: "gone", Pulls: 5},
 	})
 	m.SetImage(nil)
 
@@ -166,11 +168,11 @@ func TestSetImage_preservesSurvivingSeriesDuringConcurrentScrape(t *testing.T) {
 		make([]ImageMetric, distractors+1),
 	}
 	for i := range distractors {
-		sets[0][i] = ImageMetric{Registry: "dockerhub", Owner: "other", Repo: strings.Repeat("a", i+1), Pulls: int64(i)}
-		sets[1][i] = ImageMetric{Registry: "dockerhub", Owner: "other", Repo: strings.Repeat("b", i+1), Pulls: int64(i)}
+		sets[0][i] = ImageMetric{Registry: registry.DockerHub, Owner: "other", Repo: strings.Repeat("a", i+1), Pulls: int64(i)}
+		sets[1][i] = ImageMetric{Registry: registry.DockerHub, Owner: "other", Repo: strings.Repeat("b", i+1), Pulls: int64(i)}
 	}
-	sets[0][distractors] = ImageMetric{Registry: "dockerhub", Owner: "a", Repo: "stable", Pulls: 1}
-	sets[1][distractors] = ImageMetric{Registry: "dockerhub", Owner: "a", Repo: "stable", Pulls: 2}
+	sets[0][distractors] = ImageMetric{Registry: registry.DockerHub, Owner: "a", Repo: "stable", Pulls: 1}
+	sets[1][distractors] = ImageMetric{Registry: registry.DockerHub, Owner: "a", Repo: "stable", Pulls: 2}
 
 	m := New()
 	m.SetImage(sets[0])
@@ -224,9 +226,9 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 		Status:  http.StatusOK,
 		Latency: time.Second,
 	})
-	m.MintCollectSources([]string{"dockerhub"})
+	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	m.ObserveCollectDuration(time.Second)
-	m.SetImage([]ImageMetric{{Registry: "dockerhub", Owner: "owner", Repo: "repo", Pulls: 1}})
+	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
 	body := scrapeBody(t, m)
 
 	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
@@ -255,7 +257,7 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 
 func TestMintCollectSources_mintsBothCountersForEverySource(t *testing.T) {
 	m := New()
-	m.MintCollectSources([]string{"dockerhub", "ghcr"})
+	m.MintCollectSources([]registry.ID{registry.DockerHub, registry.GHCR})
 
 	body := scrapeBody(t, m)
 
