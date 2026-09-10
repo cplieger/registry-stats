@@ -190,6 +190,27 @@ func TestParseDownloads_CommentOverlapKeepsDocumentOrder(t *testing.T) {
 	})
 }
 
+func TestParseDownloads_QuotedGreaterThanInTheMarkerEndTag(t *testing.T) {
+	// The marker element's end tag may carry an attribute whose value contains
+	// '>'. Ending that tag at the first '>' lands inside the quoted value, so
+	// bytes written there are read as the count element.
+	const fabricated = `<span>Total downloads</span foo="><h3 title='9'>">`
+
+	t.Run("alone_refuses_rather_than_publishing_the_quoted_bytes", func(t *testing.T) {
+		count, err := parseDownloads(fabricated)
+		if !errors.Is(err, errHTMLFormatChanged) {
+			t.Errorf("parseDownloads(quoted '>' in end tag) = (%d, %v), want errHTMLFormatChanged", count, err)
+		}
+	})
+
+	t.Run("beside_the_real_count_reads_the_real_one", func(t *testing.T) {
+		count, err := parseDownloads(fabricated + `<h3 title="7">7</h3>`)
+		if err != nil || count != 7 {
+			t.Errorf("parseDownloads(quoted '>' in end tag + real count) = (%d, %v), want (7, nil)", count, err)
+		}
+	})
+}
+
 func TestParsePackageList_Valid(t *testing.T) {
 	html := `<a href="/users/owner/packages/container/package/app1">app1</a>
 <a href="/users/owner/packages/container/package/app2">app2</a>

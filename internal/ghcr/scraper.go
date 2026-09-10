@@ -717,8 +717,16 @@ func parseDownloads(html string) (int64, error) {
 	}
 	rest := html[markerIdx:]
 
-	markerEnd := strings.Index(rest, ">")
-	if markerEnd == -1 {
+	// The end tag closing the marker element may carry an attribute whose value
+	// contains '>', so its end is found quote-aware: stopping at the first '>'
+	// lands inside that value, and bytes written there are then read as the
+	// count element below.
+	endTagAt := strings.Index(rest, "<")
+	if endTagAt < 0 {
+		return 0, errHTMLFormatChanged
+	}
+	markerEnd, ok := markupTagEnd(rest, endTagAt)
+	if !ok {
 		return 0, errHTMLFormatChanged
 	}
 	afterMarker := rest[markerEnd+1:]
