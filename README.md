@@ -9,6 +9,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/registry-stats/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/registry-stats)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/registry-stats/releases)
 
+<!-- hub-overview BEGIN -->
 Track how many times your container images are pulled, with a ready-made Grafana dashboard.
 
 ## What it does
@@ -37,6 +38,7 @@ When you publish a container image to Docker Hub or GitHub Container Registry (G
 - **No historical backfill.** The registries only expose current totals.
   Time-series data is built by your Prometheus backend as scrapes
   accumulate.
+<!-- hub-overview END -->
 
 ## Quick start
 
