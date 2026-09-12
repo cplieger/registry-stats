@@ -12,11 +12,14 @@ schedule and exposes download-count metrics as Prometheus time series
 (`/metrics`) plus a health endpoint (`/api/health`) on port 9100. History is
 owned by the scraping backend (Mimir/Prometheus); the app itself is stateless.
 
-`main.go` is a **pure composition root**: it wires config → `*http.Client`
+`main.go` is the **composition root**: it wires config → `*http.Client`
 (with the `httpx` redirect policy) → `dockerhub.Client` + `ghcr.Client` →
 health marker → `webapi` server, then runs the signal-driven lifecycle. It
-contains no business logic, globals, or type aliases; everything testable
-lives under `internal/`.
+holds no globals or type aliases, and every registry-facing behaviour lives
+under `internal/`. It does own the lifecycle's own policy, which is what
+`main_test.go` covers: the health/readiness publication serialized against
+the shutdown drain, the configuration warnings emitted before `LOG_LEVEL`
+applies, the active-source pre-mint, and the startup diagnostics.
 
 Interfaces live at their consumers (there is no hub package): `collect.Source`
 is declared in `internal/collect`, the one seam its orchestrator drives, and
@@ -34,9 +37,8 @@ into. Test fakes implement those. Concrete types live in their own packages:
 - `internal/obs`: the observability surface built on
   `github.com/cplieger/metrics`; the `registrystats_*` instances and
   `SetImage`.
-- `internal/registry`, `internal/urlsafe`, `internal/testsupport`: the
-  container-registry domain types (`Entry`, `RepoRef`, `ID`), URL-segment
-  validation, and shared test helpers.
+- `internal/registry`, `internal/urlsafe`: the container-registry domain
+  types (`Entry`, `RepoRef`, `ID`) and URL-segment validation.
 
 Dependencies flow one direction: `main.go` is the only place that imports
 concrete packages together.
@@ -95,7 +97,7 @@ here.
 
 - **Keep the runtime dependency footprint minimal.** Runtime deps are limited
   to the `cplieger` shared libs (`httpx`, `metrics`, `health`, `webhttp`,
-  `scheduler`, `slogx`, `envx`, `keyenc`) and `pgregory.net/rapid` (test-only). Prefer the standard library
+  `scheduler`, `slogx`, `envx`, `runesafe`) and `pgregory.net/rapid` (test-only). Prefer the standard library
   before reaching for a new dependency.
 - **The lowercase registry label comes from `Source().String()` alone.** The
   old interface carried a second method (`Name()`) with a prose must-equal
@@ -117,7 +119,7 @@ here.
   rejects duplicate object members and matches field names exactly, and
   `pull_count` / `count` are required (`*int64` / `*int`): absent, null or
   negative is an error. That is deliberate and load-bearing:
-  `image_pulls_total` is cumulative, so a silently-substituted 0 reads
+  `registrystats_image_pulls_total` is cumulative, so a silently-substituted 0 reads
   downstream as a pull-count regression rather than as missing data. A
   missing `pull_count` on an owner-listing result fails the whole page, which
   surfaces as "listing wholly failed" plus an unhealthy cycle; dropping the

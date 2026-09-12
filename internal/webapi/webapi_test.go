@@ -10,16 +10,14 @@ import (
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 	"github.com/cplieger/webhttp/v2"
 )
 
 // TestNew_readinessEndpoint pins the wiring of GET /api/health onto webhttp's
 // readiness gate through New's full middleware chain: 200 {"status":"ok"} when
 // the injected Ready view reports ready, and 503 {"status":"unready"} when it
-// does not — including a nil view, which New defaults to a not-ready gate
-// rather than panicking. This is the HTTP serving-readiness gate, distinct from
-// the container file-marker liveness probe.
+// does not. This is the HTTP serving-readiness gate, distinct from the
+// container file-marker liveness probe.
 func TestNew_readinessEndpoint(t *testing.T) {
 	readyTrue := &webhttp.Ready{}
 	readyTrue.Set(true)
@@ -32,12 +30,11 @@ func TestNew_readinessEndpoint(t *testing.T) {
 	}{
 		{"ready view returns 200 ok", readyTrue, http.StatusOK, "ok"},
 		{"unready view returns 503 unready", &webhttp.Ready{}, http.StatusServiceUnavailable, "unready"},
-		{"nil view returns 503 unready", nil, http.StatusServiceUnavailable, "unready"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Deps{Ready: tt.ready, Logger: testsupport.QuietLogger()})
+			srv := New(Deps{Metrics: obs.New(), Ready: tt.ready, Logger: slog.New(slog.DiscardHandler)})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 
@@ -60,14 +57,66 @@ func TestNew_readinessEndpoint(t *testing.T) {
 	}
 }
 
+type panicOnceReadiness struct{ calls int }
+
+func (r *panicOnceReadiness) Ready() bool {
+	r.calls++
+	if r.calls == 1 {
+		panic("readiness boom")
+	}
+	return true
+}
+
+func TestNew_recoversHandlerPanicWithTruthfulAccessStatus(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	srv := New(Deps{Metrics: obs.New(), Ready: &panicOnceReadiness{}, Logger: logger})
+
+	first := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+
+	if first.Code != http.StatusInternalServerError {
+		t.Errorf("GET /api/health after handler panic status = %d, want %d", first.Code, http.StatusInternalServerError)
+	}
+	logs := buf.String()
+	if count := strings.Count(logs, "msg=http"); count != 1 {
+		t.Errorf("GET /api/health panic access record count = %d, want 1; logs: %q", count, logs)
+	}
+	if !strings.Contains(logs, "status=500") {
+		t.Errorf("GET /api/health panic access status is not 500; logs: %q", logs)
+	}
+
+	second := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if second.Code != http.StatusOK {
+		t.Errorf("GET /api/health after recovered panic status = %d, want %d", second.Code, http.StatusOK)
+	}
+}
+
+// TestNew_boundsRequestReadAndWrite pins the guarantee the library does not
+// make: webhttp leaves ReadTimeout and WriteTimeout unset, so dropping either
+// option turns a bounded request into an unbounded one. ReadHeaderTimeout and
+// IdleTimeout are deliberately not asserted: webhttp supplies non-zero
+// defaults not part of this package's contract.
+func TestNew_boundsRequestReadAndWrite(t *testing.T) {
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: slog.New(slog.DiscardHandler)})
+
+	if srv.ReadTimeout <= 0 {
+		t.Errorf("New().ReadTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout <= 0 {
+		t.Errorf("New().WriteTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.WriteTimeout)
+	}
+}
+
 // TestNew_appliesSecurityHeaders confirms the webhttp.SecurityHeaders baseline
-// is wired into New's middleware chain: every response carries nosniff, the
-// DENY frame guard, and the referrer policy, and neither CSP nor HSTS is set
-// (this is a non-browser metrics/health endpoint).
+// is wired into New's middleware chain: nosniff, the DENY frame guard, and
+// the referrer policy on every response, with neither CSP nor HSTS set (a
+// non-browser metrics/health endpoint).
 func TestNew_appliesSecurityHeaders(t *testing.T) {
 	readyTrue := &webhttp.Ready{}
 	readyTrue.Set(true)
-	srv := New(Deps{Ready: readyTrue, Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Ready: readyTrue, Logger: slog.New(slog.DiscardHandler)})
 
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -90,164 +139,41 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 	}
 }
 
-// TestAccessLogLevel_byStatus pins the app's level POLICY (fed to
-// webhttp.WithLogLevel) and its wiring: 2xx/3xx at DEBUG (scrape-quiet),
-// 4xx at WARN, 5xx at ERROR, observed end-to-end through the composed
-// webhttp.Logging middleware.
-func TestAccessLogLevel_byStatus(t *testing.T) {
-	tests := []struct {
-		name      string
-		status    int
-		wantLevel string
-	}{
-		{"2xx logs at debug", http.StatusOK, "level=DEBUG"},
-		{"3xx logs at debug", http.StatusMovedPermanently, "level=DEBUG"},
-		{"4xx logs at warn", http.StatusNotFound, "level=WARN"},
-		{"5xx logs at error", http.StatusInternalServerError, "level=ERROR"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tt.status)
-			})
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/x", nil)
-			webhttp.Logging(
-				webhttp.WithLogger(logger),
-				webhttp.WithLogLevel(accessLogLevel),
-			)(next).ServeHTTP(rec, req)
-
-			logs := buf.String()
-			if !strings.Contains(logs, "msg=http") {
-				t.Fatalf("status %d: no access-log line emitted, got %q", tt.status, logs)
-			}
-			if !strings.Contains(logs, tt.wantLevel) {
-				t.Errorf("status %d: access-log level = %q, want %q", tt.status, logs, tt.wantLevel)
-			}
-		})
-	}
-}
-
-func TestNew_metricsRoutingHonorsEnableMetrics(t *testing.T) {
-	tests := []struct {
-		name          string
-		enableMetrics bool
-		wantStatus    int
-	}{
-		{"enabled serves metrics", true, http.StatusOK},
-		{"disabled hides metrics", false, http.StatusNotFound},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &webhttp.Ready{}
-			r.Set(true)
-			srv := New(Deps{
-				Ready:         r,
-				Logger:        testsupport.QuietLogger(),
-				EnableMetrics: tt.enableMetrics,
-			})
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-			srv.Handler.ServeHTTP(rec, req)
-			if rec.Code != tt.wantStatus {
-				t.Errorf("GET /metrics with EnableMetrics=%v: status = %d, want %d", tt.enableMetrics, rec.Code, tt.wantStatus)
-			}
-		})
-	}
-}
-
-// TestNew_boundsHTTPMetricCardinality pins the label vocabulary of
-// registrystats_http_requests_total through New's REAL route table and
-// middleware chain — which is where the bound now lives. The labels are
-// derived by webhttp's WithRecordRouteMetric and handed to
-// obs.RecordHTTP; this app has no derivation of its own, so the property
-// under test is the WIRING: that New reaches for the hook whose labels are
-// bounded by construction rather than the request-aware one.
-//
-// Two halves. The bound: a client-chosen method token collapses to the fixed
-// "other" bucket and an unmatched path to the fixed "unmatched" marker, so a
-// scanner cannot mint series in Mimir. The non-collapse: a matched route
-// keeps its real method and route template — including HEAD, which ServeMux
-// routes to the GET pattern and which the metric must still record as HEAD
-// so the metric and the access line for one request_id agree — and an
-// unmatched request keeps its real METHOD, only the path collapsing. That
-// last part is a deliberate change from the app's former hand-rolled
-// derivation, which collapsed both labels onto method="unmatched"; the
-// retired value is asserted absent below.
-//
-// Observable only via the metrics exposition: the access log deliberately
-// keeps the raw path and the verbatim method, so a log assertion cannot
-// witness the collapse.
-func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
-	const hostilePunct = "M!#$%&'*+-.^_`|~" // every byte a valid RFC 9110 tchar
-
-	ready := &webhttp.Ready{}
-	ready.Set(true)
-	srv := New(Deps{Ready: ready, Logger: testsupport.QuietLogger(), EnableMetrics: true})
-
-	for _, req := range []struct{ method, target string }{
-		{http.MethodGet, "/api/health"},   // matched
-		{http.MethodHead, "/api/health"},  // matched via the GET pattern
-		{http.MethodGet, "/metrics"},      // matched, second route
-		{http.MethodPost, "/api/health"},  // 405: path matches, method does not
-		{http.MethodGet, "/wp-login.php"}, // 404
-		{"WEIRDPROBE", "/wp-login.php"},   // 404 with an arbitrary method token
-		{hostilePunct, "/api/health"},     // 405 with a punctuation-only token
-	} {
-		srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(req.method, req.target, nil))
-	}
-
-	rec := httptest.NewRecorder()
-	obs.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := rec.Body.String()
-
-	present := map[string]string{
-		`{method="GET",path="/api/health",status="200"}`:  "matched route lost its real method+template (over-collapse)",
-		`{method="HEAD",path="/api/health",status="200"}`: "HEAD was not preserved: ServeMux routes it to the GET pattern, but the metric must still record HEAD so it agrees with the access line for the same request_id",
-		`{method="GET",path="/metrics",status="200"}`:     "second matched route lost its real method+template",
-		`{method="POST",path="unmatched",status="405"}`:   "a 405 must keep its real method and collapse only the path",
-		`{method="GET",path="unmatched",status="404"}`:    "a 404 must keep its real method and collapse only the path",
-		`{method="other",path="unmatched",status="404"}`:  "a non-standard method must bucket to \"other\", not vanish",
-	}
-	for series, why := range present {
-		t.Run("present "+series, func(t *testing.T) {
-			if !strings.Contains(body, series) {
-				t.Errorf("%s: %s missing from exposition:\n%s", why, series, body)
-			}
-		})
-	}
-
-	absent := map[string]string{
-		`method="WEIRDPROBE"`:  "a client-supplied method token reached a metric label (cardinality bound broken)",
-		hostilePunct:           "a punctuation-only method token reached a metric label (cardinality bound broken)",
-		`path="/wp-login.php"`: "a raw unmatched path reached a metric label (cardinality bound broken)",
-		`method="unmatched"`:   "the retired method collapse is back: the method label is bounded by a closed nine-method set plus \"other\", so an unmatched request keeps its real method and only the path collapses",
-	}
-	for probe, why := range absent {
-		t.Run("absent "+probe, func(t *testing.T) {
-			if strings.Contains(body, probe) {
-				t.Errorf("%s: found %q in exposition:\n%s", why, probe, body)
-			}
-		})
-	}
-}
-
-// TestNew_usesSuppliedLoggerForAccessLog confirms New wires the caller's
-// logger (not a fresh default) into the access-log middleware: a request
-// routed through the returned server's handler emits its access-log line
-// into the supplied logger's sink.
-func TestNew_usesSuppliedLoggerForAccessLog(t *testing.T) {
+func TestNew_unreadyHealthLogMatchesAlertExclusion(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	r := &webhttp.Ready{}
-	r.Set(true)
-	srv := New(Deps{Ready: r, Logger: logger})
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: logger})
 
-	srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 
-	if !strings.Contains(buf.String(), "msg=http") {
-		t.Errorf("access log did not land in the supplied logger; logs: %q", buf.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /api/health status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	logs := buf.String()
+	if count := strings.Count(logs, "msg=http"); count != 1 {
+		t.Errorf("GET /api/health access record count = %d, want 1; logs: %q", count, logs)
+	}
+	if !strings.Contains(logs, "level=ERROR") {
+		t.Errorf("GET /api/health access level is not ERROR; logs: %q", logs)
+	}
+	if !strings.Contains(logs, "path=/api/health status=503") {
+		t.Errorf("GET /api/health access record does not match the shipped exclusion; logs: %q", logs)
+	}
+}
+
+func TestNew_successfulMetricsScrapeIsDebugOnly(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: logger})
+
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /metrics status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if logs := buf.String(); logs != "" {
+		t.Errorf("successful GET /metrics emitted an Info access record, want Debug-only; logs: %q", logs)
 	}
 }

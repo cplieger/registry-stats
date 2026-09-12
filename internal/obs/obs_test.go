@@ -3,42 +3,43 @@ package obs
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// scrapeBody renders the current /metrics output. SetImage
-// mutates process-global gauges, so tests here must stay serial (no
-// t.Parallel) and each pins only its own final state.
-func scrapeBody(t *testing.T) string {
+func scrapeBody(t *testing.T, m *Metrics) string {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
-	Handler()(w, r)
+	m.Handler()(w, r)
 	return w.Body.String()
 }
 
 func TestMetricsHandler(t *testing.T) {
-	HTTPRequests.Inc(http.MethodGet, "/metrics", "200")
-	CollectsTotal.Inc("dockerhub")
-	CollectErrors.Inc("ghcr")
-	HTTPDuration.Observe(0.013)
-	CollectDuration.Observe(1.42)
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "cplieger", Repo: "subflux", Pulls: 1234, Tags: 8},
-		{Registry: "ghcr", Owner: "cplieger", Repo: "vibekit", Pulls: 56, Tags: 0},
+	m := New()
+	m.RecordCollect(registry.DockerHub, false)
+	m.RecordCollect(registry.GHCR, true)
+	m.ObserveCollectDuration(1420 * time.Millisecond)
+	m.SetImage([]ImageMetric{
+		{Registry: registry.DockerHub, Owner: "cplieger", Repo: "subflux", Pulls: 1234},
+		{Registry: registry.GHCR, Owner: "cplieger", Repo: "vibekit", Pulls: 56},
 	})
 
-	body := scrapeBody(t)
+	body := scrapeBody(t, m)
 
 	want := []string{
-		`registrystats_http_requests_total{method="GET",path="/metrics",status="200"} 1`,
 		`registrystats_collects_total{source="dockerhub"} 1`,
 		`registrystats_collect_errors_total{source="ghcr"} 1`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
-		`registrystats_image_tags{owner="cplieger",registry="dockerhub",repo="subflux"} 8`,
-		`registrystats_http_request_duration_seconds_bucket{le="0.025"}`,
+		`registrystats_collect_duration_seconds_bucket{le="5"} 1`,
+		`registrystats_collect_duration_seconds_bucket{le="10800"} 1`,
+		`registrystats_collect_duration_seconds_bucket{le="18000"} 1`,
 		`registrystats_collect_duration_seconds_count`,
 		`go_goroutines`,
 		`process_uptime_seconds`,
@@ -48,30 +49,56 @@ func TestMetricsHandler(t *testing.T) {
 			t.Errorf("missing line: %s", line)
 		}
 	}
+}
 
-	// vibekit had Tags=0 — should NOT appear in image_tags output (only positive tag counts emit)
-	if strings.Contains(body, `registrystats_image_tags{owner="cplieger",registry="ghcr",repo="vibekit"}`) {
-		t.Error("zero-tag image should not emit a tags gauge")
+func TestMetricsHandler_publishesExactMetadata(t *testing.T) {
+	m := New()
+	m.MintCollectSources([]registry.ID{registry.DockerHub})
+	m.ObserveCollectDuration(time.Second)
+	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
+
+	body := scrapeBody(t, m)
+
+	want := []string{
+		"# HELP registrystats_collects_total Total collection runs by source",
+		"# TYPE registrystats_collects_total counter",
+		"# HELP registrystats_collect_errors_total Failed collection runs by source",
+		"# TYPE registrystats_collect_errors_total counter",
+		"# HELP registrystats_collect_duration_seconds Collection cycle duration",
+		"# TYPE registrystats_collect_duration_seconds histogram",
+		"# HELP registrystats_image_pulls_total Total pull count per image",
+		"# TYPE registrystats_image_pulls_total gauge",
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("New() exposition missing metadata line %q:\n%s", line, body)
+		}
 	}
 }
 
-// TestSetImage_replacesSeriesSet pins the per-cycle replacement
-// contract: images absent from the new cycle disappear from the output,
-// and images present in both cycles carry the new values.
+func TestObserveCollectDuration_recordsSeconds(t *testing.T) {
+	m := New()
+	m.ObserveCollectDuration(1420 * time.Millisecond)
+
+	body := scrapeBody(t, m)
+
+	if !strings.Contains(body, `registrystats_collect_duration_seconds_sum 1.42`) {
+		t.Errorf("ObserveCollectDuration(1420ms) sum missing or not in seconds:\n%s", body)
+	}
+}
+
+// TestSetImage_replacesSeriesSet pins the per-cycle replacement contract.
 func TestSetImage_replacesSeriesSet(t *testing.T) {
-	// First call sets two images.
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 1, Tags: 1},
-		{Registry: "dockerhub", Owner: "a", Repo: "y", Pulls: 2, Tags: 2},
+	m := New()
+	m.SetImage([]ImageMetric{
+		{Registry: registry.DockerHub, Owner: "a", Repo: "x", Pulls: 1},
+		{Registry: registry.DockerHub, Owner: "a", Repo: "y", Pulls: 2},
+	})
+	m.SetImage([]ImageMetric{
+		{Registry: registry.DockerHub, Owner: "a", Repo: "z", Pulls: 3},
 	})
 
-	// Second call replaces with a single image — the dropped ones should
-	// disappear from the next handler output.
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "z", Pulls: 3, Tags: 3},
-	})
-
-	body := scrapeBody(t)
+	body := scrapeBody(t, m)
 
 	if !strings.Contains(body, `registrystats_image_pulls_total{owner="a",registry="dockerhub",repo="z"} 3`) {
 		t.Error("new image not present")
@@ -81,41 +108,124 @@ func TestSetImage_replacesSeriesSet(t *testing.T) {
 	}
 }
 
-// TestSetImage_tagsDroppingToZeroRemovesSeries pins the
-// stale-series diff on the tags gauge specifically: an image whose tag
-// count goes from positive to 0 (count fetch failed, or the repo now has
-// no tags) keeps its pulls series with the fresh value but loses its
-// image_tags series — a stale count must not linger from the prior cycle.
-func TestSetImage_tagsDroppingToZeroRemovesSeries(t *testing.T) {
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 10, Tags: 4},
-	})
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "x", Pulls: 11, Tags: 0},
-	})
-
-	body := scrapeBody(t)
-
-	if !strings.Contains(body, `registrystats_image_pulls_total{owner="a",registry="dockerhub",repo="x"} 11`) {
-		t.Error("pulls series missing or stale after the second cycle")
-	}
-	if strings.Contains(body, `registrystats_image_tags{owner="a",registry="dockerhub",repo="x"}`) {
-		t.Error("image_tags series lingered after the tag count dropped to 0")
-	}
-}
-
-// TestSetImage_emptyCycleClearsAll pins the all-failed edge: an
-// empty update removes every previously-emitted image series (matching
-// the old Reset semantics for a cycle that collected nothing).
+// TestSetImage_emptyCycleClearsAll pins the all-failed edge.
 func TestSetImage_emptyCycleClearsAll(t *testing.T) {
-	SetImage([]ImageMetric{
-		{Registry: "dockerhub", Owner: "a", Repo: "gone", Pulls: 5, Tags: 1},
+	m := New()
+	m.SetImage([]ImageMetric{
+		{Registry: registry.DockerHub, Owner: "a", Repo: "gone", Pulls: 5},
 	})
-	SetImage(nil)
+	m.SetImage(nil)
 
-	body := scrapeBody(t)
+	body := scrapeBody(t, m)
 
 	if strings.Contains(body, `repo="gone"`) {
 		t.Error("series survived an empty cycle, want all image series cleared")
+	}
+}
+
+func TestSetImage_preservesSurvivingSeriesDuringConcurrentScrape(t *testing.T) {
+	const distractors = 64
+	sets := [2][]ImageMetric{
+		make([]ImageMetric, distractors+1),
+		make([]ImageMetric, distractors+1),
+	}
+	for i := range distractors {
+		sets[0][i] = ImageMetric{Registry: registry.DockerHub, Owner: "other", Repo: strings.Repeat("a", i+1), Pulls: int64(i)}
+		sets[1][i] = ImageMetric{Registry: registry.DockerHub, Owner: "other", Repo: strings.Repeat("b", i+1), Pulls: int64(i)}
+	}
+	sets[0][distractors] = ImageMetric{Registry: registry.DockerHub, Owner: "a", Repo: "stable", Pulls: 1}
+	sets[1][distractors] = ImageMetric{Registry: registry.DockerHub, Owner: "a", Repo: "stable", Pulls: 2}
+
+	m := New()
+	m.SetImage(sets[0])
+	stop := make(chan struct{})
+	started := make(chan struct{})
+	updates := make(chan int, 1)
+	go func() {
+		count := 0
+		for {
+			select {
+			case <-stop:
+				updates <- count
+				return
+			default:
+			}
+			m.SetImage(sets[count%len(sets)])
+			count++
+			if count == 1 {
+				close(started)
+			}
+		}
+	}()
+	<-started
+
+	missing := false
+	for range 2000 {
+		body := scrapeBody(t, m)
+		hasOld := strings.Contains(body, `registrystats_image_pulls_total{owner="a",registry="dockerhub",repo="stable"} 1`)
+		hasNew := strings.Contains(body, `registrystats_image_pulls_total{owner="a",registry="dockerhub",repo="stable"} 2`)
+		if !hasOld && !hasNew {
+			missing = true
+			break
+		}
+	}
+	close(stop)
+	updateCount := <-updates
+
+	if updateCount == 0 {
+		t.Fatal("SetImage() completed no concurrent updates")
+	}
+	if missing {
+		t.Error("SetImage() omitted the surviving image_pulls series during a concurrent scrape")
+	}
+}
+
+func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
+	m := New()
+	m.MintCollectSources([]registry.ID{registry.DockerHub})
+	m.ObserveCollectDuration(time.Second)
+	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
+	body := scrapeBody(t, m)
+
+	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
+	consumerSeries := make(map[string]bool)
+	for _, path := range []string{
+		"../../CONTRIBUTING.md",
+		"../../README.md",
+		"../../alerts/logql.yaml",
+		"../../alerts/promql.yaml",
+		"../../grafana-dashboard.json",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("Setup: read shipped metric consumer %s: %v", path, err)
+		}
+		for _, name := range metricName.FindAllString(string(data), -1) {
+			consumerSeries[name] = true
+		}
+	}
+	for name := range consumerSeries {
+		if !strings.Contains(body, "# HELP "+name+" ") {
+			t.Errorf("shipped consumer series %q is absent from /metrics", name)
+		}
+	}
+}
+
+func TestMintCollectSources_mintsBothCountersForEverySource(t *testing.T) {
+	m := New()
+	m.MintCollectSources([]registry.ID{registry.DockerHub, registry.GHCR})
+
+	body := scrapeBody(t, m)
+
+	want := []string{
+		`registrystats_collects_total{source="dockerhub"} 0`,
+		`registrystats_collect_errors_total{source="dockerhub"} 0`,
+		`registrystats_collects_total{source="ghcr"} 0`,
+		`registrystats_collect_errors_total{source="ghcr"} 0`,
+	}
+	for _, line := range want {
+		if !strings.Contains(body, line) {
+			t.Errorf("MintCollectSources() exposition missing %q:\n%s", line, body)
+		}
 	}
 }

@@ -2,9 +2,9 @@ package urlsafe
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"testing"
-
-	"pgregory.net/rapid"
 )
 
 func TestIsSafeURLSegment(t *testing.T) {
@@ -43,23 +43,49 @@ func TestIsSafeURLSegment_rejects_traversal_names(t *testing.T) {
 	}
 }
 
-func TestIsSafeURLSegment_never_panics(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		input := rapid.String().Draw(t, "input")
-		_ = IsSafeURLSegment(input) // must not panic
-	})
+func TestIsSafeURLSegment_bounds_length(t *testing.T) {
+	tests := []struct {
+		name string
+		size int
+		want bool
+	}{
+		{name: "at the bound", size: MaxSegmentBytes, want: true},
+		{name: "one over the bound", size: MaxSegmentBytes + 1, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := strings.Repeat("a", tt.size)
+			if got := IsSafeURLSegment(input); got != tt.want {
+				t.Errorf("IsSafeURLSegment(%d chars) = %v, want %v", tt.size, got, tt.want)
+			}
+		})
+	}
 }
 
-func TestIsSafeURLSegment_rejects_all_unsafe_chars(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		unsafe := rapid.SampledFrom([]byte{'/', '%', '\\', '?', '#', '@', ':'}).Draw(t, "char")
-		prefix := rapid.StringMatching(`[a-z]{0,5}`).Draw(t, "prefix")
-		suffix := rapid.StringMatching(`[a-z]{0,5}`).Draw(t, "suffix")
-		input := prefix + string(unsafe) + suffix
-		if IsSafeURLSegment(input) {
-			t.Errorf("IsSafeURLSegment(%q) = true, want false (contains %q)", input, string(unsafe))
-		}
-	})
+func TestPackageName(t *testing.T) {
+	atBound := strings.Repeat("a", MaxSegmentBytes-len("owner"+"/"))
+	overBound := atBound + "a"
+	tests := []struct {
+		name  string
+		owner string
+		token string
+		want  string
+	}{
+		{name: "nested", owner: "owner", token: "helm-charts%2Fgrafana-operator", want: "helm-charts/grafana-operator"},
+		{name: "at whole-name bound", owner: "owner", token: atBound, want: atBound},
+		{name: "over whole-name bound", owner: "owner", token: overBound},
+		{name: "many short elements", owner: "owner", token: strings.Repeat("a%2F", 126) + "a"},
+		{name: "raw slash", owner: "owner", token: "app/versions"},
+		{name: "unsafe element", owner: "owner", token: "app%2FRepo$"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PackageName(Owner(tt.owner), tt.token)
+			if got != tt.want || (err != nil) != (tt.want == "") {
+				t.Errorf("PackageName(%q, %q) = (%q, %v), want %q", tt.owner, tt.token, got, err, tt.want)
+			}
+		})
+	}
 }
 
 // FuzzIsSafeURLSegment pins the positive security contract of the URL
@@ -68,9 +94,7 @@ func TestIsSafeURLSegment_rejects_all_unsafe_chars(t *testing.T) {
 // consist solely of the allowed bytes [A-Za-z0-9._-]. The byte-membership
 // check re-derives the allowlist independently rather than calling back
 // into the production regexp, so a regexp mutated to admit any other byte
-// (a space, "/", "~", a control or non-ASCII byte) is caught here; the
-// existing rejects-known-unsafe-chars property only enumerates seven
-// specific bytes and would miss such a change.
+// is caught here.
 func FuzzIsSafeURLSegment(f *testing.F) {
 	f.Add("cplieger")
 	f.Add("fclones-scheduler")
@@ -99,6 +123,43 @@ func FuzzIsSafeURLSegment(f *testing.F) {
 			if !allowed {
 				t.Errorf("IsSafeURLSegment(%q) = true, but it contains disallowed byte %q", s, b)
 			}
+		}
+	})
+}
+
+func FuzzPackageName_decodesBeforeValidatingElements(f *testing.F) {
+	f.Add("owner", "helm-charts%2Fgrafana-operator")
+	f.Add("owner", "%2E%2E")
+	f.Add("owner", "app%252Fversions")
+	f.Add("owner", "app/versions")
+	f.Add("owner", "%zz")
+	f.Add("owner", strings.Repeat("a", MaxSegmentBytes-len("owner/")))
+	f.Add("owner", strings.Repeat("a", MaxSegmentBytes-len("owner/")+1))
+
+	f.Fuzz(func(t *testing.T, owner, token string) {
+		decoded, decodeErr := url.PathUnescape(token)
+		wantOK := !strings.Contains(token, "/") && decodeErr == nil && len(owner)+1+len(decoded) <= MaxSegmentBytes
+		if wantOK {
+			for part := range strings.SplitSeq(decoded, "/") {
+				if !IsSafeURLSegment(part) {
+					wantOK = false
+					break
+				}
+			}
+		}
+
+		got, err := PackageName(Owner(owner), token)
+		if (err == nil) != wantOK {
+			t.Fatalf("PackageName(%q, %q) = (%q, %v), accepted = %v", owner, token, got, err, wantOK)
+		}
+		if err != nil {
+			if got != "" {
+				t.Fatalf("PackageName(%q, %q) returned name %q with error %v, want empty name", owner, token, got, err)
+			}
+			return
+		}
+		if got != decoded {
+			t.Fatalf("PackageName(%q, %q) = %q, want decoded name %q", owner, token, got, decoded)
 		}
 	})
 }

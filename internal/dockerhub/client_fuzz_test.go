@@ -1,19 +1,11 @@
-package dockerhub_test
+package dockerhub
 
-import (
-	"testing"
-
-	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
-)
+import "testing"
 
 // FuzzDockerHubRepoUnmarshal drives the production single-repo metadata
-// parser with arbitrary bytes. The Docker Hub response is untrusted
-// input feeding the cumulative image_pulls_total gauge, so the invariant
-// is: a nil error implies a non-negative pull count (a response without a
-// usable pull_count — malformed JSON, absent field, null, negative,
-// duplicated member — must error so it can never reach the gauge as a
-// bogus 0). The seed corpus pins the real response shape plus malformed
-// inputs.
+// parser. Invariant: a nil error implies a non-negative pull count, so a
+// response with no usable pull_count can never reach the cumulative gauge
+// as a bogus 0.
 func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":5000,"last_updated":"2026-03-06T12:00:00Z"}`))
 	f.Add([]byte(`{"pull_count":0}`))
@@ -26,24 +18,21 @@ func FuzzDockerHubRepoUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"pull_count":1,"pull_count":2}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := dockerhub.ParseRepoMeta(data)
+		n, err := parseRepoMeta(data)
 		if err != nil {
 			return
 		}
 		if n < 0 {
-			t.Errorf("ParseRepoMeta(%q) = %d with nil error, want errors on negative counts", data, n)
+			t.Errorf("parseRepoMeta(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }
 
 // FuzzDockerHubRepoListUnmarshal drives the production owner-listing
-// parser. Invariant: every entry it returns carries exactly the
-// requested owner, a non-empty repo name (the urlsafe guard drops
-// unsafe and empty names) and a non-negative pull count, so a crafted
-// listing response can neither smuggle a foreign owner into the label set
-// downstream code trusts, nor inject an empty/unsafe path segment into
-// the tags URL built from it, nor land a negative value in a cumulative
-// counter.
+// parser. Invariant: every entry carries exactly the requested owner, a
+// non-empty safe repo name, and a non-negative pull count, so a crafted
+// listing response cannot smuggle a foreign owner into the label set or land
+// an unsafe name or negative value in a cumulative counter.
 func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"next":"","results":[{"name":"app","pull_count":100,"last_updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Add([]byte(`{"next":"page2","results":[]}`))
@@ -53,50 +42,24 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 	f.Add([]byte(`{"results":[{"name":""},{"name":"../evil"},{"name":"ok"}]}`))
 	f.Add([]byte(`{"results":[{"name":"a","pull_count":1},{"name":"b"}]}`))
 	f.Add([]byte(`{"results":[{"name":"a","pull_count":-5}]}`))
+	f.Add([]byte(`{"count":3,"next":"","results":[{"name":"app","pull_count":100},{"name":"","pull_count":1},{"name":"../evil","pull_count":2}]}`))
 
 	const owner = "owner"
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, repos, err := dockerhub.ParseRepoListPage(data, owner)
+		repos, _, _, err := parseRepoListPage(data, owner)
 		if err != nil {
 			return
 		}
 		for _, r := range repos {
 			if r.Owner != owner {
-				t.Errorf("ParseRepoListPage(%q) produced entry with owner %q, want %q", data, r.Owner, owner)
+				t.Errorf("parseRepoListPage(%q) produced entry with owner %q, want %q", data, r.Owner, owner)
 			}
 			if r.Repo == "" {
-				t.Errorf("ParseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
+				t.Errorf("parseRepoListPage(%q) produced an entry with an empty repo name, want empties dropped", data)
 			}
 			if r.Pulls < 0 {
-				t.Errorf("ParseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
+				t.Errorf("parseRepoListPage(%q) produced entry %q with %d pulls, want the page rejected", data, r.Repo, r.Pulls)
 			}
-		}
-	})
-}
-
-// FuzzDockerHubTagCountUnmarshal drives the production tag-count parser.
-// The Docker Hub tags response is untrusted input feeding the image_tags
-// gauge, so the invariant is: a nil error implies a non-negative count
-// (a response without a usable count — malformed JSON, absent field,
-// negative value — must error so it can never reach the gauge). The
-// {"results":[{}]} seed carries over from the deleted tag-page parser's
-// committed corpus (valid JSON with no usable payload).
-func FuzzDockerHubTagCountUnmarshal(f *testing.F) {
-	f.Add([]byte(`{"count":164,"next":"page2","results":[{"name":"latest","digest":"sha256:abc"}]}`))
-	f.Add([]byte(`{"count":0,"next":"","results":[]}`))
-	f.Add([]byte(`{"count":-1}`))
-	f.Add([]byte(`{"results":[{}]}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(`not json`))
-	f.Add([]byte(``))
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := dockerhub.ParseTagCount(data)
-		if err != nil {
-			return
-		}
-		if n < 0 {
-			t.Errorf("ParseTagCount(%q) = %d with nil error, want errors on negative counts", data, n)
 		}
 	})
 }

@@ -1,7 +1,7 @@
 {
   "title": "Registry Stats",
   "uid": "registry-stats",
-  "description": "Docker Hub and GHCR image download tracking via Prometheus metrics",
+  "description": "Docker Hub and GHCR image download tracking via Prometheus metrics. Counts are registry-reported request counts - a GHCR manifest GET increments GitHub's published total, so automated digest and manifest reads move these series; they are not completed transfers and not users.",
   "tags": ["registry", "docker", "ghcr", "downloads"],
   "timezone": "browser",
   "refresh": "1h",
@@ -29,6 +29,18 @@
         "sort": 1
       },
       {
+        "name": "owner",
+        "label": "Owner",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(registrystats_image_pulls_total{repo=~\"$repo\"}, owner)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": ["All"], "value": ["$__all"] },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
         "name": "registry",
         "label": "Registry",
         "type": "query",
@@ -46,7 +58,7 @@
     {
       "id": 10,
       "title": "Total Downloads",
-      "description": "Sum of all downloads across all tracked packages and registries",
+      "description": "Sum of all downloads across all tracked packages and registries. Registry-reported request counts, not completed transfers or users.",
       "type": "stat",
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -72,7 +84,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"})",
+          "expr": "sum(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
           "legendFormat": "Total",
           "instant": true
         }
@@ -103,7 +115,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"})",
+          "expr": "count(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
           "legendFormat": "Packages",
           "instant": true
         }
@@ -137,7 +149,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}",
+          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
           "legendFormat": "{{owner}}/{{repo}}",
           "instant": true,
           "format": "table"
@@ -147,8 +159,8 @@
         {
           "id": "organize",
           "options": {
-            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "owner": true, "hostname": true, "__tenant_id__": true },
-            "renameByName": { "registry": "Registry", "repo": "Package", "Value": "Downloads" }
+            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "hostname": true, "__tenant_id__": true },
+            "renameByName": { "registry": "Registry", "owner": "Owner", "repo": "Package", "Value": "Downloads" }
           }
         }
       ]
@@ -180,15 +192,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}",
-          "legendFormat": "{{repo}} ({{registry}})"
+          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
+          "legendFormat": "{{owner}}/{{repo}} ({{registry}})"
         }
       ]
     },
     {
       "id": 3,
       "title": "Daily Download Delta",
-      "description": "New downloads per day per repo",
+      "description": "New downloads per day per repo. Registry-reported request counts, not completed transfers: on GHCR a manifest GET increments the total, so automated digest and manifest reads move this series.",
       "type": "timeseries",
       "gridPos": { "h": 13, "w": 12, "x": 12, "y": 10 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -211,8 +223,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "delta(registrystats_image_pulls_total{repo=~\"$repo\",registry=~\"$registry\"}[1d])",
-          "legendFormat": "{{repo}} ({{registry}})",
+          "expr": "delta(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[1d])",
+          "legendFormat": "{{owner}}/{{repo}} ({{registry}})",
           "interval": "1d"
         }
       ]

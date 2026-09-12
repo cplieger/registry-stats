@@ -1,14 +1,5 @@
-// Package collect is the registry-stats collection orchestrator. It
-// loops over a set of Source implementations, stamps each
-// source's flat []registry.Entry output with its registry label,
-// and returns the combined per-image metric records plus a healthy flag
-// so the caller can flip its healthcheck marker accordingly.
-//
-// The orchestrator is deliberately tiny: each source owns its own
-// *http.Client, retry options, logging, and pacing. Run's job is the
-// orchestration layer above that — invoke each configured source, keep
-// the per-source health accounting, and surface partial-degradation
-// warnings without failing the whole cycle.
+// Package collect is the registry-stats collection orchestrator: it invokes
+// each registry Source in turn and returns the combined per-image records.
 package collect
 
 import (
@@ -20,176 +11,139 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Source collects registry-specific statistics for a list of refs — the
-// one seam this orchestrator drives, declared here at its consumer (the
-// old internal/api hub held it at arm's length from everyone who used it).
-// Implementations return flat per-image registry.Entry records; Run stamps
-// each with the source's registry label for the metric surface. attempted
-// counts refs the source tried to fetch (including failures) so degraded
-// detection can see the shortfall; healthy is true only when the source met
-// its per-source health criteria.
-//
-// Source() returns the typed registry.ID — Run routes entries by it without
-// a string compare, and derives the lowercase on-wire log label via its
-// String(). The old interface also carried Name() with a prose invariant
-// that Name() == Source().String(); both implementations defined Name as
-// exactly that call, so the method carried zero information and the
-// compiler could not enforce the invariant. Deriving the label from the one
-// authoritative method deletes the drift surface (C11 side finding).
+// Source collects registry-specific statistics. Source must return a known
+// registry.ID; registry.Collection defines the returned cycle accounting.
+// Every ref is already canonical and distinct for the registry Source names --
+// lower case, accepted by internal/config's urlsafe gate, and deduplicated on
+// the registry.RepoRef key -- so Collect may interpolate Owner and Repo into a
+// request URL without re-checking their shape.
+// Collect still owns the shape of the request it builds: Repo is "*" for an
+// owner-wide ref, which it expands into that owner's published repositories
+// rather than requesting by name, and a GHCR Repo is the decoded package name,
+// which may carry '/' path elements and needs url.PathEscape (see
+// urlsafe.PackageName).
+// A successful Collect returns entries whose Owner and Repo are non-empty: obs
+// keys the published gauge on that pair, and every construction gate rejects
+// the empty string.
 type Source interface {
 	Source() registry.ID
-	Collect(
-		ctx context.Context,
-		refs []registry.RepoRef,
-	) (entries []registry.Entry, attempted int, healthy bool)
+	Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection
 }
 
-// Options configures a single Run. Sources are the registry clients
-// that actually fetch data; RefsFor maps each source's on-wire name
-// (Source().String()) to the
-// []registry.RepoRef it should fetch, allowing the orchestrator to stay
-// agnostic of the per-registry config slice layout. A nil Logger falls
-// back to slog.Default. Now is the clock used for the cycle-duration
-// log (tests inject a deterministic clock; production passes time.Now).
+// SourceRefs binds a selected source to the canonical refs it will collect.
+type SourceRefs struct {
+	Source Source
+	Refs   []registry.RepoRef
+}
+
+// Options configures a single Run. Metrics and Logger are required, and no two
+// Sources may report the same registry.ID: Run keys the metric label on it. An
+// empty Sources is a supported cycle: Run collects nothing and warns that no
+// repos are configured.
 type Options struct {
+	Metrics *obs.Metrics
 	Logger  *slog.Logger
-	Now     func() time.Time
-	RefsFor func(name string) []registry.RepoRef
-	Sources []Source
+	Sources []SourceRefs
 }
 
-// Run orchestrates a single collection cycle. It invokes each source's
-// Collect (skipping sources whose ref slice is empty so empty-config
-// paths stay zero-cost), stamps each entry with its source's registry
-// label, and returns the combined per-image records plus a healthy flag.
-//
-// Return contract:
-//   - (images, true)  -- healthy cycle: every invoked source met its per-source threshold.
-//   - (images, false) -- degraded/empty cycle: an invoked source was unhealthy, or no
-//     invoked source produced an entry.
-//
-// registry-stats is stateless: Run never persists the result. The healthy flag drives
-// only the partial-failure WARN below; the caller derives its health marker separately
-// (see main.runCollect).
-func Run(ctx context.Context, opts Options) (images []obs.ImageMetric, healthy bool) {
+// Run orchestrates a single collection cycle: it invokes each source's
+// Collect, stamps each entry with its source's registry label, and returns the
+// combined per-image records.
+// The caller owns the health marker and derives it from the returned
+// set. A cancelled cycle stops early and returns what it collected,
+// with no error, so a caller that publishes the set must check
+// ctx.Err() first.
+func Run(ctx context.Context, opts Options) []obs.ImageMetric {
+	var images []obs.ImageMetric
+
 	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-	now := opts.Now
-	if now == nil {
-		now = time.Now
-	}
 
-	start := now()
+	start := time.Now()
 	logger.Info("starting collection")
-	degraded := false
-	invokedAnySource := false
-	// Per-source counts tracked separately so the summary logs keep the
-	// docker_hub/ghcr keys Loki dashboards filter on.
-	var dockerHubCount, ghcrCount int
+	var degraded bool
 
-	for _, src := range opts.Sources {
-		refs := refsFor(opts, src.Source().String())
-		if len(refs) == 0 {
-			continue
+	for _, sourceRefs := range opts.Sources {
+		if ctx.Err() != nil {
+			// Stop before invoking a further source on a dead context: an
+			// advance in collects_total is the completed-cycle signal
+			// RegistryStatsCollectStalled reads. A source cancelled after
+			// this check still mints its sample; only a shutdown can do
+			// that, so the stall rule's 6h window is unaffected.
+			break
 		}
-		invokedAnySource = true
-		srcImages, srcHealthy := collectSource(ctx, logger, src, refs)
+		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, sourceRefs.Source, sourceRefs.Refs)
 		if !srcHealthy {
 			degraded = true
-		}
-		switch src.Source() {
-		case registry.DockerHub:
-			dockerHubCount = len(srcImages)
-		case registry.GHCR:
-			ghcrCount = len(srcImages)
 		}
 		images = append(images, srcImages...)
 	}
 
-	// An all-empty cycle has nothing to expose; return healthy=false so the caller marks unhealthy.
+	if ctx.Err() != nil {
+		logger.Warn("collection interrupted",
+			"error", ctx.Err(), "images", len(images))
+		return images
+	}
+
+	opts.Metrics.ObserveCollectDuration(time.Since(start))
+
 	if len(images) == 0 {
-		if !invokedAnySource {
+		switch {
+		case len(opts.Sources) == 0:
+			// RegistryStatsConfigRejected (alerts/logql.yaml) matches the text of the
+			// "no repos configured" WARN; reword it there and here together.
 			logger.Warn("no repos configured")
-		} else {
-			logger.Error("all collections failed")
+		case degraded:
+			logger.Error("no images collected, at least one source failed")
+		default:
+			logger.Warn("no images found for the configured refs")
 		}
-		return images, false
+		return images
 	}
 
 	if degraded {
-		logger.Warn("partial collection failure, serving available data",
-			"docker_hub", dockerHubCount, "ghcr", ghcrCount)
+		logger.Warn("partial collection failure", "images", len(images))
 	}
 
 	logger.Info("collection complete",
-		"docker_hub", dockerHubCount,
-		"ghcr", ghcrCount,
-		"duration", now().Sub(start).Round(time.Millisecond))
+		"images", len(images),
+		"duration", time.Since(start).Round(time.Millisecond))
 
-	return images, !degraded
+	return images
 }
 
-// collectSource invokes a single source's Collect and stamps its entries
-// with the source's registry label, reporting whether the source met its
-// health threshold. A DockerHub source that returns partial data while
-// flagging unhealthy gets the severe-degradation warn (matching
-// main.go's pre-refactor phrasing); any unhealthy source bumps the
-// per-source error metric. Entries are stamped regardless of health so
-// a degraded-but-nonempty source still contributes its data. A source
-// whose Source() is unknown has no registry label to stamp, so its
-// entries are dropped (only its health accounting is kept).
+// collectSource invokes one source's Collect and stamps its entries with the
+// source's registry label regardless of health, so a degraded-but-nonempty
+// source still contributes its data. A cancelled cycle is a stop rather than
+// a collection failure: the source still mints its collects_total sample,
+// but neither the error counter nor the unhealthy log line fires.
 func collectSource(
 	ctx context.Context,
+	m *obs.Metrics,
 	logger *slog.Logger,
 	src Source,
 	refs []registry.RepoRef,
 ) (images []obs.ImageMetric, srcHealthy bool) {
-	entries, attempted, srcHealthy := src.Collect(ctx, refs)
-	// Count every invoked source as a collect run; collect_errors_total below is
-	// the failed subset, so collect_errors_total / collects_total is a valid
-	// per-source failure ratio.
-	obs.CollectsTotal.Inc(src.Source().String())
-	if !srcHealthy {
-		if src.Source() == registry.DockerHub && len(entries) > 0 {
-			logger.Warn("docker hub collection severely degraded",
-				"succeeded", len(entries), "attempted", attempted)
-		}
-		obs.CollectErrors.Inc(src.Source().String())
+	collection := src.Collect(ctx, refs)
+	// Unhealthy when a wildcard owner listing wholly failed, or when more
+	// than half the fetch attempts yielded no entry.
+	srcHealthy = !collection.ListingFailed && collection.Fetched*2 >= collection.Attempted
+	source := src.Source()
+	failed := !srcHealthy && ctx.Err() == nil
+	if failed {
+		logger.Warn("source reported unhealthy",
+			"source", source.String(), "succeeded", collection.Fetched, "attempted", collection.Attempted,
+			"listing_failed", collection.ListingFailed)
 	}
+	m.RecordCollect(source, failed)
 
-	label := src.Source().String()
-	if label == "" {
-		return nil, srcHealthy
-	}
-	images = make([]obs.ImageMetric, 0, len(entries))
-	for _, e := range entries {
-		// Defensive: a zero-value entry would emit a broken {owner,repo}
-		// label pair. The registry clients always populate Repo, so this
-		// only strips entries a future source regression could produce.
-		if e.Repo == "" {
-			continue
-		}
+	images = make([]obs.ImageMetric, 0, len(collection.Entries))
+	for _, e := range collection.Entries {
 		images = append(images, obs.ImageMetric{
-			Registry: label,
+			Registry: source,
 			Owner:    e.Owner,
 			Repo:     e.Repo,
 			Pulls:    e.Pulls,
-			Tags:     e.TagCount,
 		})
 	}
 	return images, srcHealthy
-}
-
-// refsFor resolves refs for a given source name, returning nil when
-// opts.RefsFor is unset or the source has no refs. A nil RefsFor is
-// equivalent to "no refs for any source", which short-circuits the
-// whole loop — useful for orchestrator-only tests that pass canned
-// entries via fake sources with baked-in state.
-func refsFor(opts Options, name string) []registry.RepoRef {
-	if opts.RefsFor == nil {
-		return nil
-	}
-	return opts.RefsFor(name)
 }

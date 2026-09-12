@@ -1,23 +1,11 @@
 // Package config parses registry-stats configuration from environment
-// variables. Env var names (DOCKERHUB_REPOS, GHCR_REPOS,
-// POLL_INTERVAL_HOURS, LOG_LEVEL) are an inviolate contract — the in-memory
-// representation here can evolve freely, but the env var names and their
-// parsing semantics MUST stay identical to preserve compose-file contracts.
-// Reads go through envx (the fleet's env layer); typed values are trimmed
-// and a whitespace-only value reads as unset, per envx semantics.
+// variables. The env var names and the meaning of their values are an
+// inviolate contract: the in-memory representation here can evolve
+// freely, the env surface cannot. LISTEN_ADDR is edge-trimmed, because
+// padding otherwise fails the bind with the cause invisible.
 //
 // This package never logs: every non-fatal parse problem is returned as a
-// Warning value for main to emit through the configured handler
-// (go-rulebook C1). A Warning carries its structured attributes, not a
-// pre-rendered sentence, so the emitted line keeps the k/v shape a Loki
-// query can filter on.
-//
-// One behavior change rides along, deliberately: the `health` subcommand
-// calls PollInterval and DISCARDS its warnings, so a malformed
-// POLL_INTERVAL_HOURS no longer produces a line from the probe process. It
-// never double-logged within one process (health.RunProbe exits), but the
-// probe runs many times an hour against the same bad value, and the serving
-// process already reports it once at startup.
+// Warning value for the caller to emit.
 package config
 
 import (
@@ -34,52 +22,48 @@ import (
 	"github.com/cplieger/slogx"
 )
 
-// Default values for env-var-backed fields. Exported for test assertions.
+// defaultListenAddr is the default TCP listen address (env LISTEN_ADDR).
 const (
-	DefaultListenAddr = ":9100"
+	defaultListenAddr = ":9100"
 )
 
 // Config is the effective runtime configuration after env var parsing.
 type Config struct {
 	ListenAddr     string             // TCP listen address (env LISTEN_ADDR)
-	DockerHubRepos []registry.RepoRef // Docker Hub repos: "owner/repo" or "owner/*" (wildcard = all public)
-	GHCRRepos      []registry.RepoRef // GHCR packages: "owner/repo" or "owner/*" (wildcard = all public)
+	DockerHubRepos []registry.RepoRef // Docker Hub repos: "owner/repo" or "owner/*" (wildcard = the repos the owner listing serves)
+	GHCRRepos      []registry.RepoRef // GHCR packages: "owner/package" or "owner/*" (wildcard = the packages the owner listing serves)
 	PollInterval   time.Duration      // time between collections (0 = one-shot, collect once then serve)
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
-	EnableMetrics  bool               // serve /metrics endpoint (env ENABLE_METRICS)
 }
 
-// attrValue is the slog key every "this env value was rejected" warning uses
-// for the offending input, so the three sites cannot drift apart and a Loki
-// filter has one attribute to key on.
+// attrValue is the slog key for a warning's whole environment value.
 const attrValue = "value"
 
-// Warning is a non-fatal configuration note (an invalid or clamped value)
-// for the caller to log. Attrs carries the structured slog key/value pairs
-// the message used to be logged with, so relocating the emission to main
-// does not flatten them into prose. Warnings never abort startup.
+// Warning carries a non-fatal configuration message and top-level string or
+// int attributes. This package never logs.
 type Warning struct {
+	// Rewording a Msg silently disarms any alerts/logql.yaml rule matching
+	// it: RegistryStatsConfigRejected matches three of the five below.
 	Msg   string
-	Attrs []any
+	Attrs []slog.Attr
 }
 
 // PollInterval returns the effective POLL_INTERVAL_HOURS as a duration
-// (0 = one-shot), parsed and clamped with the same rules Load applies.
-// Exported separately so the health subcommand can derive its probe max-age
-// from the same source of truth before config load; that caller discards
-// the warnings (Load's caller emits them once).
+// (0 = one-shot), clamped to one year, plus the non-fatal warnings its
+// parse produced. Exported so the health subcommand can derive its probe
+// max-age without loading the rest of the configuration.
 func PollInterval() (time.Duration, []Warning) {
 	var warns []Warning
 	pollIntervalHours, ok, err := envx.IntStrict("POLL_INTERVAL_HOURS")
 	switch {
 	case err != nil:
-		raw := ""
+		var raw string
 		if perr, isParseErr := errors.AsType[*envx.ParseError](err); isParseErr {
 			raw = perr.Value
 		}
 		warns = append(warns, Warning{
 			Msg:   "invalid POLL_INTERVAL_HOURS, using default of 1 hour",
-			Attrs: []any{attrValue, raw},
+			Attrs: []slog.Attr{slog.String(attrValue, raw)},
 		})
 		pollIntervalHours = 1
 	case !ok:
@@ -87,21 +71,23 @@ func PollInterval() (time.Duration, []Warning) {
 	case pollIntervalHours < 0:
 		warns = append(warns, Warning{
 			Msg:   "invalid POLL_INTERVAL_HOURS, using default of 1 hour",
-			Attrs: []any{attrValue, strconv.Itoa(pollIntervalHours)},
+			Attrs: []slog.Attr{slog.String(attrValue, strconv.Itoa(pollIntervalHours))},
 		})
 		pollIntervalHours = 1
 	}
-	// Clamp to a sensible upper bound: multiplying a huge int by time.Hour
-	// overflows time.Duration (int64 ns, max ~292 years) into a NEGATIVE
-	// duration, and scheduler.RunLoop returns immediately on a non-positive
-	// Interval — so the overflow would silently disable the collect loop
-	// rather than fail loudly, while the container still reported healthy off
-	// the boot marker. 1 year is already nonsense for a stats poller.
+	// Clamp to a sensible upper bound: time.Duration is int64
+	// nanoseconds, so an unbounded hour count wraps. 2562048h yields a
+	// negative duration and scheduler.RunLoop returns at once, silently
+	// disabling the collect loop; 5124096h wraps back through zero to
+	// 25m26s and polls both registries every 25 minutes instead.
 	const maxPollHours = 24 * 365
 	if pollIntervalHours > maxPollHours {
 		warns = append(warns, Warning{
-			Msg:   "POLL_INTERVAL_HOURS clamped",
-			Attrs: []any{"requested", pollIntervalHours, "max", maxPollHours},
+			Msg: "POLL_INTERVAL_HOURS clamped",
+			Attrs: []slog.Attr{
+				slog.Int("requested", pollIntervalHours),
+				slog.Int("max", maxPollHours),
+			},
 		})
 		pollIntervalHours = maxPollHours
 	}
@@ -110,8 +96,7 @@ func PollInterval() (time.Duration, []Warning) {
 
 // Load reads configuration from environment variables with sensible
 // defaults, returning the typed Config plus the non-fatal warnings for the
-// caller to log. Clamps poll interval to a bounded maximum to prevent
-// time.Duration overflow.
+// caller to log.
 func Load() (Config, []Warning) {
 	pollInterval, warns := PollInterval()
 
@@ -119,72 +104,112 @@ func Load() (Config, []Warning) {
 	logLevel, logLevelOK := slogx.ParseLevel(rawLogLevel, slog.LevelInfo)
 	if !logLevelOK {
 		warns = append(warns, Warning{
-			Msg:   "invalid LOG_LEVEL, using default",
-			Attrs: []any{attrValue, rawLogLevel, "default", "info"},
+			Msg: "invalid LOG_LEVEL, using default",
+			Attrs: []slog.Attr{
+				slog.String(attrValue, rawLogLevel),
+				slog.String("default", "info"),
+			},
 		})
 	}
 
-	dhRepos, dhWarns := ParseRepoRefs(envx.String("DOCKERHUB_REPOS"))
+	rawListenAddr := envx.String("LISTEN_ADDR")
+	listenAddr := strings.TrimSpace(rawListenAddr)
+	effectiveListenAddr := cmp.Or(listenAddr, defaultListenAddr)
+	if listenAddr != rawListenAddr {
+		warns = append(warns, Warning{
+			Msg: "trimmed whitespace from LISTEN_ADDR",
+			Attrs: []slog.Attr{
+				slog.String(attrValue, rawListenAddr),
+				slog.String("using", effectiveListenAddr),
+			},
+		})
+	}
+
+	dhRepos, dhWarns := parseRepoRefs(envx.String("DOCKERHUB_REPOS"), registry.DockerHub)
 	warns = append(warns, dhWarns...)
-	ghRepos, ghWarns := ParseRepoRefs(envx.String("GHCR_REPOS"))
+	ghRepos, ghWarns := parseRepoRefs(envx.String("GHCR_REPOS"), registry.GHCR)
 	warns = append(warns, ghWarns...)
 
 	return Config{
 		DockerHubRepos: dhRepos,
 		GHCRRepos:      ghRepos,
 		PollInterval:   pollInterval,
-		ListenAddr:     cmp.Or(envx.String("LISTEN_ADDR"), DefaultListenAddr),
+		ListenAddr:     effectiveListenAddr,
 		LogLevel:       logLevel,
-		EnableMetrics:  parseBoolEnv(cmp.Or(envx.String("ENABLE_METRICS"), "true")),
 	}, warns
 }
 
-// parseBoolEnv returns true unless s is explicitly "false" or "0".
-//
-// Deliberately NOT envx.Bool: this app's documented contract is
-// default-enabled with exactly two disable spellings, so envx's wider
-// vocabulary ("no"/"off" false, "yes"/"on" true, warning on anything else)
-// would silently flip a value like "no" from enabled to disabled under an
-// inviolate compose-file contract.
-func parseBoolEnv(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "false", "0":
-		return false
-	default:
-		return true
-	}
-}
-
-// ParseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
-// pairs. Invalid entries (missing slash, unsafe characters) are skipped,
-// each reported as a Warning.
-func ParseRepoRefs(s string) ([]registry.RepoRef, []Warning) {
-	if s == "" {
-		return nil, nil
-	}
+// parseRepoRefs parses a comma-separated list of "owner/repo" or "owner/*"
+// pairs. Invalid entries are skipped and reported with the rule that refused
+// them. Each accepted ref is canonicalized to lower case.
+func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	var refs []registry.RepoRef
 	var warns []Warning
+	seen := make(map[registry.RepoRef]bool)
 	for p := range strings.SplitSeq(s, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
-		owner, repo, ok := strings.Cut(p, "/")
-		if !ok || owner == "" || repo == "" {
+		ref, err := resolveRef(reg, p)
+		if err != nil {
 			warns = append(warns, Warning{
-				Msg:   "skipping invalid repo ref",
-				Attrs: []any{"input", p, "expected", "owner/repo or owner/*"},
+				Msg: "skipping unusable repo ref",
+				Attrs: []slog.Attr{
+					slog.String("input", p),
+					slog.String("reason", err.Error()),
+				},
 			})
 			continue
 		}
-		if !urlsafe.IsSafeURLSegment(owner) || (repo != "*" && !urlsafe.IsSafeURLSegment(repo)) {
-			warns = append(warns, Warning{
-				Msg:   "skipping repo ref with unsafe characters",
-				Attrs: []any{"input", p},
-			})
+		if seen[ref] {
 			continue
 		}
-		refs = append(refs, registry.RepoRef{Owner: owner, Repo: repo})
+		seen[ref] = true
+		refs = append(refs, ref)
 	}
 	return refs, warns
+}
+
+// resolveRef returns the canonical lower-case ref because Docker Hub answers an
+// upper-case namespace or repository with 400 naming its lowercase grammar, and
+// because folding here makes the dedupe in parseRepoRefs case-insensitive.
+// A non-nil error names the refusing rule and is not a sentinel.
+func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
+	owner, repo, ok := strings.Cut(token, "/")
+	if !ok {
+		return registry.RepoRef{}, errors.New("not owner/repo or owner/*")
+	}
+	if !urlsafe.IsSafeURLSegment(owner) {
+		return registry.RepoRef{}, errors.New("owner not a safe URL segment")
+	}
+	name, err := repoName(reg, urlsafe.Owner(owner), repo)
+	if err != nil {
+		return registry.RepoRef{}, err
+	}
+	return registry.RepoRef{
+		Owner: strings.ToLower(owner),
+		Repo:  strings.ToLower(name),
+	}, nil
+}
+
+// repoName accepts a wildcard for either registry, one safe segment for Docker
+// Hub, and a decoded safe package name for GHCR.
+func repoName(reg registry.ID, owner urlsafe.Owner, repo string) (string, error) {
+	if repo == "*" {
+		if err := urlsafe.CheckReference(owner, repo); err != nil {
+			return "", err
+		}
+		return repo, nil
+	}
+	if reg != registry.GHCR {
+		if !urlsafe.IsSafeURLSegment(repo) {
+			return "", errors.New("repository not a safe URL segment")
+		}
+		if err := urlsafe.CheckReference(owner, repo); err != nil {
+			return "", err
+		}
+		return repo, nil
+	}
+	return urlsafe.PackageName(owner, repo)
 }
