@@ -138,9 +138,9 @@ ruler: neither ruler parses the other's expressions.
 | `RegistryStatsCollectStalled` | no collect cycle has completed within the 6h published-data staleness budget, while the exporter is up and serving its last values | warning |
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
-| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, or none was usable at all, or `POLL_INTERVAL_HOURS` was corrected: malformed, negative, or above the 8,760-hour cap | warning |
+| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, an `owner/*` wildcard resolved to no public images, none was usable at all, or `POLL_INTERVAL_HOURS` was corrected: malformed, negative, or above the 8,760-hour cap | warning |
 | `RegistryStatsError` | the container logged an `ERROR` - a fetch or parse failure, a changed GHCR page, an unusable configuration, or a 5xx from its own endpoint other than the readiness gate's startup 503 | warning |
-| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
+| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a listing page whose package count could not be read, a rate limit, or a minority of GHCR packages | warning |
 
 `RegistryStatsCollectStalled` measures absence over 15m under a 6h `for:`,
 rather than absence over 6h directly. A counter that has just started carries
