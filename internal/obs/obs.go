@@ -40,9 +40,7 @@ func New() *Metrics {
 			"Failed collection runs by source",
 			[]string{"source"},
 		),
-		// The top bucket mirrors ghcr.MaximumCycleDuration, the longest one cycle may
-		// take, so +Inf reads as "past the allowance" rather than "slow". A literal
-		// because obs must not import a registry reader; the two move by hand.
+		// Large owner/* walks can legitimately reach the top buckets.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",

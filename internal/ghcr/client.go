@@ -28,16 +28,6 @@ const (
 	DefaultPacingJitter = 3 * time.Second
 )
 
-// MaximumCycleDuration is the longest one collection cycle may take before the
-// liveness probe stops believing the loop is working. It is a stated allowance,
-// not a computed supremum, and sits below the permitted walk: one paced fetch
-// per package at the 5s maximum exhausts five hours at about 3,600 packages,
-// while maxListingPages times maxListingCandidates permits 5,000. The allowance
-// instead follows GitHub's current thirty links per page, about 1,500 packages
-// and 2h10m for a capped owner, because a cycle needing many hours beyond that
-// is wedged rather than slow.
-const MaximumCycleDuration = 5 * time.Hour
-
 // Client is the GitHub Container Registry source (it satisfies
 // collect.Source at the wiring site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {

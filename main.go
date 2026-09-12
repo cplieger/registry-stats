@@ -54,11 +54,18 @@ func main() {
 	}
 }
 
+// progressLease tolerates two worst-case gaps between registry requests.
+const progressLease = 2 * (requestTimeout + max(
+	httpx.RetryAfterCap,
+	httpx.DefaultBaseDelay<<(httpx.DefaultMaxAttempts-2),
+	ghcr.DefaultMinPacing+ghcr.DefaultPacingJitter,
+))
+
 func healthMaxAge(interval time.Duration) time.Duration {
 	if interval == 0 {
 		return 0
 	}
-	return interval + ghcr.MaximumCycleDuration
+	return interval + progressLease
 }
 
 // run wires dependencies and serves until a signal or server error.
@@ -92,7 +99,9 @@ func run() error {
 	}
 	slog.Info("http server starting", "addr", ln.Addr().String())
 
-	httpClient := registryClient()
+	httpClient := registryClient(func() {
+		refreshPresentMarker(marker)
+	})
 
 	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
 	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
@@ -101,10 +110,7 @@ func run() error {
 		{Source: gh, Refs: cfg.GHCRRepos},
 	})
 	m.MintCollectSources(sourceIDs)
-	// Healthy before the first cycle: a first collect over two live
-	// registries can outlast the image's 15s HEALTHCHECK start-period, and
-	// runCollect's per-cycle Set(ok) cannot cover the window before a
-	// cycle has finished.
+	// The marker must exist before collection because request progress only refreshes it.
 	marker.Set(true)
 
 	pub := &publication{marker: marker, m: m, ready: &ready}
@@ -220,12 +226,29 @@ func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publi
 // client, which both registry readers use.
 const requestTimeout = 30 * time.Second
 
+func refreshPresentMarker(marker *health.Marker) {
+	if marker.CheckHealthy() {
+		marker.Set(true)
+	}
+}
+
+type progressTransport struct {
+	next     http.RoundTripper
+	progress func()
+}
+
+func (t progressTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.progress()
+	return t.next.RoundTrip(r)
+}
+
 // registryClient is the one outbound client both registry readers share.
-// CheckRedirect is the SSRF allowlist: without it net/http follows up to
-// ten redirects to any host, on two readers that fetch URLs an upstream
-// page controls.
-func registryClient() *http.Client {
+// progress runs before every registry request. CheckRedirect is the SSRF
+// allowlist: without it net/http follows up to ten redirects to any host,
+// on two readers that fetch URLs an upstream page controls.
+func registryClient(progress func()) *http.Client {
 	return &http.Client{
+		Transport:     progressTransport{next: http.DefaultTransport, progress: progress},
 		Timeout:       requestTimeout,
 		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
 	}

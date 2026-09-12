@@ -285,12 +285,10 @@ func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, mor
 	}
 	repos := make([]registry.Entry, 0, len(resp.Results))
 	for _, res := range resp.Results {
-		// Repo names become published label values and log attributes, so they
-		// pass the urlsafe allowlist behind errShapeChanged. Upstream refuses
-		// with HTTP 400 a name outside [a-z0-9._-], a name over 255 bytes, and
-		// an owner/name joined over 255 bytes, so neither this skip nor the
-		// whole-reference urlsafe.CheckReference every config path applies can
-		// drop a repo Docker Hub will serve - the latter is unreachable here.
+		// Each name becomes a published label value and a log attribute, so it passes
+		// the urlsafe allowlist and its per-segment length bound here; the joined
+		// owner/name rule is upstream's grammar and both segments are already bounded,
+		// so it is not re-checked.
 		if !urlsafe.IsSafeURLSegment(res.Name) {
 			continue
 		}

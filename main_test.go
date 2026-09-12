@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,13 +49,85 @@ func TestRegistryClient_refusesOffAllowlistRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequestWithContext: %v", err)
 	}
-	resp, err := registryClient().Do(req)
+	resp, err := registryClient(func() {}).Do(req)
 	if err == nil {
 		resp.Body.Close()
 		t.Errorf("registryClient() followed a redirect to %s; want it refused", target.URL)
 	}
 	if got := targetHits.Load(); got != 0 {
 		t.Errorf("off-allowlist redirect target was reached %d time(s), want 0", got)
+	}
+}
+
+func TestRegistryClient_refreshesPresentMarkerOnEveryRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".healthy")
+	marker := health.NewMarker(path)
+	marker.Set(true)
+	t.Cleanup(marker.Cleanup)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := registryClient(func() {
+		refreshPresentMarker(marker)
+	})
+	stale := time.Unix(1, 0)
+	for request := range 2 {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatalf("age marker before request %d: %v", request+1, err)
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat marker before request %d: %v", request+1, err)
+		}
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatalf("NewRequestWithContext for request %d: %v", request+1, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("registryClient request %d: %v", request+1, err)
+		}
+		resp.Body.Close()
+
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat marker after request %d: %v", request+1, err)
+		}
+		if !after.ModTime().After(before.ModTime()) {
+			t.Errorf("registryClient request %d marker mtime = %s, want after %s", request+1, after.ModTime(), before.ModTime())
+		}
+	}
+}
+
+func TestRegistryClient_doesNotCreateAbsentMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".healthy")
+	marker := health.NewMarker(path)
+	t.Cleanup(marker.Cleanup)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := registryClient(func() {
+		refreshPresentMarker(marker)
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("registryClient request: %v", err)
+	}
+	resp.Body.Close()
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("os.Stat absent marker error = %v, want %v", err, os.ErrNotExist)
 	}
 }
 
@@ -94,7 +167,7 @@ func TestCollectLoop_modes(t *testing.T) {
 	})
 }
 
-func TestMain_healthProbeUsesCycleBudget(t *testing.T) {
+func TestMain_healthProbeUsesProgressLease(t *testing.T) {
 	const helperEnv = "REGISTRY_STATS_HEALTH_PROBE_HELPER"
 	if os.Getenv(helperEnv) == "1" {
 		os.Args = []string{os.Args[0], "health"}
@@ -129,17 +202,16 @@ func TestMain_healthProbeUsesCycleBudget(t *testing.T) {
 		}
 	})
 
-	const maximumCycleDuration = 5 * time.Hour
 	tests := []struct {
 		name     string
 		interval string
 		age      time.Duration
 		wantCode int
 	}{
-		{name: "inside_cycle_budget", interval: "1", age: maximumCycleDuration + time.Hour - 5*time.Minute, wantCode: 0},
-		{name: "outside_cycle_budget", interval: "1", age: maximumCycleDuration + time.Hour + 5*time.Minute, wantCode: 1},
-		{name: "configured_interval_is_added", interval: "2", age: maximumCycleDuration + 90*time.Minute, wantCode: 0},
-		{name: "one_shot_has_no_deadline", interval: "0", age: maximumCycleDuration + 24*time.Hour, wantCode: 0},
+		{name: "inside_lease", interval: "1", age: time.Hour + progressLease - time.Minute, wantCode: 0},
+		{name: "outside_lease", interval: "1", age: time.Hour + progressLease + time.Minute, wantCode: 1},
+		{name: "configured_interval_is_added", interval: "2", age: time.Hour + progressLease + time.Minute, wantCode: 0},
+		{name: "one_shot_has_no_deadline", interval: "0", age: 24 * time.Hour, wantCode: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,7 +223,7 @@ func TestMain_healthProbeUsesCycleBudget(t *testing.T) {
 				t.Fatalf("age health marker: %v", err)
 			}
 
-			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMain_healthProbeUsesCycleBudget$")
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMain_healthProbeUsesProgressLease$")
 			cmd.Env = append(os.Environ(), helperEnv+"=1", "POLL_INTERVAL_HOURS="+tt.interval)
 			output, err := cmd.CombinedOutput()
 			gotCode := 0
