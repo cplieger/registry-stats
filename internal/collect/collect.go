@@ -68,7 +68,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 			// advance in collects_total is the completed-cycle signal
 			// RegistryStatsCollectStalled reads. A source cancelled after
 			// this check still mints its sample; only a shutdown can do
-			// that, so the stall rule's 3h window is unaffected.
+			// that, so the stall rule's 6h window is unaffected.
 			break
 		}
 		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, sourceRefs.Source, sourceRefs.Refs)

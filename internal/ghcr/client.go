@@ -117,6 +117,8 @@ func (p *pacer) wait(ctx context.Context) error {
 // carries ctx.Err() when a shutdown interrupted the scrape; on any error the
 // entry is zero and the caller leaves the package out of results.
 func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoRef) (registry.Entry, error) {
+	// GitHub redirects an organization's /users/ URL to the repo-scoped package page
+	// through the allowlisted policy, so this fetch needs no owner kind.
 	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", ref.Owner, url.PathEscape(ref.Repo))
 	html, err := c.fetchHTML(ctx, p, pageURL)
 	if err != nil {

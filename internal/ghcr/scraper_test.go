@@ -323,6 +323,20 @@ func TestFetchHTML_SendsRequestHeaders(t *testing.T) {
 	}
 }
 
+func TestFetchHTML_BodyPastCapIsFormatChange(t *testing.T) {
+	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), ghcrBodyCap+1))
+	}), slog.New(slog.DiscardHandler))
+
+	html, err := c.fetchHTML(t.Context(), &pacer{}, packagePageURL)
+	if !errors.Is(err, errHTMLFormatChanged) {
+		t.Errorf("fetchHTML(body past ghcrBodyCap) error = %v, want errHTMLFormatChanged", err)
+	}
+	if html != "" {
+		t.Errorf("fetchHTML(body past ghcrBodyCap) = %d bytes, want 0", len(html))
+	}
+}
+
 // TestCollect_ExplicitMock exercises *Client.Collect against a mock
 // server for a single explicit ref, asserting the returned entry's
 // owner/repo pair and scraped download count.
