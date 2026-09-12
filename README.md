@@ -94,8 +94,6 @@ Docker healthcheck runs the `health` subcommand against the marker file, not thi
 Prometheus text format metrics. Includes:
 
 - `registrystats_image_pulls_total{registry,owner,repo}`: current pull count per image
-- `registrystats_http_requests_total{method,path,status}`: HTTP request counters
-- `registrystats_http_request_duration_seconds`: request latency histogram
 - `registrystats_collects_total{source}`: collect runs per source, successful and failed
 - `registrystats_collect_errors_total{source}`: failed collects per source
 - `registrystats_collect_duration_seconds`: collect cycle duration histogram
@@ -137,18 +135,19 @@ ruler: neither ruler parses the other's expressions.
 | --- | --- | --- |
 | `RegistryStatsTargetDown` | `up{job="registry-stats"} == 0` for 15m: the exporter is not being scraped | warning |
 | `RegistryStatsTargetAbsent` | `absent(up{job="registry-stats"})` for 15m: the exporter is not a configured scrape target at all | warning |
-| `RegistryStatsCollectStalled` | no collect cycle has completed in 3h, while the exporter is up and serving its last values | warning |
+| `RegistryStatsCollectStalled` | no collect cycle has completed in 6h (one poll interval plus the five-hour cycle allowance), while the exporter is up and serving its last values | warning |
 | `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
 | `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, or none was usable at all, or `POLL_INTERVAL_HOURS` was corrected: malformed, negative, or above the 8,760-hour cap | warning |
 | `RegistryStatsError` | the container logged an `ERROR` - a fetch or parse failure, a changed GHCR page, an unusable configuration, or a 5xx from its own endpoint other than the readiness gate's startup 503 | warning |
 | `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a rate limit, or a minority of GHCR packages | warning |
 
-`RegistryStatsCollectStalled` measures absence over 15m under a 3h `for:`,
-rather than absence over 3h directly. A counter that has just started carries
+`RegistryStatsCollectStalled` measures absence over 15m under a 6h `for:`,
+rather than absence over 6h directly. A counter that has just started carries
 two samples at the same value, which the direct form reads as a stall, so it
-fires about 30m after every container start. Set the `for:` window to about
-three `POLL_INTERVAL_HOURS`, and drop the rule in one-shot mode
+fires about 30m after every container start. Set the `for:` window to
+`POLL_INTERVAL_HOURS` plus the five-hour cycle allowance the liveness deadline
+uses (see Healthcheck), and drop the rule in one-shot mode
 (`POLL_INTERVAL_HOURS=0`), where a single cycle is the point.
 
 `RegistryStatsCollectionIncomplete` covers incomplete output that the source
@@ -171,7 +170,7 @@ uses.
 
 ## Healthcheck
 
-The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, so the first two health lines of every boot are `WARN health state changed healthy=false` followed by `INFO health state changed healthy=true`; the WARN is routine start-up, not a failed cycle, even though a cycle that collects nothing logs the same record. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within one poll interval plus the maximum cycle allowance (five hours, so six hours at the default hourly interval). Under the example compose (`restart: unless-stopped`), that marks the container unhealthy without restarting it because Docker restart policies act on process exit, not health status. Configure your monitoring to act on the signal. An orchestrator that replaces unhealthy tasks, such as Swarm or a Kubernetes liveness probe, restarts the container. A cycle that exceeds that budget trips the same deadline. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, silently; `WARN health state changed healthy=false` therefore means a collection cycle produced no data, not routine startup. In scheduled mode the probe also enforces a freshness deadline: it reports unhealthy when no data-producing cycle has completed within one poll interval plus the maximum cycle allowance (five hours, so six hours at the default hourly interval). Under the example compose (`restart: unless-stopped`), that marks the container unhealthy without restarting it because Docker restart policies act on process exit, not health status. Configure your monitoring to act on the signal. An orchestrator that replaces unhealthy tasks, such as Swarm or a Kubernetes liveness probe, restarts the container. A cycle that exceeds that budget trips the same deadline. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
 
 ## Security
 

@@ -73,7 +73,7 @@ func run() error {
 	defer stop()
 
 	// A marker inherited from a prior process must not report healthy before this one binds.
-	marker.Set(false)
+	marker.Cleanup()
 	defer marker.Cleanup()
 
 	var ready webhttp.Ready
@@ -96,9 +96,10 @@ func run() error {
 
 	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
 	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
-	sources := []collectpkg.Source{dh, gh}
-
-	active, sourceIDs := activeSources(&cfg, sources)
+	active, sourceIDs := activeSources([]collectpkg.SourceRefs{
+		{Source: dh, Refs: cfg.DockerHubRepos},
+		{Source: gh, Refs: cfg.GHCRRepos},
+	})
 	m.MintCollectSources(sourceIDs)
 	// Healthy before the first cycle: a first collect over two live
 	// registries can outlast the image's 15s HEALTHCHECK start-period, and
@@ -133,7 +134,6 @@ func run() error {
 	}
 
 	return webhttp.Run(ctx, srv, ln, waitForCollect,
-		webhttp.WithShutdownGrace(10*time.Second),
 		webhttp.WithPreDrain(preDrain),
 		webhttp.WithServeExit(serveExit))
 }
@@ -185,14 +185,13 @@ type publication struct {
 	mu     sync.Mutex
 }
 
-func (p *publication) publish(ctx context.Context, images []obs.ImageMetric, elapsed time.Duration) {
+func (p *publication) publish(ctx context.Context, images []obs.ImageMetric) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// SetImage deletes labels absent from a pass, so a cancelled cycle publishes nothing.
 	if ctx.Err() != nil {
 		return
 	}
-	p.m.ObserveCollectDuration(elapsed)
 	p.m.SetImage(images)
 	ok := len(images) > 0
 	p.marker.Set(ok)
@@ -209,24 +208,17 @@ func (p *publication) drain() {
 
 // runCollect executes one cycle and publishes its outcome.
 func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication) {
-	start := time.Now()
 	images := collectpkg.Run(ctx, collectpkg.Options{
 		Metrics: pub.m,
 		Sources: sources,
 		Logger:  slog.Default(),
 	})
-	pub.publish(ctx, images, time.Since(start))
+	pub.publish(ctx, images)
 }
 
-func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
-	switch source {
-	case registry.DockerHub:
-		return cfg.DockerHubRepos
-	case registry.GHCR:
-		return cfg.GHCRRepos
-	}
-	return nil
-}
+// requestTimeout bounds each attempt made by the shared outbound
+// client, which both registry readers use.
+const requestTimeout = 30 * time.Second
 
 // registryClient is the one outbound client both registry readers share.
 // CheckRedirect is the SSRF allowlist: without it net/http follows up to
@@ -234,24 +226,23 @@ func refsFor(cfg *config.Config, source registry.ID) []registry.RepoRef {
 // page controls.
 func registryClient() *http.Client {
 	return &http.Client{
-		Timeout:       ghcr.RequestTimeout,
+		Timeout:       requestTimeout,
 		CheckRedirect: httpx.DockerGitHubRedirectPolicy,
 	}
 }
 
-// activeSources returns each source with its configured refs and its metric ID.
-// One pass keeps invocation and pre-minting on the same selected set.
-func activeSources(cfg *config.Config, sources []collectpkg.Source) (active []collectpkg.SourceRefs, ids []registry.ID) {
-	active = make([]collectpkg.SourceRefs, 0, len(sources))
-	ids = make([]registry.ID, 0, len(sources))
-	for _, src := range sources {
-		source := src.Source()
-		refs := refsFor(cfg, source)
-		if len(refs) == 0 {
+// activeSources drops the candidates with no configured refs and returns the
+// survivors with their metric IDs. One pass keeps invocation and pre-minting on
+// the same selected set.
+func activeSources(candidates []collectpkg.SourceRefs) (active []collectpkg.SourceRefs, ids []registry.ID) {
+	active = make([]collectpkg.SourceRefs, 0, len(candidates))
+	ids = make([]registry.ID, 0, len(candidates))
+	for _, candidate := range candidates {
+		if len(candidate.Refs) == 0 {
 			continue
 		}
-		active = append(active, collectpkg.SourceRefs{Source: src, Refs: refs})
-		ids = append(ids, source)
+		active = append(active, candidate)
+		ids = append(ids, candidate.Source.Source())
 	}
 	return active, ids
 }

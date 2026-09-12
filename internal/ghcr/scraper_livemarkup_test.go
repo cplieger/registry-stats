@@ -15,7 +15,7 @@ import (
 // markup GitHub never serves?
 //
 // These fixtures are real responses, captured 2026-09-09 from the two URLs
-// listingURL and scrapeDownloads build:
+// listingURL and scrapePackage build:
 //
 //	https://github.com/cplieger?tab=packages&ecosystem=container&page=1
 //	https://github.com/cplieger/registry-stats/pkgs/container/registry-stats
@@ -50,7 +50,7 @@ func liveMarkup(t *testing.T, name string) string {
 
 // TestParsePackageList_ReadsTheServedListing pins the listing reader against GitHub's
 // own bytes. The counts are what the page states about itself, so a change here is
-// either a real markup change upstream or a regression in the walk.
+// either a real markup change upstream or a regression in the reader.
 func TestParsePackageList_ReadsTheServedListing(t *testing.T) {
 	html := liveMarkup(t, "live-listing")
 
@@ -93,27 +93,17 @@ func TestParseDownloads_ReadsTheServedPackagePage(t *testing.T) {
 	}
 }
 
-// TestServedMarkupCarriesNoExoticConstructs is the other half, and the half no
-// ordinary test can state: it asserts what GitHub does NOT serve. Every construct
-// below has dedicated handling in this package, and none of it appears in a
-// quarter-megabyte of real markup from either page.
-//
-// This is not a request to delete that handling on sight — a reader whose whole job is
-// to break loudly on a markup change may legitimately recognise a construct it has
-// never seen. It is here so the next reader can tell the two apart with a command
-// instead of an argument, and so a claim that some arm is load-bearing has to name the
-// input that reaches it.
 func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 	listing, pkg := liveMarkup(t, "live-listing"), liveMarkup(t, "live-package")
 	for _, tc := range []struct {
 		construct string
 		handledBy string
 	}{
-		{"--!>", "commentEnd's bang-close arm"},
-		{"<!-->", "commentEnd's abrupt-close arm"},
-		{"<!--->", "commentEnd's abrupt-close arm"},
-		{"<![CDATA[", "nextStartTag's declaration skip"},
-		{"<?", "nextStartTag's processing-instruction skip"},
+		{"--!>", "unsupported comment-close markup"},
+		{"<!-->", "unsupported comment-close markup"},
+		{"<!--->", "unsupported comment-close markup"},
+		{"<![CDATA[", "unsupported CDATA markup"},
+		{"<?", "unsupported processing-instruction markup"},
 	} {
 		t.Run(tc.construct, func(t *testing.T) {
 			for page, html := range map[string]string{"listing": listing, "package": pkg} {
@@ -152,7 +142,7 @@ func TestServedMarkupRawTextBodiesCarryNoLessThanBytes(t *testing.T) {
 				}
 				bodyEnd += bodyStart
 				if strings.Contains(html[bodyStart:bodyEnd], "<") {
-					t.Errorf("served %s page <%s> body contains '<'; this assertion holds the listing arm only, where parsePackageList cannot emit a span without '<'. TestParseDownloads_ReadsTheServedPackagePage pins the package-page arm because markerText gets '>' and '</' from a raw-text element's own tags", page, element)
+					t.Errorf("served %s page <%s> body contains '<'; this assertion records the served shape, and TestParsePackageList_ReadsTheServedListing holds the listing behavior when it changes", page, element)
 				}
 				cursor = bodyEnd + len(closeToken)
 			}

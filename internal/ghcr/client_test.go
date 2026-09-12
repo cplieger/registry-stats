@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // capturingLogger returns a logger that records every record (Debug and
@@ -36,6 +35,10 @@ func noMarkerServer(t *testing.T) *httptest.Server {
 // actually used: a failing scrape's WARN must land in the supplied
 // logger's buffer (a fallback-to-default would leave it empty).
 func TestNewClient_customLogger_isUsed(t *testing.T) {
+	synctest.Test(t, testNewClientCustomLoggerIsUsed)
+}
+
+func testNewClientCustomLoggerIsUsed(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -46,7 +49,7 @@ func TestNewClient_customLogger_isUsed(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(oldDefault) })
 
 	var injectedBuf bytes.Buffer
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&injectedBuf)))
+	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&injectedBuf)})
 	_ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
 	if logs := defaultBuf.String(); logs != "" {
@@ -68,7 +71,7 @@ func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
 		_, _ = w.Write([]byte(downloadsHTML(invalidCount)))
 	}))
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&buf)})
 	_ = c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}})
 
 	logs := buf.String()
@@ -81,11 +84,10 @@ func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
 }
 
 // TestClient_Collect_pacesAtProductionDefaults drives Collect with the
-// zero-value pacing fields against an in-memory test server inside a
-// synctest bubble, so the real DefaultMinPacing / DefaultPacingJitter path
-// runs on the synthetic clock rather than costing real wall time per
-// package. It pins that both zero-value fallbacks apply, the first request
-// issues without advancing the clock, and every later interval lands in
+// production pacing constants against an in-memory test server inside a
+// synctest bubble, so the real delays run on the synthetic clock rather than
+// costing wall time per package. It pins that the first request issues without
+// advancing the clock, and every later interval lands in
 // [DefaultMinPacing, DefaultMinPacing+DefaultPacingJitter).
 //
 // httptest.NewTestServer's in-memory network is synctest-compatible and
@@ -113,8 +115,7 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 			}
 		}))
 
-		// Pacing fields left at zero on purpose: they are the subject.
-		c := NewClient(srv.Client(), Options{Logger: testsupport.QuietLogger()})
+		c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 
 		start := time.Now()
@@ -145,12 +146,16 @@ func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 }
 
 func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
+	synctest.Test(t, testCollectNoScrapesNoMajorityDrift)
+}
+
+func testCollectNoScrapesNoMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>no package links</html>`))
 	}))
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&buf)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	collection := c.Collect(t.Context(), refs)
 	attempted := collection.Attempted
@@ -164,8 +169,12 @@ func TestCollect_noScrapes_noMajorityDrift(t *testing.T) {
 }
 
 func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
+	synctest.Test(t, testCollectAllParseFailuresLogsMajorityDrift)
+}
+
+func testCollectAllParseFailuresLogsMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
-	c := NewClient(noMarkerServer(t).Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(noMarkerServer(t).Client(), Options{Logger: capturingLogger(&buf)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 	collection := c.Collect(t.Context(), refs)
 	attempted := collection.Attempted
@@ -183,6 +192,10 @@ func TestCollect_allParseFailures_logsMajorityDrift(t *testing.T) {
 }
 
 func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
+	synctest.Test(t, testCollectHalfParseFailuresNoMajorityDrift)
+}
+
+func testCollectHalfParseFailuresNoMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/good", func(w http.ResponseWriter, _ *http.Request) {
@@ -193,7 +206,7 @@ func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 	})
 	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&buf)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "good"}, {Owner: "owner", Repo: "bad"}}
 	collection := c.Collect(t.Context(), refs)
 	attempted := collection.Attempted
@@ -209,6 +222,10 @@ func TestCollect_halfParseFailures_noMajorityDrift(t *testing.T) {
 // TestCollect_whollyFailedListing verifies that a wildcard listing failure
 // is reported independently of a successful explicit scrape.
 func TestCollect_whollyFailedListing(t *testing.T) {
+	synctest.Test(t, testCollectWhollyFailedListing)
+}
+
+func testCollectWhollyFailedListing(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -218,7 +235,7 @@ func TestCollect_whollyFailedListing(t *testing.T) {
 	})
 	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
 	collection := c.Collect(t.Context(), refs)
 	entries := collection.Entries
@@ -233,6 +250,10 @@ func TestCollect_whollyFailedListing(t *testing.T) {
 }
 
 func TestCollect_EarlierWildcardFailureSurvivesLaterSuccess(t *testing.T) {
+	synctest.Test(t, testCollectEarlierWildcardFailureSurvivesLaterSuccess)
+}
+
+func testCollectEarlierWildcardFailureSurvivesLaterSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /orgs/bad/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -254,7 +275,7 @@ func TestCollect_EarlierWildcardFailureSurvivesLaterSuccess(t *testing.T) {
 		_, _ = w.Write([]byte(downloadsHTML("7")))
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 
 	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "bad", Repo: "*"}, {Owner: "good", Repo: "*"}})
 	if !collection.ListingFailed {
@@ -271,6 +292,10 @@ func TestCollect_EarlierWildcardFailureSurvivesLaterSuccess(t *testing.T) {
 // TestCollect_packageFailuresDoNotSetListingFailed verifies that failures
 // scraping explicit packages do not masquerade as a wildcard-listing outage.
 func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
+	synctest.Test(t, testCollectPackageFailuresDoNotSetListingFailed)
+}
+
+func testCollectPackageFailuresDoNotSetListingFailed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/ok", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("3")))
@@ -280,7 +305,7 @@ func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
 	})
 	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "ok"}, {Owner: "owner", Repo: "fail"}}
 	collection := c.Collect(t.Context(), refs)
 	fetched := collection.Fetched
@@ -296,6 +321,10 @@ func TestCollect_packageFailuresDoNotSetListingFailed(t *testing.T) {
 }
 
 func TestCollect_clientTimeoutDoesNotSetListingFailed(t *testing.T) {
+	synctest.Test(t, testCollectClientTimeoutDoesNotSetListingFailed)
+}
+
+func testCollectClientTimeoutDoesNotSetListingFailed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/slow", func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
@@ -307,7 +336,7 @@ func TestCollect_clientTimeoutDoesNotSetListingFailed(t *testing.T) {
 
 	client := srv.Client()
 	client.Timeout = 250 * time.Millisecond
-	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(client, Options{Logger: slog.New(slog.DiscardHandler)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "slow"}, {Owner: "owner", Repo: "fast"}}
 	collection := c.Collect(t.Context(), refs)
 	entries := collection.Entries
@@ -330,6 +359,10 @@ func TestCollect_clientTimeoutDoesNotSetListingFailed(t *testing.T) {
 // counting as a package scrape failure. The successful explicit scrape keeps
 // the per-package majority ERROR silent.
 func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *testing.T) {
+	synctest.Test(t, testCollectListingParseFailureWithSuccessfulScrapeNoMajorityDrift)
+}
+
+func testCollectListingParseFailureWithSuccessfulScrapeNoMajorityDrift(t *testing.T) {
 	var buf bytes.Buffer
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
@@ -340,7 +373,7 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 	})
 	srv := httptest.NewTestServer(t, mux)
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), capturingLogger(&buf)))
+	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&buf)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "*"}, {Owner: "owner", Repo: "pkg1"}}
 	collection := c.Collect(t.Context(), refs)
 	entries := collection.Entries
@@ -368,12 +401,11 @@ func TestCollect_listingParseFailureWithSuccessfulScrape_noMajorityDrift(t *test
 // TestCollect_ContextCancelledDuringPacing pins Collect's graceful-shutdown
 // path: an already-cancelled ctx reaches the first scrape and returns through
 // the cancelled-result arm with the results gathered so far, the attempted
-// count and the cycle verdict, rather than blocking or panicking. MinPacing is
-// an hour so an accidental leading wait would hang; no HTTP request completes
-// because the cancelled context reaches the transport immediately.
+// count and the cycle verdict, rather than blocking or panicking. No HTTP
+// request completes because the cancelled context reaches the transport
+// immediately.
 func TestCollect_ContextCancelledDuringPacing(t *testing.T) {
-	c := NewClient(http.DefaultClient,
-		Options{MinPacing: time.Hour, PacingJitter: time.Nanosecond, RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(http.DefaultClient, Options{Logger: slog.New(slog.DiscardHandler)})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -409,14 +441,9 @@ func TestCollect_cancelledInPacingWait_isNotAFailure(t *testing.T) {
 			_, _ = w.Write([]byte(downloadsHTML("5")))
 		}))
 
-		c := NewClient(srv.Client(), Options{
-			MinPacing:    time.Hour,
-			PacingJitter: time.Nanosecond,
-			RetryOpts:    shortRetry(),
-			Logger:       capturingLogger(&buf),
-		})
+		c := NewClient(srv.Client(), Options{Logger: capturingLogger(&buf)})
 
-		time.AfterFunc(time.Minute, cancel)
+		time.AfterFunc(time.Second, cancel)
 		refs := []registry.RepoRef{{Owner: "owner", Repo: "pkg1"}, {Owner: "owner", Repo: "pkg2"}}
 		collection := c.Collect(ctx, refs)
 		entries := collection.Entries

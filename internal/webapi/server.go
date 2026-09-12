@@ -41,7 +41,6 @@ func New(d Deps) *http.Server {
 		webhttp.Logging(
 			webhttp.WithLogger(d.Logger),
 			webhttp.ProbeLogLevel("/api/health", "/metrics"),
-			webhttp.WithRecordRouteMetric(d.Metrics.RecordHTTP),
 		),
 		webhttp.Recoverer(webhttp.WithRecoverLogger(d.Logger)),
 		webhttp.SecurityHeaders(),

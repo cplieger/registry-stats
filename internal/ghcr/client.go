@@ -3,46 +3,39 @@ package ghcr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-// Options configures GHCR-specific scraper policy. Zero pacing fields select
-// DefaultMinPacing and DefaultPacingJitter.
+// Options configures NewClient beyond the required HTTP client.
 type Options struct {
 	// Logger receives the client's logs; required.
 	Logger *slog.Logger
-	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx defaults.
-	RetryOpts []httpx.GetOption
-	// MinPacing and PacingJitter space out consecutive GHCR requests;
-	// zero selects DefaultMinPacing / DefaultPacingJitter.
-	MinPacing    time.Duration
-	PacingJitter time.Duration
 }
 
 // DefaultMinPacing and DefaultPacingJitter are the production pacing
-// values applied when an Options field is zero. Each paced interval is
-// DefaultMinPacing plus a uniformly distributed jitter in
-// [0, DefaultPacingJitter).
+// values. Each paced interval is DefaultMinPacing plus a uniformly
+// distributed jitter in [0, DefaultPacingJitter).
 const (
 	DefaultMinPacing    = 2 * time.Second
 	DefaultPacingJitter = 3 * time.Second
 )
 
-// RequestTimeout bounds each attempt made by the shared production client.
-const RequestTimeout = 30 * time.Second
-
 // MaximumCycleDuration is the longest one collection cycle may take before the
 // liveness probe stops believing the loop is working. It is a stated allowance,
-// not a computed supremum: one wildcard owner at the documented ceiling (fifty
-// listing pages, ~1,500 packages, one paced fetch each) walks in about 2h10m at
-// the 5s pacing maximum, and a cycle needing many hours beyond that is wedged
-// rather than slow.
+// not a computed supremum, and sits below the permitted walk: one paced fetch
+// per package at the 5s maximum exhausts five hours at about 3,600 packages,
+// while maxListingPages times maxListingCandidates permits 5,000. The allowance
+// instead follows GitHub's current thirty links per page, about 1,500 packages
+// and 2h10m for a capped owner, because a cycle needing many hours beyond that
+// is wedged rather than slow.
 const MaximumCycleDuration = 5 * time.Hour
 
 // Client is the GitHub Container Registry source (it satisfies
@@ -67,21 +60,18 @@ func (c *Client) Source() registry.ID { return registry.GHCR }
 // absent rather than published as zero. A package interrupted by shutdown is
 // neither attempted nor fetched.
 func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection {
-	p := &pacer{delay: c.pacingDelay}
+	p := &pacer{}
 	var pkgParseFailures int
 	packages, listingFailed := c.buildPackageList(ctx, p, refs)
 	var entries []registry.Entry
 	var attempted int
+	var cancelled bool
 
 	for _, ref := range packages {
 		stat, err := c.scrapePackage(ctx, p, ref)
 		if err != nil && ctx.Err() != nil {
-			return registry.Collection{
-				Entries:       entries,
-				Fetched:       len(entries),
-				Attempted:     attempted,
-				ListingFailed: listingFailed,
-			}
+			cancelled = true
+			break
 		}
 
 		attempted++
@@ -101,7 +91,7 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.
 
 	// A majority rather than all, so alerting can fire before the registry
 	// goes fully dark.
-	if pkgParseFailures*2 > attempted {
+	if !cancelled && pkgParseFailures*2 > attempted {
 		c.opts.Logger.Error("ghcr HTML format may be changing, majority of scrapes hit format errors",
 			"total", attempted, "parse_failures", pkgParseFailures,
 			"report_at", "https://github.com/cplieger/registry-stats/issues")
@@ -115,38 +105,21 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.
 	}
 }
 
-// pacer spaces consecutive GHCR requests inside one Collect. The first
-// wait of a sequence returns immediately: pacing is a property of the
-// sequence, and a fresh cycle has no predecessor to space against.
-// One Collect is sequential, so the started bit needs no lock.
-type pacer struct {
-	delay   func() time.Duration
-	started bool
-}
+// pacer spaces consecutive GHCR requests inside one Collect by
+// DefaultMinPacing plus uniform jitter in [0, DefaultPacingJitter).
+// The first wait of a sequence returns immediately: pacing is a
+// property of the sequence, and a fresh cycle has no predecessor to
+// space against. One Collect is sequential, so the started bit needs
+// no lock, and the zero value paces correctly.
+type pacer struct{ started bool }
 
 func (p *pacer) wait(ctx context.Context) error {
 	if !p.started {
 		p.started = true
 		return nil
 	}
-	return httpx.SleepCtx(ctx, p.delay())
-}
-
-// pacingDelay returns the inter-request delay for GHCR requests: the
-// configured minimum (DefaultMinPacing when unset) plus uniform jitter in
-// [0, jitter) (DefaultPacingJitter when unset). Both defaults are positive,
-// so rand.N always receives a positive argument.
-func (c *Client) pacingDelay() time.Duration {
-	pacingMin := c.opts.MinPacing
-	if pacingMin <= 0 {
-		pacingMin = DefaultMinPacing
-	}
-	pacingJitter := c.opts.PacingJitter
-	if pacingJitter <= 0 {
-		pacingJitter = DefaultPacingJitter
-	}
-	jitter := rand.N(pacingJitter) //nolint:gosec // G404: jitter, not crypto
-	return pacingMin + jitter
+	//nolint:gosec // G404: jitter, not crypto
+	return httpx.SleepCtx(ctx, DefaultMinPacing+rand.N(DefaultPacingJitter))
 }
 
 // scrapePackage scrapes one package's download count. The caller reports and
@@ -154,7 +127,12 @@ func (c *Client) pacingDelay() time.Duration {
 // carries ctx.Err() when a shutdown interrupted the scrape; on any error the
 // entry is zero and the caller leaves the package out of results.
 func (c *Client) scrapePackage(ctx context.Context, p *pacer, ref registry.RepoRef) (registry.Entry, error) {
-	downloads, err := c.scrapeDownloads(ctx, p, ref)
+	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", ref.Owner, url.PathEscape(ref.Repo))
+	html, err := c.fetchHTML(ctx, p, pageURL)
+	if err != nil {
+		return registry.Entry{}, err
+	}
+	downloads, err := parseDownloads(html)
 	if err != nil {
 		return registry.Entry{}, err
 	}

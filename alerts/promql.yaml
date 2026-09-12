@@ -57,31 +57,46 @@ groups:
             Kubernetes pod or ServiceMonitor. Every other PromQL rule here is
             blind.
       # Detection range SHORT, `for:` long, and that order is load-bearing.
-      # The intuitive form (increase(...[3h]) == 0 under a short `for:`) reads
+      # The intuitive form (increase(...[6h]) == 0 under a short `for:`) reads
       # true as soon as a freshly started counter has two samples at the same
       # value, so it fires about 30m after every container start and clears at
       # the first scheduled cycle. Measuring absence over 15m and requiring it
-      # to hold for 3h fires 3h after the LAST completed cycle instead, and a
+      # to hold for 6h fires 6h after the LAST completed cycle instead, and a
       # restart resets the pending timer at its own startup cycle.
       #
-      # Set `for:` to about three POLL_INTERVAL_HOURS. In one-shot mode
-      # (POLL_INTERVAL_HOURS=0) the counter advances exactly once by design, so
-      # drop this rule: there is no recurring cycle to miss.
+      # Set `for:` to POLL_INTERVAL_HOURS plus the per-cycle allowance the
+      # container's own liveness probe arms (a stated five hours,
+      # ghcr.MaximumCycleDuration), so 6h at the default hourly interval, and
+      # see the README's Healthcheck paragraph for the premise. A single
+      # wildcard owner at the documented fifty-page ceiling walks about 2h10m
+      # with registrystats_collects_total flat throughout, so a window sized as
+      # a multiple of the schedule pages while the cycle is still working. Two
+      # consequences, both deliberate: a genuinely wedged loop is reported 6h
+      # after the last completed source rather than 3h, and because this window
+      # now equals the liveness deadline, a deployment whose orchestrator
+      # replaces unhealthy tasks restarts the container at that deadline. The
+      # restart re-advances the counter and clears this alert while it is still
+      # pending, so there the probe owns the wedge. Under the example compose
+      # (`restart: unless-stopped`) nothing restarts and this rule is the only
+      # signal.
+      #
+      # In one-shot mode (POLL_INTERVAL_HOURS=0) the counter advances exactly
+      # once by design, so drop this rule: there is no recurring cycle to miss.
       - alert: RegistryStatsCollectStalled
         expr: sum by (job, instance) (increase(registrystats_collects_total[15m])) == 0
-        for: 3h
+        for: 6h
         labels:
           severity: warning
         annotations:
-          summary: "registry-stats has not completed a collect cycle in 3h"
+          summary: "registry-stats has not completed a collect cycle in 6h"
           description: >
-            registrystats_collects_total has not advanced for 3h while the
-            exporter is up (the default POLL_INTERVAL_HOURS is 1). The exporter
-            keeps serving its last values but no longer polls Docker Hub or
-            GHCR. Check `docker logs registry-stats` for scrape or listing
-            errors. This rule cannot fire when no repos are configured at all:
-            the counter has no series then, so RegistryStatsConfigRejected
-            owns that case.
+            registrystats_collects_total has not advanced for 6h while the
+            exporter is up (the default POLL_INTERVAL_HOURS is 1), and one
+            cycle is allowed five hours. The exporter keeps serving its last
+            values but no longer polls Docker Hub or GHCR. Check `docker logs
+            registry-stats` for scrape or listing errors. This rule cannot fire
+            when no repos are configured at all: the counter has no series
+            then, so RegistryStatsConfigRejected owns that case.
       # The app's own per-source verdict. registry-stats increments
       # registrystats_collect_errors_total once for a cycle in which a wildcard
       # owner listing wholly fails or more than half of the source's per-image

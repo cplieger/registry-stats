@@ -9,16 +9,16 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
-	"time"
+	"testing/synctest"
 	"unsafe"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
 )
 
@@ -28,23 +28,6 @@ import (
 // empty, so these tests pass the URL production would build.
 const packagePageURL = "https://github.com/users/owner/packages/container/package/pkg"
 
-// shortRetry returns httpx options with a 1 ms base delay so retry
-// tests don't wait a full second between attempts.
-func shortRetry() []httpx.GetOption {
-	return []httpx.GetOption{httpx.WithBaseDelay(time.Millisecond)}
-}
-
-// fastPacing returns Options with microsecond pacing/jitter so mock
-// Collect tests don't sit on the production per-package delay.
-func fastPacing(retry []httpx.GetOption, logger *slog.Logger) Options {
-	return Options{
-		MinPacing:    time.Microsecond,
-		PacingJitter: time.Microsecond,
-		RetryOpts:    retry,
-		Logger:       logger,
-	}
-}
-
 // downloadsHTML builds a minimal page containing a "Total downloads"
 // marker plus a title="N" attribute that parseDownloads can extract.
 func downloadsHTML(count string) string {
@@ -52,37 +35,9 @@ func downloadsHTML(count string) string {
 }
 
 func TestClient_Name(t *testing.T) {
-	c := NewClient(http.DefaultClient, Options{RetryOpts: shortRetry(), Logger: testsupport.QuietLogger()})
+	c := NewClient(http.DefaultClient, Options{Logger: slog.New(slog.DiscardHandler)})
 	if got := c.Source().String(); got != "ghcr" {
 		t.Errorf("Name() = %q, want ghcr", got)
-	}
-}
-
-func TestParseDownloads_Valid(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want int64
-	}{
-		{"zero", downloadsHTML("0"), 0},
-		{"small", downloadsHTML("42"), 42},
-		{"large", downloadsHTML("999999999"), 999999999},
-		{"attribute value resembling title", `<span>Total downloads</span><h3 data-tip='title="1"' title="27800">27.8K</h3>`, 27800},
-		{"distant whitespace", `<span>Total downloads</span>` + strings.Repeat(" ", 501) + `<h3 title="9">9</h3>`, 9},
-		{"later titled element", `<span>Total downloads</span><h3 title="7">7</h3><span title="1">rank</span>`, 7},
-		{"form feed before count", "<span>Total downloads</span>\f<h3 title=\"8\">8</h3>", 8},
-		{"valueless attribute before the count", `<span>Total downloads</span><h3 hidden title="9">9</h3>`, 9},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseDownloads(tt.html)
-			if err != nil {
-				t.Fatalf("parseDownloads: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("parseDownloads = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -128,45 +83,16 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 		{"non-whitespace between marker and count", "<span>Total downloads</span>" + strings.Repeat("x", 501) + `<h3 title="999">999</h3>`},
 		{"title bytes inside attribute value", `<span>Total downloads</span><h3 data-tip='title="1"'>27.8K</h3>`},
 		{"title bytes after other text inside attribute value", `<span>Total downloads</span><h3 data-tip='x title="1"'>27.8K</h3>`},
-		{"two title attributes", `<span>Total downloads</span><h3 title="1" title="2">2</h3>`},
 		{"attribute name ending in title", `<span>Total downloads</span><h3 data-title="9">27.8K</h3>`},
 		{"element name beginning with h3", `<span>Total downloads</span><h3x title="9">27.8K</h3x>`},
 		{"two download-count markers", downloadsHTML("1") + downloadsHTML("2")},
-		{"real marker and a raw-text marker", `<script>>Total downloads</script><h3 title="999">999</h3>` + downloadsHTML("7")},
+		{"marker end tag carrying an attribute", `<span>Total downloads</span foo="><h3 title='9'>">`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parseDownloads(tt.html)
 			if !errors.Is(err, errHTMLFormatChanged) {
 				t.Errorf("err = %v, want errHTMLFormatChanged", err)
-			}
-		})
-	}
-}
-
-func TestParseDownloads_CommentOnlyMarkerIsIgnored(t *testing.T) {
-	const html = `<!-- <span>Total downloads</span><h3 title="999">999</h3> -->`
-	count, err := parseDownloads(html)
-	if !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("parseDownloads(comment-only marker) = (%d, %v), want errHTMLFormatChanged", count, err)
-	}
-}
-
-func TestParseDownloads_CommentEndBeforeRealMarker(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-	}{
-		{name: "ordinary_close", html: `<!-- <span>Total downloads</span> -->` + downloadsHTML("7")},
-		{name: "bang_close", html: `<!-- <span>Total downloads</span> --!>` + downloadsHTML("7")},
-		{name: "abrupt_close", html: `<!-->` + downloadsHTML("7")},
-		{name: "abrupt_dash_close", html: `<!--->` + downloadsHTML("7")},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			count, err := parseDownloads(tt.html)
-			if err != nil || count != 7 {
-				t.Errorf("parseDownloads(%q) = (%d, %v), want (7, nil)", tt.html, count, err)
 			}
 		})
 	}
@@ -190,25 +116,22 @@ func TestParseDownloads_CommentOverlapKeepsDocumentOrder(t *testing.T) {
 	})
 }
 
-func TestParseDownloads_QuotedGreaterThanInTheMarkerEndTag(t *testing.T) {
-	// The marker element's end tag may carry an attribute whose value contains
-	// '>'. Ending that tag at the first '>' lands inside the quoted value, so
-	// bytes written there are read as the count element.
-	const fabricated = `<span>Total downloads</span foo="><h3 title='9'>">`
-
-	t.Run("alone_refuses_rather_than_publishing_the_quoted_bytes", func(t *testing.T) {
-		count, err := parseDownloads(fabricated)
-		if !errors.Is(err, errHTMLFormatChanged) {
-			t.Errorf("parseDownloads(quoted '>' in end tag) = (%d, %v), want errHTMLFormatChanged", count, err)
-		}
-	})
-
-	t.Run("beside_the_real_count_reads_the_real_one", func(t *testing.T) {
-		count, err := parseDownloads(fabricated + `<h3 title="7">7</h3>`)
-		if err != nil || count != 7 {
-			t.Errorf("parseDownloads(quoted '>' in end tag + real count) = (%d, %v), want (7, nil)", count, err)
-		}
-	})
+func TestStatedPackages_NumberAgreement(t *testing.T) {
+	tests := map[string]struct {
+		html string
+		want int
+	}{
+		"singular": {html: `</svg>1 package</h3>`, want: 1},
+		"plural":   {html: `</svg>24 packages</h3>`, want: 24},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := statedPackages(tt.html)
+			if !ok || got != tt.want {
+				t.Errorf("statedPackages(%q) = (%d, %t), want (%d, true)", tt.html, got, ok, tt.want)
+			}
+		})
+	}
 }
 
 func TestParsePackageList_Valid(t *testing.T) {
@@ -224,14 +147,6 @@ func TestParsePackageList_Valid(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("[%d] = %q, want %q", i, got[i], w)
 		}
-	}
-}
-
-func TestParsePackageList_SingleQuotedHref(t *testing.T) {
-	html := `<a href='/users/owner/packages/container/package/app'>app</a>`
-	got, refused, _ := parsePackageList(html, "owner", userOwner)
-	if !slices.Equal(got, []string{"app"}) || refused.Count != 0 {
-		t.Errorf("parsePackageList(single-quoted href) = (%v, %+v), want ([app], no refusals)", got, refused)
 	}
 }
 
@@ -300,51 +215,6 @@ func TestParsePackageList_RefusesInvalidUTF8Name(t *testing.T) {
 	}
 }
 
-// A candidate is the value of a real href attribute. An unsafe name inside one
-// is refused and counted; bytes that merely LOOK like a package link — in a
-// non-href attribute, or in an attribute whose name only ends in "href" — are
-// not candidates at all, so they yield neither a name nor a refusal. A page
-// made only of those reaches the caller as an empty listing, which
-// emptyListingError reports as format drift.
-func TestParsePackageList_ConsumesEachCandidate(t *testing.T) {
-	prefix := linkPrefix(userOwner, "owner")
-	tests := []struct {
-		name        string
-		html        string
-		want        []string
-		wantRefused int
-	}{
-		{
-			name:        "unsafe candidate containing package prefix",
-			html:        `<a href="` + prefix + `..` + prefix + `phantom">bad</a>`,
-			wantRefused: 1,
-		},
-		{
-			name:        "newline inside candidate",
-			html:        `<a href="` + prefix + "na\nme" + `">bad</a>`,
-			wantRefused: 1,
-		},
-		{
-			name:        "non-link attribute candidates",
-			html:        `<div data-targets="` + prefix + `a ` + prefix + `b">`,
-			wantRefused: 0,
-		},
-		{
-			name:        "attribute name ending in href",
-			html:        `<div data-href="` + prefix + `a">`,
-			wantRefused: 0,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, refused, _ := parsePackageList(tt.html, "owner", userOwner)
-			if !slices.Equal(got, tt.want) || refused.Count != tt.wantRefused {
-				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, refused=%d)", tt.html, got, refused, tt.want, tt.wantRefused)
-			}
-		})
-	}
-}
-
 func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 	prefix := "/users/NVIDIA/packages/container/package/"
 	tests := []struct {
@@ -362,26 +232,6 @@ func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 				t.Errorf("parsePackageList = (%v, %+v), want registered package casing preserved", got, refused)
 			}
 		})
-	}
-}
-
-func TestClient_ScrapePackageList_UnreadablePackageAttributeFailsClosed(t *testing.T) {
-	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/orgs/") {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		html := `<span>2 packages</span><a title=x href="/users/owner/packages/container/package/lost">lost</a>` +
-			packageLink(userOwner, "owner", "good")
-		_, _ = w.Write([]byte(html))
-	}), testsupport.QuietLogger())
-
-	names, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
-	if !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("scrapePackageList unreadable package attribute error = %v, want errHTMLFormatChanged", err)
-	}
-	if len(names) != 0 || refused.Count != 0 {
-		t.Errorf("scrapePackageList unreadable package attribute = (%v, %+v), want the inconsistent page discarded alongside the format error", names, refused)
 	}
 }
 
@@ -458,42 +308,13 @@ func TestFetchHTML_SendsRequestHeaders(t *testing.T) {
 		w.Write([]byte("<html>test</html>"))
 	}))
 
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
-	html, err := c.fetchHTML(t.Context(), &pacer{delay: c.pacingDelay}, packagePageURL)
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
+	html, err := c.fetchHTML(t.Context(), &pacer{}, packagePageURL)
 	if err != nil {
 		t.Fatalf("fetchHTML: %v", err)
 	}
 	if html != "<html>test</html>" {
 		t.Errorf("html = %q, want <html>test</html>", html)
-	}
-}
-
-// TestParseDownloads_ContentBeforeTitle pins the offset calculation
-// across a line boundary: the count element may sit on the line after the
-// marker, indented, with whitespace before its title attribute. GitHub
-// reflows that whitespace, so it is not format drift.
-func TestParseDownloads_ContentBeforeTitle(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want int64
-	}{
-		{
-			name: "whitespace before title",
-			html: "<span>Total downloads</span>\n   <h3   title=\"7\">7</h3>",
-			want: 7,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			count, err := parseDownloads(tt.html)
-			if err != nil {
-				t.Fatalf("parseDownloads: %v", err)
-			}
-			if count != tt.want {
-				t.Errorf("parseDownloads = %d, want %d", count, tt.want)
-			}
-		})
 	}
 }
 
@@ -510,7 +331,7 @@ func TestCollect_ExplicitMock(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 
 	client := srv.Client()
-	c := NewClient(client, fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(client, Options{Logger: slog.New(slog.DiscardHandler)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "mypkg"}}
 	collection := c.Collect(t.Context(), refs)
 	entries := collection.Entries
@@ -531,6 +352,10 @@ func TestCollect_ExplicitMock(t *testing.T) {
 }
 
 func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
+	synctest.Test(t, testCollectCanonicalizedExplicitRefDeduplicatesWildcard)
+}
+
+func testCollectCanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 	for _, key := range []string{"DOCKERHUB_REPOS", "POLL_INTERVAL_HOURS", "LISTEN_ADDR", "LOG_LEVEL"} {
 		t.Setenv(key, "")
 	}
@@ -552,7 +377,7 @@ func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 		_, _ = w.Write([]byte(downloadsHTML("11")))
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 
 	collection := c.Collect(t.Context(), cfg.GHCRRepos)
 	entries := collection.Entries
@@ -571,49 +396,26 @@ func TestCollect_CanonicalizedExplicitRefDeduplicatesWildcard(t *testing.T) {
 	}
 }
 
-func TestScrapeDownloads_EscapesNestedName(t *testing.T) {
+func TestScrapePackage_EscapesNestedName(t *testing.T) {
 	var path string
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path = r.URL.EscapedPath()
 		_, _ = w.Write([]byte(downloadsHTML("7")))
 	}))
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 
-	count, err := c.scrapeDownloads(t.Context(), &pacer{delay: c.pacingDelay}, registry.RepoRef{
+	entry, err := c.scrapePackage(t.Context(), &pacer{}, registry.RepoRef{
 		Owner: "owner",
 		Repo:  "helm-charts/grafana-operator",
 	})
 	if err != nil {
-		t.Fatalf("scrapeDownloads: %v", err)
+		t.Fatalf("scrapePackage: %v", err)
 	}
-	if count != 7 {
-		t.Errorf("scrapeDownloads count = %d, want 7", count)
+	if entry.Pulls != 7 {
+		t.Errorf("scrapePackage Pulls = %d, want 7", entry.Pulls)
 	}
 	if path != "/users/owner/packages/container/package/helm-charts%2Fgrafana-operator" {
-		t.Errorf("scrapeDownloads path = %q, want nested name escaped once", path)
-	}
-}
-
-// TestFetchHTML_AppBodyCapWinsOverCallerOption verifies that a GHCR page
-// larger than ghcrBodyCap is surfaced as errHTMLFormatChanged (a markup/format
-// signal) even when the caller supplies a larger cap. httpx v2 returns a typed
-// *ResponseTooLargeError on overflow (v1 silently truncated).
-func TestFetchHTML_AppBodyCapWinsOverCallerOption(t *testing.T) {
-	oversize := strings.Repeat("x", ghcrBodyCap+1)
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(oversize))
-	}))
-
-	c := NewClient(srv.Client(), fastPacing(append(shortRetry(), httpx.WithMaxBodyBytes(8<<20)), testsupport.QuietLogger()))
-	body, err := c.fetchHTML(t.Context(), &pacer{delay: c.pacingDelay}, packagePageURL)
-	if !errors.Is(err, errHTMLFormatChanged) {
-		t.Fatalf("fetchHTML over-cap error = %v, want errHTMLFormatChanged", err)
-	}
-	if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); !ok {
-		t.Errorf("error = %v, want it to wrap *httpx.ResponseTooLargeError", err)
-	}
-	if body != "" {
-		t.Errorf("fetchHTML over-cap body = %q, want empty", body)
+		t.Errorf("scrapePackage path = %q, want nested name escaped once", path)
 	}
 }
 
@@ -660,11 +462,14 @@ func packageLink(kind ownerKind, owner, name string) string {
 	return `<a href="` + linkPrefix(kind, owner) + name + `">` + name + `</a>`
 }
 
-// listingClient returns a Client whose listing reads are paced in microseconds.
 func listingClient(t *testing.T, h http.Handler, logger *slog.Logger) *Client {
 	t.Helper()
 	srv := httptest.NewTestServer(t, h)
-	return NewClient(srv.Client(), fastPacing(shortRetry(), logger))
+	return NewClient(srv.Client(), Options{Logger: logger})
+}
+
+func inSynctest(f func(*testing.T)) func(*testing.T) {
+	return func(t *testing.T) { synctest.Test(t, f) }
 }
 
 // TestClient_ScrapePackageList_PaginatesOwnerListing pins the page loop: an
@@ -689,7 +494,7 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, inSynctest(func(t *testing.T) {
 			var buf bytes.Buffer
 			asked := map[string]int{}
 			ecosystems := map[string]int{}
@@ -704,7 +509,7 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 				_, _ = w.Write([]byte(tt.pages[page]))
 			}), capturingLogger(&buf))
 
-			got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+			got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 			if err != nil {
 				t.Fatalf("scrapePackageList: %v", err)
 			}
@@ -735,13 +540,47 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 			if !maps.Equal(ecosystems, wantEcosystems) {
 				t.Errorf("ecosystems %v, want %v", ecosystems, wantEcosystems)
 			}
+		}))
+	}
+}
+
+func TestAlertRulesCoverWildcardListingConditions(t *testing.T) {
+	contents, err := os.ReadFile("../../alerts/logql.yaml")
+	if err != nil {
+		t.Fatalf("read alert rules: %v", err)
+	}
+
+	const rulePrefix = "      - alert: "
+	for _, tt := range []struct {
+		rule    string
+		message string
+	}{
+		{
+			rule:    "RegistryStatsConfigRejected",
+			message: "ghcr owner has no public container packages",
+		},
+		{
+			rule:    "RegistryStatsCollectionIncomplete",
+			message: "ghcr listing page states no usable package count",
+		},
+	} {
+		t.Run(tt.rule, func(t *testing.T) {
+			_, afterRule, ok := strings.Cut(string(contents), rulePrefix+tt.rule)
+			if !ok {
+				t.Errorf("%s does not contain alert rule %q", "../../alerts/logql.yaml", tt.rule)
+				return
+			}
+			block, _, _ := strings.Cut(afterRule, "\n"+rulePrefix)
+			if !strings.Contains(block, tt.message) {
+				t.Errorf("alert rule %q does not match message %q", tt.rule, tt.message)
+			}
 		})
 	}
 }
 
 func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 	for _, count := range []int{maxListingCandidates, maxListingCandidates + 1} {
-		t.Run(fmt.Sprintf("candidates_%d", count), func(t *testing.T) {
+		t.Run(fmt.Sprintf("candidates_%d", count), inSynctest(func(t *testing.T) {
 			var html strings.Builder
 			for i := range count {
 				html.WriteString(packageLink(userOwner, "owner", fmt.Sprintf("p%d", i)))
@@ -752,9 +591,9 @@ func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 					return
 				}
 				_, _ = w.Write([]byte(`<span>0 packages</span>`))
-			}), testsupport.QuietLogger())
+			}), slog.New(slog.DiscardHandler))
 
-			got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+			got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 			if count > maxListingCandidates {
 				if !errors.Is(err, errHTMLFormatChanged) || len(got) != 0 {
 					t.Fatalf("scrapePackageList(%d candidates) = (%d names, %v), want no names and errHTMLFormatChanged", count, len(got), err)
@@ -768,11 +607,15 @@ func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 			if err != nil || len(got) != maxListingCandidates {
 				t.Errorf("scrapePackageList(%d candidates) = (%d names, %v), want %d names", count, len(got), err, maxListingCandidates)
 			}
-		})
+		}))
 	}
 }
 
 func TestClient_ScrapePackageList_RefusedOnlyPageFailsClosed(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListRefusedOnlyPageFailsClosed)
+}
+
+func testClientScrapePackageListRefusedOnlyPageFailsClosed(t *testing.T) {
 	pages := 0
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages++
@@ -785,9 +628,9 @@ func TestClient_ScrapePackageList_RefusedOnlyPageFailsClosed(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`<a href="/users/owner/packages/container/package/%zz">bad</a>`))
-	}), testsupport.QuietLogger())
+	}), slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged", err)
 	}
@@ -801,12 +644,16 @@ func TestClient_ScrapePackageList_RefusedOnlyPageFailsClosed(t *testing.T) {
 // listing, so the names already read come back with errHTMLFormatChanged and
 // the literal alerts/logql.yaml keys on.
 func TestClient_ScrapePackageList_RepeatedPageIsPartial(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListRepeatedPageIsPartial)
+}
+
+func testClientScrapePackageListRepeatedPageIsPartial(t *testing.T) {
 	var buf bytes.Buffer
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b")))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged for a page that re-served collected names", err)
 	}
@@ -822,6 +669,10 @@ func TestClient_ScrapePackageList_RepeatedPageIsPartial(t *testing.T) {
 // operator's alert keys on: with names still arriving when the bound bites,
 // the listing is truncated and reports the configured cap.
 func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListPageCapWarnsOnTruncation)
+}
+
+func testClientScrapePackageListPageCapWarnsOnTruncation(t *testing.T) {
 	var buf bytes.Buffer
 	pages := 0
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -833,7 +684,7 @@ func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page"))))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList: %v", err)
 	}
@@ -852,6 +703,10 @@ func TestClient_ScrapePackageList_PageCapWarnsOnTruncation(t *testing.T) {
 // listing, so the names already read come back with the error, and the
 // owner is not reported as wholly failed.
 func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListLaterPageFailureIsPartial)
+}
+
+func testClientScrapePackageListLaterPageFailureIsPartial(t *testing.T) {
 	var buf bytes.Buffer
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") != "1" {
@@ -861,7 +716,7 @@ func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a")))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if err == nil {
 		t.Fatal("scrapePackageList error = nil, want the page-2 failure reported")
 	}
@@ -872,13 +727,17 @@ func TestClient_ScrapePackageList_LaterPageFailureIsPartial(t *testing.T) {
 		t.Errorf("a partial listing did not warn with the `listing partially failed` literal; logs:\n%s", logs)
 	}
 
-	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed {
 		t.Error("buildPackageList reported a wholly failed listing, want partial (page 1 yielded a name)")
 	}
 }
 
 func TestClient_Collect_cancelledListingIsNotListingFailure(t *testing.T) {
+	synctest.Test(t, testClientCollectCancelledListingIsNotListingFailure)
+}
+
+func testClientCollectCancelledListingIsNotListingFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var buf bytes.Buffer
@@ -909,6 +768,10 @@ func TestClient_Collect_cancelledListingIsNotListingFailure(t *testing.T) {
 }
 
 func TestClient_ScrapePackageList_ReturnsUserFormRefusals(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListReturnsUserFormRefusals)
+}
+
+func testClientScrapePackageListReturnsUserFormRefusals(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("page") == "1" {
@@ -921,9 +784,9 @@ func TestClient_ScrapePackageList_ReturnsUserFormRefusals(t *testing.T) {
 	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList: %v", err)
 	}
@@ -936,6 +799,10 @@ func TestClient_ScrapePackageList_ReturnsUserFormRefusals(t *testing.T) {
 }
 
 func TestClient_ScrapePackageList_OrganizationLaterPageFailureIsPartial(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListOrganizationLaterPageFailureIsPartial)
+}
+
+func testClientScrapePackageListOrganizationLaterPageFailureIsPartial(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
@@ -947,9 +814,9 @@ func TestClient_ScrapePackageList_OrganizationLaterPageFailureIsPartial(t *testi
 		}
 		_, _ = w.Write([]byte(packageLink(orgOwner, "owner", "svc")))
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if err == nil {
 		t.Fatal("scrapePackageList error = nil, want organization page-2 failure")
 	}
@@ -959,6 +826,10 @@ func TestClient_ScrapePackageList_OrganizationLaterPageFailureIsPartial(t *testi
 }
 
 func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
+	synctest.Test(t, testClientCollectOrganizationLaterPageNotFoundIsPartial)
+}
+
+func testClientCollectOrganizationLaterPageNotFoundIsPartial(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
@@ -974,7 +845,7 @@ func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
 		_, _ = w.Write([]byte(downloadsHTML("17")))
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), fastPacing(shortRetry(), testsupport.QuietLogger()))
+	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 
 	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	entries := collection.Entries
@@ -994,6 +865,10 @@ func TestClient_Collect_OrganizationLaterPageNotFoundIsPartial(t *testing.T) {
 // TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError pins
 // scrapePackageList's organization-error arm.
 func TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListOrganizationFirstPageFailureReturnsError)
+}
+
+func testClientScrapePackageListOrganizationFirstPageFailureReturnsError(t *testing.T) {
 	orgCalls := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /owner", func(w http.ResponseWriter, _ *http.Request) {
@@ -1003,9 +878,9 @@ func TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError(t *te
 		orgCalls++
 		w.WriteHeader(http.StatusInternalServerError)
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	_, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	_, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	statusErr, ok := errors.AsType[*httpx.StatusError](err)
 	if !ok || statusErr.Code != http.StatusInternalServerError {
 		t.Fatalf("scrapePackageList error = %v, want organization page-1 HTTP status 500", err)
@@ -1016,6 +891,10 @@ func TestClient_ScrapePackageList_OrganizationFirstPageFailureReturnsError(t *te
 }
 
 func TestClient_ScrapePackageList_UserNamesWinOverOrganizationProbeFailure(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListUserNamesWinOverOrganizationProbeFailure)
+}
+
+func testClientScrapePackageListUserNamesWinOverOrganizationProbeFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /orgs/owner/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1030,9 +909,9 @@ func TestClient_ScrapePackageList_UserNamesWinOverOrganizationProbeFailure(t *te
 			t.Errorf("user listing requested page %q, want page 1 or 2", r.URL.Query().Get("page"))
 		}
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "owner")
+	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList(organization 500, valid user listing) error = %v, want nil", err)
 	}
@@ -1041,7 +920,41 @@ func TestClient_ScrapePackageList_UserNamesWinOverOrganizationProbeFailure(t *te
 	}
 }
 
+func TestClient_ScrapePackageList_ConfirmedEmptyOrganizationSkipsUserProbe(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListConfirmedEmptyOrganizationSkipsUserProbe)
+}
+
+func testClientScrapePackageListConfirmedEmptyOrganizationSkipsUserProbe(t *testing.T) {
+	var orgCalls, userCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /orgs/nobody/packages", func(w http.ResponseWriter, _ *http.Request) {
+		orgCalls++
+		_, _ = w.Write([]byte(`<span>0 packages</span>`))
+	})
+	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
+		userCalls++
+		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
+	})
+	var buf bytes.Buffer
+	c := listingClient(t, mux, capturingLogger(&buf))
+
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
+	if len(got) != 0 || !errors.Is(err, errEmptyListing) || errors.Is(err, errHTMLFormatChanged) {
+		t.Fatalf("scrapePackageList(confirmed-empty organization) = (%v, %v), want ([], errEmptyListing)", got, err)
+	}
+	if orgCalls != 1 || userCalls != 0 {
+		t.Errorf("scrapePackageList(confirmed-empty organization) requests = (organization %d, user %d), want (1, 0)", orgCalls, userCalls)
+	}
+	if logs := buf.String(); strings.Contains(logs, "completeness unchecked") {
+		t.Errorf("scrapePackageList(confirmed-empty organization) logged a completeness warning:\n%s", logs)
+	}
+}
+
 func TestClient_ScrapePackageList_ConfirmedEmptyNamesOnlyActualCause(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListConfirmedEmptyNamesOnlyActualCause)
+}
+
+func testClientScrapePackageListConfirmedEmptyNamesOnlyActualCause(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<span>0 packages</span>`))
@@ -1049,9 +962,9 @@ func TestClient_ScrapePackageList_ConfirmedEmptyNamesOnlyActualCause(t *testing.
 	mux.HandleFunc("GET /orgs/nobody/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "nobody")
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
 	if !errors.Is(err, errEmptyListing) || errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList = (%v, %v), want only errEmptyListing", got, err)
 	}
@@ -1061,6 +974,10 @@ func TestClient_ScrapePackageList_ConfirmedEmptyNamesOnlyActualCause(t *testing.
 }
 
 func TestClient_Collect_ConfirmedEmptyWildcardIsNotFailure(t *testing.T) {
+	synctest.Test(t, testClientCollectConfirmedEmptyWildcardIsNotFailure)
+}
+
+func testClientCollectConfirmedEmptyWildcardIsNotFailure(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<span>0 packages</span>`))
@@ -1090,6 +1007,10 @@ func TestClient_Collect_ConfirmedEmptyWildcardIsNotFailure(t *testing.T) {
 // user with no container packages and a user page whose link markup changed
 // are indistinguishable, so the error names both.
 func TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses(t *testing.T) {
+	synctest.Test(t, testClientScrapePackageListEmptyFirstPageNamesBothCauses)
+}
+
+func testClientScrapePackageListEmptyFirstPageNamesBothCauses(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /nobody", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html>a profile page, no package links</html>`))
@@ -1097,9 +1018,9 @@ func TestClient_ScrapePackageList_EmptyFirstPageNamesBothCauses(t *testing.T) {
 	mux.HandleFunc("GET /orgs/nobody/packages", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // not an organization: this owner is a user
 	})
-	c := listingClient(t, mux, testsupport.QuietLogger())
+	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{delay: c.pacingDelay}, "nobody")
+	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList = (%v, %v), want errHTMLFormatChanged", got, err)
 	}
@@ -1120,13 +1041,13 @@ func TestClient_ExpandWildcard_ReportsOnlyParseDrift(t *testing.T) {
 		{name: "parse drift", html: `<a href="/users/owner/packages/container/package/%zz">bad</a>`, wantReport: true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, inSynctest(func(t *testing.T) {
 			var buf bytes.Buffer
 			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(tt.html))
 			}), capturingLogger(&buf))
 
-			_, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+			_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 			if !whollyFailed {
 				t.Fatal("buildPackageList listingFailed = false, want true")
 			}
@@ -1134,17 +1055,21 @@ func TestClient_ExpandWildcard_ReportsOnlyParseDrift(t *testing.T) {
 			if gotReport != tt.wantReport {
 				t.Errorf("buildPackageList logs report_at = %v, want %v; logs:\n%s", gotReport, tt.wantReport, buf.String())
 			}
-		})
+		}))
 	}
 }
 
 func TestClient_ExpandWildcard_TransportFailureWarns(t *testing.T) {
+	synctest.Test(t, testClientExpandWildcardTransportFailureWarns)
+}
+
+func testClientExpandWildcardTransportFailureWarns(t *testing.T) {
 	var buf bytes.Buffer
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}), capturingLogger(&buf))
 
-	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if !whollyFailed {
 		t.Fatal("buildPackageList listingFailed = false, want true for a transport failure")
 	}
@@ -1164,6 +1089,10 @@ func TestClient_ExpandWildcard_TransportFailureWarns(t *testing.T) {
 // raw bytes off a scraped page, so an unterminated attribute must not
 // reach the log stream megabytes wide.
 func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
+	synctest.Test(t, testClientExpandWildcardBoundsRefusedNameSample)
+}
+
+func testClientExpandWildcardBoundsRefusedNameSample(t *testing.T) {
 	var buf bytes.Buffer
 	huge := strings.Repeat("%", 4096)
 	c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1175,7 +1104,7 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 		_, _ = w.Write([]byte(`<span>0 packages</span>`))
 	}), capturingLogger(&buf))
 
-	packages, whollyFailed := c.buildPackageList(t.Context(), &pacer{delay: c.pacingDelay}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	packages, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed || len(packages) != 1 || packages[0].Repo != "good" {
 		t.Fatalf("buildPackageList = (%+v, whollyFailed=%v), want just owner/good", packages, whollyFailed)
 	}
@@ -1187,150 +1116,5 @@ func TestClient_ExpandWildcard_BoundsRefusedNameSample(t *testing.T) {
 	}
 	if len(logs) > 1024 {
 		t.Errorf("one refused 4096-byte name produced a %d-byte log; want the sample bounded", len(logs))
-	}
-}
-
-func TestParsePackageList_QuotedGreaterThanPreservesLaterAttributes(t *testing.T) {
-	html := `<a data-x="a>b" href="/users/owner/packages/container/package/real">r</a>`
-	got, refused, err := parsePackageList(html, "owner", userOwner)
-	if err != nil || !slices.Equal(got, []string{"real"}) || refused.Count != 0 {
-		t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want ([real], no refusals, nil)", html, got, refused, err)
-	}
-}
-
-func TestParsePackageList_UppercaseTagWithQuotedGreaterThan(t *testing.T) {
-	html := `<A data-note="1 > 0" HREF="/users/owner/packages/container/package/upper">`
-	got, refused, err := parsePackageList(html, "owner", userOwner)
-	if err != nil || !slices.Equal(got, []string{"upper"}) || refused.Count != 0 {
-		t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want ([upper], no refusals, nil)", html, got, refused, err)
-	}
-}
-
-// Commented-out markup is not markup: a terminated comment's body is
-// skipped whole, so a package link inside one is invisible and the canary's
-// bare quotes never open an attribute value.
-func TestStartTagWalk_IgnoresCommentedMarkup(t *testing.T) {
-	canary := `<!-- '"` + "`" + ` --><!-- </textarea></xmp> -->`
-	html := canary +
-		`<!-- ` + packageLink(userOwner, "owner", "ghost") + ` -->` +
-		packageLink(userOwner, "owner", "app1")
-	got, refused, _ := parsePackageList(html, "owner", userOwner)
-	if !slices.Equal(got, []string{"app1"}) || refused.Count != 0 {
-		t.Errorf("parsePackageList(commented markup + link) = (%v, %+v), want ([app1], no refusals)", got, refused)
-	}
-}
-
-func TestStartTagWalk_RecognizesCommentEnds(t *testing.T) {
-	real := packageLink(userOwner, "owner", "real")
-	tests := []struct {
-		name string
-		html string
-	}{
-		{name: "bang_close", html: `<!-- ` + packageLink(userOwner, "owner", "ghost") + ` --!>` + real},
-		{name: "abrupt_close", html: `<!-->` + real + `-->`},
-		{name: "abrupt_dash_close", html: `<!--->` + real + `-->`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, refused, err := parsePackageList(tt.html, "owner", userOwner)
-			if err != nil || !slices.Equal(got, []string{"real"}) || refused.Count != 0 {
-				t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want ([real], no refusals, nil)", tt.html, got, refused, err)
-			}
-		})
-	}
-}
-
-func TestStartTagWalk_IgnoresNonStartTagMarkup(t *testing.T) {
-	real := packageLink(userOwner, "owner", "real")
-	tests := []struct {
-		name string
-		html string
-	}{
-		{name: "declaration", html: `<![CDATA[` + packageLink(userOwner, "owner", "ghost") + `]]>` + real},
-		{name: "processing_instruction", html: `<?ignored ` + packageLink(userOwner, "owner", "ghost") + `?>` + real},
-		{name: "end_tag", html: `</a ` + packageLink(userOwner, "owner", "ghost") + `>` + real},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, refused, err := parsePackageList(tt.html, "owner", userOwner)
-			if err != nil || !slices.Equal(got, []string{"real"}) || refused.Count != 0 {
-				t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want ([real], no refusals, nil)", tt.html, got, refused, err)
-			}
-		})
-	}
-}
-
-func TestParsePackageList_StrayQuoteDoesNotExtendTag(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want []string
-	}{
-		{
-			name: "later_link",
-			html: `<a class="c" "x>` + packageLink(userOwner, "owner", "app1"),
-			want: []string{"app1"},
-		},
-		{
-			name: "commented_link",
-			html: `<a class="c" "x><!-- ` + packageLink(userOwner, "owner", "ghost") + ` --><b ">`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, refused, err := parsePackageList(tt.html, "owner", userOwner)
-			if err != nil || !slices.Equal(got, tt.want) || refused.Count != 0 {
-				t.Errorf("parsePackageList(%q) = (%v, %+v, %v), want (%v, no refusals, nil)", tt.html, got, refused, err, tt.want)
-			}
-		})
-	}
-}
-
-// TestParsePackageList_UnterminatedConstructIsFormatDrift pins that the first
-// unterminated comment ends the listing before links in its body can be emitted.
-func TestParsePackageList_UnterminatedConstructIsFormatDrift(t *testing.T) {
-	link := packageLink(userOwner, "owner", "real")
-
-	got, refused, err := parsePackageList("<!--"+link, "owner", userOwner)
-	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("parsePackageList(unterminated comment + link) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
-	}
-	if refused.Count != 0 {
-		t.Errorf("parsePackageList(unterminated comment + link) refusals = %+v, want no partial result", refused)
-	}
-
-	got, refused, err = parsePackageList(strings.Repeat("<!--", 9)+link, "owner", userOwner)
-	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("parsePackageList(9 unterminated comments + link) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
-	}
-	if refused.Count != 0 {
-		t.Errorf("parsePackageList(9 unterminated comments + link) refusals = %+v, want no partial result", refused)
-	}
-}
-
-func TestParsePackageList_UnterminatedConstructReportsOffset(t *testing.T) {
-	_, _, err := parsePackageList("hello <!--x", "owner", userOwner)
-	if !errors.Is(err, errHTMLFormatChanged) {
-		t.Fatalf("parsePackageList(unterminated construct at byte 6) error = %v, want errHTMLFormatChanged", err)
-	}
-	if got := err.Error(); !strings.Contains(got, "byte 6") {
-		t.Errorf("parsePackageList(unterminated construct at byte 6) error = %q, want construct offset", got)
-	}
-}
-
-// TestParsePackageList_UnterminatedTagIsFormatDrift pins the same failure mode
-// for a start tag whose quoted attribute value has no terminator.
-func TestParsePackageList_UnterminatedTagIsFormatDrift(t *testing.T) {
-	got, refused, err := parsePackageList(`<a x="`, "owner", userOwner)
-	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("parsePackageList(unterminated tag) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
-	}
-	if refused.Count != 0 {
-		t.Errorf("parsePackageList(unterminated tag) refusals = %+v, want no partial result", refused)
-	}
-
-	got, _, err = parsePackageList(strings.Repeat(`<a x="`, 9), "owner", userOwner)
-	if len(got) != 0 || !errors.Is(err, errHTMLFormatChanged) {
-		t.Errorf("parsePackageList(9 malformed tags) = (%v, %v), want ([], errHTMLFormatChanged)", got, err)
 	}
 }

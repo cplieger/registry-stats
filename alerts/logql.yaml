@@ -31,48 +31,55 @@
 # WARN. A Docker Hub metadata response that decodes without a usable pull count emits
 # `docker hub parse failed` at ERROR unconditionally, so RegistryStatsError owns it by
 # level. A GHCR listing that fails WHOLLY also emits at ERROR on that cause, but its
-# message is not one of the five this rule keys on, so RegistryStatsError owns it.
-# RegistryStatsConfigRejected's startup records work at every LOG_LEVEL because they
-# are emitted before the configured level is applied.
-# At LOG_LEVEL=error, the recurring no-repos WARN is suppressed, so that
-# alert clears when its startup record ages out of the one-hour window.
+# message is not one of the six this rule keys on, so RegistryStatsError owns it.
+# RegistryStatsConfigRejected's startup records work at every LOG_LEVEL for two
+# reasons: the repo-ref and POLL_INTERVAL_HOURS records are config warnings emitted
+# before the parsed level is applied, and the startup no-repos record is an ERROR,
+# which no LOG_LEVEL value suppresses.
+# At LOG_LEVEL=error, the recurring no-repos WARN and both wildcard-empty WARNs
+# are suppressed. The no-repos condition remains visible through its startup
+# record until that record ages out of the one-hour window; the wildcard-empty
+# conditions have no startup record and reach no rule at that level.
 groups:
   - name: registry-stats
     rules:
-      # The two repo-ref messages cover configuration that yields nothing to
-      # poll; the two POLL_INTERVAL_HOURS messages mean polling continues on
-      # a corrected interval. A ref that fails validation is skipped with a
-      # WARN at parse time; a run with no usable ref logs an ERROR at startup
-      # plus a WARN every cycle. Neither has a metric: a ref that never parsed
-      # produces no series, and with both
-      # lists empty registrystats_collects_total has no series either, so
+      # The two repo-ref messages and two wildcard-empty messages cover
+      # configuration that yields nothing to poll; the two POLL_INTERVAL_HOURS
+      # messages mean polling continues on a corrected interval. A ref that
+      # fails validation is skipped with a WARN at parse time; a run with no
+      # usable ref logs an ERROR at startup plus a WARN every cycle; and a
+      # wildcard whose owner publishes no public image logs a WARN every cycle.
+      # None has a metric: a ref that never parsed produces no series, an empty
+      # wildcard produces no image series, and with both lists empty
+      # registrystats_collects_total has no series either, so
       # RegistryStatsCollectStalled cannot fire.
       - alert: RegistryStatsConfigRejected
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped`
+            |~ `no repos configured|skipping unusable repo ref|docker hub wildcard expanded no repos|ghcr owner has no public container packages|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped`
             | logfmt rs_msg="msg"
-            | rs_msg =~ ".*(no repos configured|skipping unusable repo ref|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped).*" [1h]
+            | rs_msg =~ ".*(no repos configured|skipping unusable repo ref|docker hub wildcard expanded no repos|ghcr owner has no public container packages|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped).*" [1h]
           )) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: >-
-            registry-stats rejected part of its configuration or corrected the
-            poll interval
+            registry-stats rejected a target, resolved a wildcard to no images,
+            or corrected the poll interval
           description: >
             registry-stats skipped a DOCKERHUB_REPOS or GHCR_REPOS entry it
-            could not parse, or found no usable entry at all, so those images
-            are never polled and never reach /metrics; correct the value to
-            comma-separated `owner/repo` or `owner/*` pairs. It also fires when
-            POLL_INTERVAL_HOURS was corrected: a malformed or negative value
-            reverts to the 1-hour default, and a value above 8,760 hours is
-            capped at 8,760, so the exporter polls on an interval you did not
-            ask for until the value is fixed. A skip line is logged once per
+            could not parse, found no usable entry at all, or expanded a
+            configured wildcard to no public images. Those images are never
+            polled and never reach /metrics; correct the value to comma-separated
+            `owner/repo` or `owner/*` pairs, or make at least one image public.
+            It also fires when POLL_INTERVAL_HOURS was corrected: a malformed or
+            negative value reverts to the 1-hour default, and a value above 8,760
+            hours is capped at 8,760, so the exporter polls on an interval you did
+            not ask for until the value is fixed. A skip line is logged once per
             start, so this clears one window after a restart with a corrected
-            value; the no-repos line repeats every cycle.
+            value; the no-repos and wildcard-empty lines repeat every cycle.
       # Keyed on the LEVEL, not on each message, so one rule covers serving and
       # collection errors alike. Both comparisons are case-sensitive: the slog
       # text handler renders the level uppercase, so a lowercase matcher on
@@ -99,12 +106,11 @@ groups:
             registry-stats logged at least one ERROR in the last hour. The
             expression is level-wide, so it covers serving and configuration
             errors as well as collection ones: registry response-shape or GHCR
-            markup drift, a wildcard owner with no public images, a cycle in
-            which every registry failed, a startup with no usable repo
-            configuration, or a 5xx from the exporter's own endpoint other
-            than the readiness gate's startup/shutdown 503. Read `docker logs
-            registry-stats` for the message; a GHCR format change carries a
-            link to open an issue.
+            markup drift, a cycle in which every registry failed, a startup with
+            no usable repo configuration, or a 5xx from the exporter's own
+            endpoint other than the readiness gate's startup/shutdown 503. Read
+            `docker logs registry-stats` for the message; a GHCR format change
+            carries a link to open an issue.
       # The WARN lines mean that this cycle omitted image series. This rule
       # reports those omissions whether or not the source-level health threshold
       # is crossed; RegistryStatsSourceDegraded may fire concurrently. The
@@ -113,25 +119,28 @@ groups:
       # `docker hub parse failed` record is always ERROR and RegistryStatsError
       # owns it by level. `ghcr listing refused package candidates` catches the
       # nil-error case where a listing returns usable refs but omits published
-      # candidates, which no counter can see. On the page-cap path it
-      # accompanies `hit page cap`, and because the condition is greater than zero the extra match
-      # cannot change whether this rule fires. On a wholly failed listing it is
-      # this rule's only match: that path emits `ghcr package listing failed`,
-      # which this rule does not match, and RegistryStatsSourceDegraded reports
-      # the outage. A MAJORITY of GHCR package failures, and a GHCR listing
-      # that fails WHOLLY, both flip the source unhealthy, so
-      # RegistryStatsSourceDegraded owns them through
+      # candidates, which no counter can see. `ghcr listing page states no usable
+      # package count` catches a listing that returns the names it found without
+      # being able to verify completeness. On the page-cap path, a refused-
+      # candidates record accompanies `hit page cap`, and because the condition
+      # is greater than zero the extra match cannot change whether this rule
+      # fires. On a wholly failed listing it is this rule's only match: that path
+      # emits `ghcr package listing failed`, which this rule does not match, and
+      # RegistryStatsSourceDegraded reports the outage. A MAJORITY of GHCR
+      # package failures, and a GHCR listing that fails WHOLLY, both flip the
+      # source unhealthy, so RegistryStatsSourceDegraded owns them through
       # registrystats_collect_errors_total; one failed explicit ref is a
-      # majority when it is the only ref. Minority per-repo failures and refused
-      # candidates are what this rule exists for. Docker Hub repositories found
-      # through a listing sit outside the fetch ratio.
+      # majority when it is the only ref. Minority per-repo failures, refused
+      # candidates, and listings with an unusable package count are what this
+      # rule exists for. Docker Hub repositories found through a listing sit
+      # outside the fetch ratio.
       - alert: RegistryStatsCollectionIncomplete
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed`
+            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr listing page states no usable package count|ghcr scrape failed|docker hub fetch failed`
             | logfmt rs_msg="msg"
-            | rs_msg =~ ".*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr scrape failed|docker hub fetch failed).*" [2h]
+            | rs_msg =~ ".*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr listing page states no usable package count|ghcr scrape failed|docker hub fetch failed).*" [2h]
           )) > 0
         for: 0m
         labels:
@@ -145,12 +154,13 @@ groups:
             listing can enumerate, a Docker Hub owner listing moved between page
             requests, so the snapshot may be mixed, a Docker Hub repository fetch
             failed, a GHCR owner listing hit its page cap or lost a page, GHCR
-            refused one or more published package-link candidates, or a minority
-            of GHCR packages failed to scrape. The affected image series are absent
-            from /metrics for that cycle whether or not the source-level health
-            threshold is crossed. RegistryStatsSourceDegraded may fire
-            concurrently: a majority of per-repo failures or a wholly failed
-            listing flips the source unhealthy, and one failed explicit ref is
-            the majority when it is the only ref. Docker Hub repositories found
-            through a listing sit outside the fetch ratio. Read the container
-            logs for the affected owner or repo.
+            refused one or more published package-link candidates, a GHCR listing
+            page stated no usable package count so completeness could not be
+            checked, or a minority of GHCR packages failed to scrape. The affected
+            image series are absent from /metrics for that cycle whether or not the
+            source-level health threshold is crossed. RegistryStatsSourceDegraded
+            may fire concurrently: a majority of per-repo failures or a wholly
+            failed listing flips the source unhealthy, and one failed explicit ref
+            is the majority when it is the only ref. Docker Hub repositories found
+            through a listing sit outside the fetch ratio. Read the container logs
+            for the affected owner or repo.

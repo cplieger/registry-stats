@@ -3,12 +3,10 @@ package obs
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/cplieger/metrics/v4"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/webhttp/v2"
 )
 
 // Metrics records and serves registry-stats metrics. Construct via New; the
@@ -18,10 +16,8 @@ import (
 // collect loop.
 type Metrics struct {
 	registry        *metrics.Registry
-	httpRequests    *metrics.LabeledCounter
 	collectsTotal   *metrics.LabeledCounter
 	collectErrors   *metrics.LabeledCounter
-	httpDuration    *metrics.Histogram
 	collectDuration *metrics.Histogram
 	imagePulls      *metrics.LabeledGauge
 	prevPulls       map[[3]string]bool
@@ -34,11 +30,6 @@ type Metrics struct {
 func New() *Metrics {
 	m := &Metrics{
 		registry: metrics.NewRegistry("registrystats"),
-		httpRequests: metrics.NewLabeledCounter(
-			"http_requests_total",
-			"Total HTTP requests",
-			[]string{"method", "path", "status"},
-		),
 		collectsTotal: metrics.NewLabeledCounter(
 			"collects_total",
 			"Total collection runs by source",
@@ -49,17 +40,9 @@ func New() *Metrics {
 			"Failed collection runs by source",
 			[]string{"source"},
 		),
-		httpDuration: metrics.NewHistogram(
-			"http_request_duration_seconds",
-			"HTTP request latency",
-		),
-		// A wildcard cycle at the documented fifty-page cap issues about 1,550
-		// paced GHCR fetches: 1.5h expected, 2.2h at the 5s pacing maximum, plus
-		// Docker Hub. The top boundary is ghcr.MaximumCycleDuration, the longest
-		// one cycle is allowed to take; the liveness deadline is that plus the poll
-		// interval, so +Inf reads as "past the allowance" rather than "slow".
-		// Deliberately a literal: obs must not import a registry reader, so the
-		// two numbers move by hand.
+		// The top bucket mirrors ghcr.MaximumCycleDuration, the longest one cycle may
+		// take, so +Inf reads as "past the allowance" rather than "slow". A literal
+		// because obs must not import a registry reader; the two move by hand.
 		collectDuration: metrics.NewHistogram(
 			"collect_duration_seconds",
 			"Collection cycle duration",
@@ -75,19 +58,19 @@ func New() *Metrics {
 		),
 	}
 	m.registry.MustRegister(
-		m.httpRequests,
 		m.collectsTotal,
 		m.collectErrors,
 		m.imagePulls,
-		m.httpDuration,
 		m.collectDuration,
 	)
 	return m
 }
 
 // MintCollectSources pre-mints the two per-source collect counters at zero, so
-// each configured source has a series from process start and a PromQL
-// increase() over its first failure has an earlier sample to subtract from.
+// each configured source has a series from process start: a scrape landing
+// before that source's first failure records the zero, giving increase() an
+// earlier sample. A first failure ahead of the first scrape has none, which is
+// why RegistryStatsSourceDegraded carries its process_start_time_seconds arm.
 func (m *Metrics) MintCollectSources(sources []registry.ID) {
 	for _, source := range sources {
 		label := source.String()
@@ -116,10 +99,10 @@ func (m *Metrics) ObserveCollectDuration(d time.Duration) {
 // share one emitted series and the per-cycle diff would delete it.
 // Producers guarantee this via urlsafe.
 type ImageMetric struct {
-	Registry registry.ID
 	Owner    string
 	Repo     string
 	Pulls    int64
+	Registry registry.ID
 }
 
 // SetImage replaces the image gauge data for one collect cycle.
@@ -144,11 +127,6 @@ func (m *Metrics) SetImage(images []ImageMetric) {
 		}
 	}
 	m.prevPulls = pulls
-}
-
-// RecordHTTP records one HTTP request.
-func (m *Metrics) RecordHTTP(rm webhttp.RequestMetric) {
-	metrics.RecordHTTP(m.httpRequests, m.httpDuration, rm.Latency, rm.Method, rm.Path, strconv.Itoa(rm.Status))
 }
 
 // Handler returns an HTTP handler serving Prometheus text format.

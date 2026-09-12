@@ -9,11 +9,13 @@ import (
 	"strings"
 )
 
-// MaxSegmentBytes is the container-reference grammar's 255-byte repository-path
-// limit, measured over the slash-joined path excluding the registry host.
-// IsSafeURLSegment applies it per segment; CheckReference applies it to
-// owner/name as a whole. It does not bound the percent-escaped form a caller
-// may encode into one segment.
+// MaxSegmentBytes is the container-reference grammar's 255-byte limit on the
+// slash-joined owner/name repository path, excluding the registry host; Docker
+// Hub refuses a longer reference with 400. CheckReference applies it to a whole
+// reference; IsSafeURLSegment applies it to a lone segment, which is not that
+// grammar's rule but the bound on a segment an untrusted registry listing
+// supplies. It does not bound the percent-escaped form a caller may encode into
+// one segment.
 const MaxSegmentBytes = 255
 
 // safeSegment is an allowlist so unrecognized input is rejected by default.
@@ -33,10 +35,10 @@ func IsSafeURLSegment(s string) bool {
 type Owner string
 
 // CheckReference reports the refusing rule when the slash-joined owner/name
-// repository path exceeds MaxSegmentBytes. config.repoName calls it on both
-// registry arms, so the bound is one rule with one wording rather than a
-// per-registry copy; a caller that discovers a name elsewhere applies it
-// itself or does not.
+// repository path exceeds MaxSegmentBytes. config.repoName applies it on its
+// wildcard and Docker Hub arms and PackageName applies it on the GHCR arm, so
+// the bound is one rule with one wording rather than a per-registry copy; a
+// caller that discovers a name elsewhere applies it itself or does not.
 func CheckReference(owner Owner, name string) error {
 	if len(owner)+1+len(name) > MaxSegmentBytes {
 		return fmt.Errorf("owner/repository reference over %d bytes", MaxSegmentBytes)

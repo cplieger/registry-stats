@@ -15,10 +15,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,21 +46,26 @@ const ghcrBodyCap = 2 << 20
 // than a gate.
 const userAgent = "registry-stats (+https://github.com/cplieger/registry-stats)"
 
-// maxListingCandidates bounds matching link occurrences plus refused
-// candidates per page, counted before dedup; the largest measured page
-// carried 30 candidates.
+// maxListingCandidates bounds how many package label sets one listing
+// response can mint: every accepted name becomes an image_pulls_total
+// label triple. It is checked before the printed-count comparison
+// because that comparison is skipped when a page prints no usable count,
+// leaving this the only bound on the count for such a page. 100 is 3.3x
+// the thirty links GitHub serves; the largest page measured carried 30.
 const maxListingCandidates = 100
 
 // maxListingPages bounds a listing that keeps serving new package names.
 // Fifty is a round limit above the largest measured total of 23 pages.
 const maxListingPages = 50
 
-// statedPackagesMarker identifies the printed package count for one listing page.
-const statedPackagesMarker = "packages"
+// statedPackagesMarker identifies the printed package count for one listing
+// page; GitHub prints "1 package" and otherwise "N packages".
+const statedPackagesMarker = "package"
 
 // maxRefusalSampleBytes bounds both the retained page slice and the sanitized
-// log attribute. Both caps are needed because invalid UTF-8 expands when
-// runesafe.SanitizeSingleLineBounded replaces it.
+// log attribute. The cap at the sample's own site is what bounds the retained
+// sample; runesafe.SanitizeSingleLineBounded bounds the log attribute on its
+// own, because it caps the sanitized form.
 const maxRefusalSampleBytes = 128
 
 // ownerKind is the account form an owner's packages are read through.
@@ -96,21 +99,16 @@ func linkPrefix(kind ownerKind, owner string) string {
 	return fmt.Sprintf("/users/%s/packages/container/package/", owner)
 }
 
-// fetchHTML fetches a GitHub HTML page, spacing requests by c.pacingDelay
-// after the first of the cycle. httpx retries 408, 429, 5xx and transient
-// transport errors per c.opts.RetryOpts; other non-2xx statuses fail fast. The
-// appended request headers and ghcrBodyCap always win, because options are
-// applied left to right.
+// fetchHTML fetches a GitHub HTML page, spacing requests by the production
+// pacing interval after the first of the cycle. httpx retries 408, 429, 5xx
+// and transient transport errors with its defaults; other non-2xx statuses
+// fail fast.
 func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (string, error) {
 	if err := p.wait(ctx); err != nil {
 		return "", err
 	}
 
-	// Fresh slice so c.opts.RetryOpts, reused across every request, is
-	// never mutated by the append.
-	htmlOpts := make([]httpx.GetOption, 0, len(c.opts.RetryOpts)+4)
-	htmlOpts = append(htmlOpts, c.opts.RetryOpts...)
-	htmlOpts = append(htmlOpts,
+	body, err := httpx.GetBytes(ctx, c.http, pageURL,
 		httpx.WithLogger(c.opts.Logger),
 		httpx.WithExhaustedLevel(slog.LevelDebug),
 		httpx.WithHeaders(func(req *http.Request) {
@@ -119,7 +117,6 @@ func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (strin
 		}),
 		httpx.WithMaxBodyBytes(ghcrBodyCap),
 	)
-	body, err := httpx.GetBytes(ctx, c.http, pageURL, htmlOpts...)
 	if err != nil {
 		// An over-cap page is a format signal, not a transport error.
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
@@ -163,13 +160,14 @@ func (r refusals) refuse(candidate string) refusals {
 // failure returns names already collected alongside the error.
 func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) ([]string, refusals, error) {
 	orgNames, refused, orgErr := c.readListing(ctx, p, owner, orgOwner)
-	if len(orgNames) > 0 {
+	if len(orgNames) > 0 || errors.Is(orgErr, errEmptyListing) {
 		return orgNames, refused, orgErr
 	}
 
-	// The organization form is the kind probe: names identify an organization
-	// and a 404 identifies a user. If it yields no names, the user form is still
-	// tried so an organization-form failure cannot hide a valid user listing.
+	// The organization form is the kind probe: names or a listing stating zero
+	// packages identify an organization and a 404 identifies a user. If it
+	// yields neither, the user form is still tried so an organization-form
+	// failure cannot hide a valid user listing.
 	names, userRefused, err := c.readListing(ctx, p, owner, userOwner)
 	refused = refused.merge(userRefused)
 	switch {
@@ -218,9 +216,13 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 // between them, so one cycle's enumeration is a snapshot and not a
 // transaction. A package shifted backward across the read cursor by a
 // mid-walk delete is absent for that cycle with no signal available, and
-// one deleted mid-walk may still be published for it; both self-heal at
-// the next poll, and an absent series already means "not measured this
-// cycle" per obs.SetImage's retirement contract.
+// one deleted mid-walk may still be published for it; a mid-walk insert
+// before the cursor leaves the new package absent for the same reason and
+// re-serves the name it displaced at the top of the next page, where a
+// checked printed count above that page's added names counts it and this
+// walk does not act on it. All three self-heal at the next poll, and an
+// absent series already means "not measured this cycle" per obs.SetImage's
+// retirement contract.
 func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
 	var (
 		names   []string
@@ -356,279 +358,31 @@ func isNotFound(err error) bool {
 	return false
 }
 
-// markupTagEnd treats a quote as opening an attribute value only after '=',
-// matching HTML attribute syntax, so a stray quote cannot extend the tag. An
-// '='-opened value GitHub never closes still swallows following markup; the
-// page's printed package count refuses the resulting short name set.
-func markupTagEnd(html string, start int) (int, bool) {
-	var quote byte
-	afterEq := false
-	for i := start + 1; i < len(html); i++ {
-		c := html[i]
-		switch {
-		case quote != 0 && c == quote:
-			quote = 0
-		case quote != 0:
-		case c == '=':
-			afterEq = true
-		case afterEq && (c == '\'' || c == '"'):
-			quote = c
-		case c == '>':
-			return i, true
-		}
-		if quote == 0 && c != '=' && !strings.ContainsRune(htmlWhitespace, rune(c)) {
-			afterEq = false
-		}
-	}
-	return 0, false
-}
-
-// nextAttributeName returns the next attribute name at or after start and the
-// index of the '=' that follows it, skipping any valueless attribute in
-// between: HTML allows one anywhere, GitHub serves several, and the pairs after
-// it are still readable. An empty name with ok true is the end of the tag.
-// Whitespace between the name and its '=' is not this case and refuses the tag:
-// such a name is skipped as valueless, and the bare '=' that follows it names
-// nothing.
-func nextAttributeName(tag string, start int) (name string, eq int, ok bool) {
-	for {
-		attrs := strings.TrimLeft(tag[start:], htmlWhitespace)
-		if attrs == "" || attrs == "/" {
-			return "", len(tag), true
-		}
-		nameEnd := strings.IndexAny(attrs, "="+htmlWhitespace)
-		if nameEnd < 0 {
-			return "", len(tag), true
-		}
-		if nameEnd == 0 {
-			return "", 0, false
-		}
-		at := len(tag) - len(attrs) + nameEnd
-		if attrs[nameEnd] != '=' {
-			start = at
-			continue
-		}
-		return attrs[:nameEnd], at, true
-	}
-}
-
-func readAttribute(tag string, start int) (name, value string, next int, ok bool) {
-	name, eq, ok := nextAttributeName(tag, start)
-	if !ok || name == "" {
-		return "", "", eq, ok
-	}
-	attrs := tag[eq+1:]
-	if attrs == "" || (attrs[0] != '\'' && attrs[0] != '"') {
-		return "", "", 0, false
-	}
-	// An attribute name must start after whitespace or a '<'. The check bounds the
-	// name to bytes that could begin one; nextAttributeName has already skipped
-	// valueless attributes, so a name reached through one is still read.
-	if before := eq - len(name) - 1; before < 0 ||
-		(tag[before] != '<' && !strings.ContainsRune(htmlWhitespace, rune(tag[before]))) {
-		return "", "", 0, false
-	}
-	quote := attrs[0]
-	attrs = attrs[1:]
-	valueEnd := strings.IndexByte(attrs, quote)
-	if valueEnd < 0 {
-		return "", "", 0, false
-	}
-	value = attrs[:valueEnd]
-	next = len(tag) - len(attrs) + valueEnd + 1
-	if next < len(tag) && !strings.ContainsRune(htmlWhitespace+"/", rune(tag[next])) {
-		return "", "", 0, false
-	}
-	return name, value, next, true
-}
-
-// equalASCIIFold compares ASCII case without Unicode simple folding, which
-// would let non-ASCII near-spellings match parser literals.
-func equalASCIIFold(s, t string) bool {
-	if len(s) != len(t) {
-		return false
-	}
-	for i := range len(s) {
-		if lowerASCII(s[i]) != lowerASCII(t[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func lowerASCII(b byte) byte {
-	if 'A' <= b && b <= 'Z' {
-		return b + 'a' - 'A'
-	}
-	return b
-}
-
-// startsTagName reports whether b is the ASCII letter that opens a start tag.
-func startsTagName(b byte) bool {
-	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
-}
-
-func commentEnd(html string, open int) (int, bool) {
-	rest := html[open+len("<!--"):]
-	// An abruptly closed comment (<!--> or <!--->) ends at its '>'.
-	if after, ok := strings.CutPrefix(rest, ">"); ok {
-		return len(html) - len(after), true
-	}
-	if after, ok := strings.CutPrefix(rest, "->"); ok {
-		return len(html) - len(after), true
-	}
-
-	// A comment ends at "-->", or earlier at the bang close "--!>".
-	end := strings.Index(rest, "-->")
-	scope := rest
-	if end >= 0 {
-		scope = rest[:end]
-	}
-	if bang := strings.Index(scope, "--!>"); bang >= 0 {
-		return open + len("<!--") + bang + len("--!>"), true
-	}
-	if end >= 0 {
-		return open + len("<!--") + end + len("-->"), true
-	}
-	return 0, false
-}
-
-// nextStartTag reads the markup at or after cursor. emit is true only for a
-// start tag; next is where scanning resumes; ok is false at end of input.
-//
-// A terminated comment is skipped at its comment end ("-->", "--!>", or an
-// abrupt "<!-->"/"<!--->"). A doctype, bogus declaration, CDATA section,
-// processing instruction, or nameless end tag is skipped at its own '>'; a
-// named end tag is read like a start tag, because HTML gives it the same
-// attribute syntax. Each ends at its first '>' even when a quote precedes it,
-// which is where HTML's own doctype and bogus-comment states end them, so bytes
-// after that '>' are markup again and a link there is emitted. A CDATA section
-// in foreign content is the one case that differs: HTML ends that at ']]>', so
-// a link after a '>' in its body is text upstream and a package name here. A
-// construct whose terminator is absent runs to end of input, so the walk ends
-// there rather than resuming inside it; next then carries the construct's own
-// offset.
-func nextStartTag(html string, cursor int) (tag string, next int, emit, unterminated, ok bool) {
-	i := strings.IndexByte(html[cursor:], '<')
-	if i < 0 {
-		return "", 0, false, false, false
-	}
-	open := cursor + i
-	// A '<' that is the input's final byte opens no markup.
-	if open+1 >= len(html) {
-		return "", open + 1, false, false, true
-	}
-	if strings.HasPrefix(html[open:], "<!--") {
-		if end, found := commentEnd(html, open); found {
-			return "", end, false, false, true
-		}
-		return "", open, false, true, true
-	}
-	// An end tag carries the same attribute syntax as a start tag, so a '>'
-	// inside one of its quoted values does not end it; it is read like a
-	// start tag and yielded to nobody.
-	if open+2 < len(html) && html[open+1] == '/' && startsTagName(html[open+2]) {
-		if end, found := markupTagEnd(html, open); found {
-			return "", end + 1, false, false, true
-		}
-		return "", open, false, true, true
-	}
-	// A '<' that cannot open a start tag opens no markup either: a doctype, a bogus
-	// declaration, a CDATA section in HTML content, a processing instruction and a
-	// nameless end tag all end at their own '>', so their bodies are not markup. An
-	// unterminated one ends the walk, as an unterminated comment does.
-	if html[open+1] == '!' || html[open+1] == '?' || html[open+1] == '/' {
-		if end := strings.IndexByte(html[open:], '>'); end >= 0 {
-			return "", open + end + 1, false, false, true
-		}
-		return "", open, false, true, true
-	}
-	// Any other '<' not followed by an ASCII letter advances one byte.
-	if !startsTagName(html[open+1]) {
-		return "", open + 1, false, false, true
-	}
-	tagEnd, found := markupTagEnd(html, open)
-	if !found {
-		return "", open, false, true, true
-	}
-	return html[open:tagEnd], tagEnd + 1, true, false, true
-}
-
-// startTags yields each span that begins at a '<' followed by an ASCII letter and
-// ends at the first '>' outside a quoted span. End tags, processing
-// instructions, and terminated comments are skipped. A raw-text element body
-// (script, style, textarea, title) is walked as ordinary markup, including tag-shaped bytes.
-// A terminator lookup that runs to end of input ends the walk with
-// errHTMLFormatChanged instead of a span.
-func startTags(html string) iter.Seq2[string, error] {
-	return func(yield func(string, error) bool) {
-		for cursor := 0; cursor < len(html); {
-			tag, next, emit, unterminated, ok := nextStartTag(html, cursor)
-			if !ok {
-				return
-			}
-			if unterminated {
-				yield("", fmt.Errorf("%w: unterminated markup construct at byte %d", errHTMLFormatChanged, next))
-				return
-			}
-			cursor = next
-			if emit && !yield(tag, nil) {
-				return
-			}
-		}
-	}
-}
-
-// tagAttributes yields one start tag's name="value" pairs. The walk stops at
-// the first pair readAttribute cannot account for — an unquoted value or a
-// malformed pair — because a tag this cannot fully read is a tag whose
-// remaining attributes are not knowable.
-func tagAttributes(tag string) iter.Seq2[string, string] {
-	return func(yield func(string, string) bool) {
-		at := strings.IndexAny(tag, htmlWhitespace+"/")
-		if at < 0 {
-			return
-		}
-		for {
-			name, value, next, ok := readAttribute(tag, at)
-			if !ok || name == "" {
-				return
-			}
-			if !yield(name, value) {
-				return
-			}
-			at = next
-		}
-	}
-}
-
-// parsePackageList extracts package names from one owner's listing page. A
-// name comes from an href on any span the lexical walk emits, page text
-// included; the page's printed package count is compared against the set
-// read, and a mismatch refuses the page.
+// parsePackageList extracts package names from one owner's listing page.
+// The caller compares the page's printed package count against the set read
+// and refuses the page on a mismatch. A package name comes from a double-quoted
+// href whose value starts with this account kind's package-link prefix.
 // Registered owner casing is response data, so the prefix is matched without
-// transforming untrusted HTML.
-// Zero names is not an error here because its meaning depends on the page
-// number, which only the caller knows.
+// transforming untrusted HTML. Zero names is not an error here because its
+// meaning depends on the page number, which only the caller knows.
 func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, err error) {
 	prefix := linkPrefix(kind, owner)
-	for tag, walkErr := range startTags(html) {
-		if walkErr != nil {
-			return names, refused, walkErr
+	const hrefOpen = `href="`
+	for rest := html; ; {
+		hrefAt := strings.Index(rest, hrefOpen)
+		if hrefAt < 0 {
+			return names, refused, nil
 		}
-		tagNames, tagRefused := parsePackageTag(tag, owner, prefix)
-		names = append(names, tagNames...)
-		refused = refused.merge(tagRefused)
-	}
-	return names, refused, nil
-}
-
-func parsePackageTag(tag, owner, prefix string) (names []string, refused refusals) {
-	for name, value := range tagAttributes(tag) {
-		raw, isPackage := packageHref(name, value, prefix)
-		if !isPackage {
+		rest = rest[hrefAt+len(hrefOpen):]
+		value, after, ok := strings.Cut(rest, `"`)
+		if !ok {
+			return names, refused, nil
+		}
+		rest = after
+		if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
 			continue
 		}
+		raw := value[len(prefix):]
 		pkg, nameErr := urlsafe.PackageName(urlsafe.Owner(owner), raw)
 		if nameErr != nil {
 			refused = refused.refuse(raw)
@@ -636,7 +390,6 @@ func parsePackageTag(tag, owner, prefix string) (names []string, refused refusal
 		}
 		names = append(names, strings.Clone(pkg))
 	}
-	return names, refused
 }
 
 // statedPackages reports the package count a listing page publishes for
@@ -664,7 +417,8 @@ func statedPackages(html string) (n int, ok bool) {
 
 func statedPackageCount(html string, markerAt int) (int, bool) {
 	before := strings.TrimRight(html[:markerAt], htmlWhitespace)
-	after := strings.TrimLeft(html[markerAt+len(statedPackagesMarker):], htmlWhitespace)
+	after, _ := strings.CutPrefix(html[markerAt+len(statedPackagesMarker):], "s")
+	after = strings.TrimLeft(after, htmlWhitespace)
 	if !strings.HasPrefix(after, "</") {
 		return 0, false
 	}
@@ -679,171 +433,31 @@ func statedPackageCount(html string, markerAt int) (int, bool) {
 	return count, err == nil
 }
 
-// packageHref reports the package segment carried under prefix.
-func packageHref(name, value, prefix string) (segment string, isPackage bool) {
-	if !equalASCIIFold(name, "href") || len(value) < len(prefix) ||
-		!equalASCIIFold(value[:len(prefix)], prefix) {
-		return "", false
-	}
-	return value[len(prefix):], true
-}
-
-// scrapeDownloads fetches a single package page and returns its total
-// download count. Non-2xx responses and transport errors bubble up as
-// httpx.GetBytes returned them; parse failures return errHTMLFormatChanged.
-// The /users/ form serves both account kinds: GitHub redirects an organization
-// to the repo-scoped package page through the allowlisted redirect policy, so
-// expandWildcard's account kind is deliberately not threaded here.
-func (c *Client) scrapeDownloads(ctx context.Context, p *pacer, ref registry.RepoRef) (int64, error) {
-	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/package/%s", ref.Owner, url.PathEscape(ref.Repo))
-	html, err := c.fetchHTML(ctx, p, pageURL)
-	if err != nil {
-		return 0, err
-	}
-	return parseDownloads(html)
-}
-
-// parseDownloads extracts the download count from a single package page:
-// the title attribute of the <h3> element immediately following the
-// unique "Total downloads" marker element, whitespace skipped. Anything
-// else there, including an ambiguous marker, fails closed with
-// errHTMLFormatChanged rather than publishing a number that may belong to
-// another element. Line boundaries are deliberately not meaningful: GitHub
-// reflows whitespace without breaking this.
+// parseDownloads extracts the download count from a single package page: the
+// title attribute of the <h3> element immediately following the page's one
+// "Total downloads" marker element. Anything else there, including an ambiguous
+// marker, fails closed with errHTMLFormatChanged rather than publishing a
+// number that may belong to another element.
 func parseDownloads(html string) (int64, error) {
-	markerIdx, markers := markerText(html)
+	const marker = ">Total downloads</span>"
+	markers := strings.Count(html, marker)
 	if markers != 1 {
 		return 0, fmt.Errorf("%w: %d download-count markers", errHTMLFormatChanged, markers)
 	}
-	rest := html[markerIdx:]
-
-	// The end tag closing the marker element may carry an attribute whose value
-	// contains '>', so its end is found quote-aware: stopping at the first '>'
-	// lands inside that value, and bytes written there are then read as the
-	// count element below.
-	endTagAt := strings.Index(rest, "<")
-	if endTagAt < 0 {
-		return 0, errHTMLFormatChanged
+	rest := strings.TrimLeft(html[strings.Index(html, marker)+len(marker):], htmlWhitespace)
+	const countOpen = `<h3 title="`
+	if !strings.HasPrefix(rest, countOpen) {
+		return 0, fmt.Errorf("%w: the element after the marker is not %s", errHTMLFormatChanged, countOpen)
 	}
-	markerEnd, ok := markupTagEnd(rest, endTagAt)
+	raw, _, ok := strings.Cut(rest[len(countOpen):], `"`)
 	if !ok {
-		return 0, errHTMLFormatChanged
+		return 0, fmt.Errorf("%w: count title attribute does not close", errHTMLFormatChanged)
 	}
-	afterMarker := rest[markerEnd+1:]
-	countIdx := markerEnd + 1 + len(afterMarker) - len(strings.TrimLeft(afterMarker, htmlWhitespace))
-	const countTag = "<h3"
-	if len(rest)-countIdx < len(countTag) || !equalASCIIFold(rest[countIdx:countIdx+len(countTag)], countTag) {
-		return 0, errHTMLFormatChanged
-	}
-	afterName := rest[countIdx+len(countTag):]
-	if afterName == "" || !strings.ContainsRune(htmlWhitespace+">/", rune(afterName[0])) {
-		return 0, errHTMLFormatChanged
-	}
-
-	tag := rest[countIdx:]
-	tagEnd := strings.Index(tag, ">")
-	if tagEnd == -1 {
-		return 0, errHTMLFormatChanged
-	}
-	tag = tag[:tagEnd]
-	// The title must be an attribute rather than matching bytes in another value.
-	raw, ok := titleAttribute(tag)
-	if !ok {
-		return 0, errHTMLFormatChanged
-	}
-	count, err := strconv.ParseInt(raw, 10, 64)
+	count, err := strconv.ParseUint(raw, 10, 63)
 	if err != nil {
 		return 0, fmt.Errorf("%w: parse count: %w", errHTMLFormatChanged, err)
 	}
-	if count < 0 {
-		return 0, fmt.Errorf("%w: negative download count: %d", errHTMLFormatChanged, count)
-	}
-	return count, nil
-}
-
-func nextCommentSpan(html string, cursor int) (start, end int, terminated bool) {
-	offset := strings.Index(html[cursor:], "<!--")
-	if offset < 0 {
-		return len(html), len(html), true
-	}
-	start = cursor + offset
-	end, terminated = commentEnd(html, start)
-	if !terminated {
-		end = len(html)
-	}
-	return start, end, terminated
-}
-
-// markerText returns the first plausible "Total downloads" occurrence and
-// the number found. A plausible occurrence is bounded like element text: the
-// previous non-whitespace byte closes a start tag and the next bytes begin an
-// element's closing tag. It skips comments but does not track raw-text element
-// context, so a script body with that shape counts too. If the real marker is
-// also present, parseDownloads rejects the duplicate; if the false shape is the
-// only one, its count is read, a shape GitHub does not serve.
-func markerText(html string) (idx, n int) {
-	const marker = "Total downloads"
-	// The marker search only moves forward, so each comment is scanned
-	// once: a new "<!--" can only be in the window since the previous
-	// occurrence, and a marker inside a comment resumes at that comment's
-	// end.
-	commentStart, commentAt, terminated := 0, 0, true
-	for at := 0; ; {
-		i := strings.Index(html[at:], marker)
-		if i < 0 {
-			return idx, n
-		}
-		i += at
-		if commentAt <= i {
-			commentStart, commentAt, terminated = nextCommentSpan(html, commentAt)
-		}
-		if commentStart <= i && i < commentAt {
-			if !terminated {
-				return idx, n
-			}
-			at = commentAt
-			continue
-		}
-		before := strings.TrimRight(html[:i], htmlWhitespace)
-		rest := strings.TrimLeft(html[i+len(marker):], htmlWhitespace)
-		if strings.HasSuffix(before, ">") && strings.HasPrefix(rest, "</") {
-			if n == 0 {
-				idx = i
-			}
-			n++
-		}
-		at = i + len(marker)
-	}
-}
-
-// titleAttribute returns the h3 start tag's single title attribute value.
-// An unquoted value, a second title, and a '>' inside a quoted value each
-// refuse the tag. Stray markup before the title is not refused:
-// nextAttributeName reads it as a valueless attribute, so the count is still
-// read. GitHub serves neither shape; what bounds a wrong number is
-// parseDownloads' unique-marker refusal and the positional h3, not this walk.
-func titleAttribute(tag string) (string, bool) {
-	var (
-		title string
-		found bool
-	)
-	for cursor := len("<h3"); ; {
-		name, value, next, ok := readAttribute(tag, cursor)
-		if !ok {
-			return "", false
-		}
-		if name == "" {
-			return title, found
-		}
-		if equalASCIIFold(name, "title") {
-			if found {
-				return "", false
-			}
-			title = value
-			found = true
-		}
-		cursor = next
-	}
+	return int64(count), nil
 }
 
 // expandWildcard scrapes one wildcard owner's packages listing and appends
@@ -944,7 +558,6 @@ func (c *Client) buildPackageList(
 		if seen[ref] {
 			continue
 		}
-		seen[ref] = true
 		packages = append(packages, ref)
 	}
 	return packages, listingWhollyFailed

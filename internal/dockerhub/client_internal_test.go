@@ -12,19 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 	"github.com/cplieger/slogx/capture"
 )
-
-// shortRetry returns httpx options with a 1 ms base delay so retry tests
-// don't wait a full second between attempts.
-func shortRetry() []httpx.GetOption {
-	return []httpx.GetOption{httpx.WithBaseDelay(time.Millisecond)}
-}
 
 func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	pageRequests := 0
@@ -51,7 +43,7 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
+	c := NewClient(srv.Client(), Options{Logger: logger})
 	repos, advertised, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
@@ -73,103 +65,6 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	}
 }
 
-func TestClient_ListRepos_RejectsLaterPageContradictingOwnTotal(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("page") {
-		case "1":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"count": 1, "results": []map[string]any{{"name": "a", "pull_count": 1}}, "next": "page2",
-			})
-		case "2":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"count": 0, "results": []map[string]any{{"name": "b", "pull_count": 2}}, "next": "",
-			})
-		}
-	})
-	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
-
-	repos, advertised, err := c.listRepos(t.Context(), "o")
-	if !shapeChanged(err) {
-		t.Errorf("listRepos(later page carries a row against count 0) error = %v, want a shape-change error", err)
-	}
-	if errors.Is(err, errListingMoved) {
-		t.Errorf("listRepos(later page carries a row against count 0) error = %v, want the page contradiction instead of errListingMoved", err)
-	}
-	if advertised != 1 {
-		t.Errorf("listRepos(later page carries a row against count 0) advertised = %d, want 1", advertised)
-	}
-	if len(repos) != 1 {
-		t.Fatalf("listRepos(later page carries a row against count 0) returned %d repos, want only the valid first-page repo", len(repos))
-	}
-	if repos[0].Repo != "a" {
-		t.Errorf("listRepos(later page carries a row against count 0) repos[0] = %+v, want repo a", repos[0])
-	}
-}
-
-func TestClient_ListRepos_ReportsMidWalkPopulationChange(t *testing.T) {
-	page1 := make([]map[string]any, 0, pageSize)
-	for i := range pageSize {
-		page1 = append(page1, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("page") {
-		case "1":
-			_ = json.NewEncoder(w).Encode(map[string]any{"count": 100, "results": page1, "next": "page2"})
-		case "2":
-			_ = json.NewEncoder(w).Encode(map[string]any{"count": 99, "results": []map[string]any{}, "next": ""})
-		}
-	})
-	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
-
-	repos, advertised, err := c.listRepos(t.Context(), "o")
-	if !errors.Is(err, errListingMoved) {
-		t.Errorf("listRepos(total changed mid-walk) error = %v, want errListingMoved", err)
-	}
-	if shapeChanged(err) {
-		t.Errorf("listRepos(total changed mid-walk) error = %v, want a cause outside shapeChanged so it reports at WARN", err)
-	}
-	if len(repos) != 99 || advertised != 100 {
-		t.Errorf("listRepos(total changed mid-walk) = (%d repos, advertised %d), want (99, 100)", len(repos), advertised)
-	}
-}
-
-func TestClient_ListRepos_ReportsMidWalkPopulationChangeWhenCountsMatch(t *testing.T) {
-	page1 := make([]map[string]any, 0, pageSize)
-	for i := range pageSize {
-		page1 = append(page1, map[string]any{"name": "r" + strconv.Itoa(i), "pull_count": 1})
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("page") {
-		case "1":
-			_ = json.NewEncoder(w).Encode(map[string]any{"count": 100, "results": page1, "next": "page2"})
-		case "2":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"count": 101,
-				"results": []map[string]any{
-					{"name": "r98", "pull_count": 1},
-					{"name": "r99", "pull_count": 1},
-				},
-				"next": "",
-			})
-		}
-	})
-	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
-
-	repos, advertised, err := c.listRepos(t.Context(), "o")
-	if !errors.Is(err, errListingMoved) {
-		t.Errorf("listRepos(total changed with matching retained count) error = %v, want errListingMoved", err)
-	}
-	if len(repos) != 100 || advertised != 100 {
-		t.Errorf("listRepos(total changed with matching retained count) = (%d repos, advertised %d), want (100, 100)", len(repos), advertised)
-	}
-}
-
 func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +82,7 @@ func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T)
 		_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "results": []map[string]any{{"name": "b", "pull_count": 2}}, "next": ""})
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
 	repos, advertised, err := c.listRepos(t.Context(), "o")
 	if err != nil {
@@ -218,7 +113,7 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: logger})
+	c := NewClient(srv.Client(), Options{Logger: logger})
 	refs := []registry.RepoRef{{Owner: "o", Repo: "*"}}
 	collection := c.Collect(t.Context(), refs)
 
@@ -232,9 +127,6 @@ func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	// RegistryStatsCollectionIncomplete in alerts/logql.yaml consumes this literal.
 	if !strings.Contains(logs, `level=WARN msg="docker hub owner listing hit page cap; results may be truncated"`) {
 		t.Errorf("Collect stopping at the page cap did not emit the alert-keyed WARN; logs:\n%s", logs)
-	}
-	if !strings.Contains(logs, "page_rows=2") {
-		t.Errorf("Collect stopping at the page cap did not report the 2 rows its pages carried; logs:\n%s", logs)
 	}
 	if !strings.Contains(logs, `msg="docker hub wildcard expanded"`) ||
 		!strings.Contains(logs, "owner=o") || !strings.Contains(logs, "repos=2") ||
@@ -255,7 +147,7 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertisedAtPageCap(t *testing.T) 
 		})
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
 	repos, advertised, err := c.listRepos(t.Context(), "o")
 	if !shapeChanged(err) {
@@ -263,35 +155,6 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertisedAtPageCap(t *testing.T) 
 	}
 	if len(repos) != 2 || advertised != 1 {
 		t.Errorf("listRepos(page-capped count 1 with 2 repos) = (%d repos, advertised %d), want (2, 1)", len(repos), advertised)
-	}
-}
-
-func TestClient_ListRepos_PageCapWithMovedTotalIsNotAFormatChange(t *testing.T) {
-	page := func(n, count int) map[string]any {
-		rows := make([]map[string]any, 0, pageSize)
-		for i := range pageSize {
-			rows = append(rows, map[string]any{"name": "p" + strconv.Itoa(n) + "r" + strconv.Itoa(i), "pull_count": 1})
-		}
-		return map[string]any{"count": count, "results": rows, "next": "keep-going"}
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("page") {
-		case "1":
-			_ = json.NewEncoder(w).Encode(page(1, 150))
-		case "2":
-			_ = json.NewEncoder(w).Encode(page(2, 900))
-		}
-	})
-	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
-
-	repos, advertised, err := c.listRepos(t.Context(), "o")
-	if err != nil {
-		t.Errorf("listRepos(page cap after the owner grew) error = %v, want nil: no page contradicted its own total", err)
-	}
-	if len(repos) != 2*pageSize || advertised != 150 {
-		t.Errorf("listRepos(page cap after the owner grew) = (%d repos, advertised %d), want (%d, 150)", len(repos), advertised, 2*pageSize)
 	}
 }
 
@@ -308,7 +171,7 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertised(t *testing.T) {
 		})
 	})
 	srv := httptest.NewTestServer(t, mux)
-	c := NewClient(srv.Client(), Options{RetryOpts: shortRetry(), Logger: slog.Default()})
+	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
 	_, _, err := c.listRepos(t.Context(), "o")
 
@@ -472,7 +335,6 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 	hostile := "\n\x00\u202e" + string([]byte{0xff}) + strings.Repeat("x", 300)
-	retryOpts := []httpx.GetOption{httpx.WithMaxAttempts(1)}
 	wildcard := []registry.RepoRef{{Owner: "owner", Repo: "*"}}
 	explicit := []registry.RepoRef{{Owner: "owner", Repo: "repo"}}
 
@@ -488,7 +350,7 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					return nil, errors.New(hostile)
 				})}
-				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), wildcard)
+				NewClient(client, Options{Logger: logger}).Collect(t.Context(), wildcard)
 			},
 		},
 		{
@@ -504,7 +366,7 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 					}
 					return nil, errors.New(hostile)
 				})}
-				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), wildcard)
+				NewClient(client, Options{Logger: logger}).Collect(t.Context(), wildcard)
 			},
 		},
 		{
@@ -516,7 +378,7 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 					cancel()
 					return nil, errors.New(hostile)
 				})}
-				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(ctx, explicit)
+				NewClient(client, Options{Logger: logger}).Collect(ctx, explicit)
 			},
 		},
 		{
@@ -526,7 +388,7 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					return nil, errors.New(hostile)
 				})}
-				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), explicit)
+				NewClient(client, Options{Logger: logger}).Collect(t.Context(), explicit)
 			},
 		},
 		{
@@ -538,7 +400,7 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 				})}
-				NewClient(client, Options{Logger: logger, RetryOpts: retryOpts}).Collect(t.Context(), explicit)
+				NewClient(client, Options{Logger: logger}).Collect(t.Context(), explicit)
 			},
 		},
 	}
@@ -565,31 +427,6 @@ func TestClient_LogErrorsAreSanitizedAndBounded(t *testing.T) {
 	}
 }
 
-func TestClient_Collect_InternalBodyCapOverridesCaller(t *testing.T) {
-	body := `{"count":0,"results":[],"next":"","padding":"` + strings.Repeat("x", 1<<20) + `"}`
-	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(body))
-	}))
-
-	buf := &bytes.Buffer{}
-	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	c := NewClient(srv.Client(), Options{
-		Logger:    logger,
-		RetryOpts: []httpx.GetOption{httpx.WithMaxBodyBytes(2 << 20)},
-	})
-	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
-
-	if !collection.ListingFailed {
-		t.Error("Collect() listingFailed = false, want true for a body past the internal cap")
-	}
-	if len(collection.Entries) != 0 || collection.Attempted != 0 {
-		t.Errorf("Collect() past the internal body cap = (%d entries, attempted=%d), want (0, 0)", len(collection.Entries), collection.Attempted)
-	}
-	if !strings.Contains(buf.String(), "level=ERROR") {
-		t.Errorf("Collect() past the internal body cap did not log at ERROR; logs:\n%s", buf.String())
-	}
-}
-
 func TestClient_Collect_ExhaustedRetryStaysAtDebug(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -597,7 +434,7 @@ func TestClient_Collect_ExhaustedRetryStaysAtDebug(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	c := NewClient(srv.Client(), Options{Logger: logger, RetryOpts: shortRetry()})
+	c := NewClient(srv.Client(), Options{Logger: logger})
 	c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "app"}})
 
 	// httpx levels its own terminal line at Warn for a multi-attempt

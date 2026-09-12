@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/webhttp/v2"
 )
 
 func scrapeBody(t *testing.T, m *Metrics) string {
@@ -23,12 +22,6 @@ func scrapeBody(t *testing.T, m *Metrics) string {
 
 func TestMetricsHandler(t *testing.T) {
 	m := New()
-	m.RecordHTTP(webhttp.RequestMetric{
-		Method:  http.MethodGet,
-		Path:    "/metrics",
-		Status:  http.StatusOK,
-		Latency: 13 * time.Millisecond,
-	})
 	m.RecordCollect(registry.DockerHub, false)
 	m.RecordCollect(registry.GHCR, true)
 	m.ObserveCollectDuration(1420 * time.Millisecond)
@@ -40,12 +33,10 @@ func TestMetricsHandler(t *testing.T) {
 	body := scrapeBody(t, m)
 
 	want := []string{
-		`registrystats_http_requests_total{method="GET",path="/metrics",status="200"} 1`,
 		`registrystats_collects_total{source="dockerhub"} 1`,
 		`registrystats_collect_errors_total{source="ghcr"} 1`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
-		`registrystats_http_request_duration_seconds_bucket{le="0.025"}`,
 		`registrystats_collect_duration_seconds_bucket{le="5"} 1`,
 		`registrystats_collect_duration_seconds_bucket{le="10800"} 1`,
 		`registrystats_collect_duration_seconds_bucket{le="18000"} 1`,
@@ -62,12 +53,6 @@ func TestMetricsHandler(t *testing.T) {
 
 func TestMetricsHandler_publishesExactMetadata(t *testing.T) {
 	m := New()
-	m.RecordHTTP(webhttp.RequestMetric{
-		Method:  http.MethodGet,
-		Path:    "/metrics",
-		Status:  http.StatusOK,
-		Latency: time.Second,
-	})
 	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	m.ObserveCollectDuration(time.Second)
 	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
@@ -75,14 +60,10 @@ func TestMetricsHandler_publishesExactMetadata(t *testing.T) {
 	body := scrapeBody(t, m)
 
 	want := []string{
-		"# HELP registrystats_http_requests_total Total HTTP requests",
-		"# TYPE registrystats_http_requests_total counter",
 		"# HELP registrystats_collects_total Total collection runs by source",
 		"# TYPE registrystats_collects_total counter",
 		"# HELP registrystats_collect_errors_total Failed collection runs by source",
 		"# TYPE registrystats_collect_errors_total counter",
-		"# HELP registrystats_http_request_duration_seconds HTTP request latency",
-		"# TYPE registrystats_http_request_duration_seconds histogram",
 		"# HELP registrystats_collect_duration_seconds Collection cycle duration",
 		"# TYPE registrystats_collect_duration_seconds histogram",
 		"# HELP registrystats_image_pulls_total Total pull count per image",
@@ -103,25 +84,6 @@ func TestObserveCollectDuration_recordsSeconds(t *testing.T) {
 
 	if !strings.Contains(body, `registrystats_collect_duration_seconds_sum 1.42`) {
 		t.Errorf("ObserveCollectDuration(1420ms) sum missing or not in seconds:\n%s", body)
-	}
-}
-
-func TestRecordHTTP_recordsLatencyInSeconds(t *testing.T) {
-	m := New()
-	m.RecordHTTP(webhttp.RequestMetric{
-		Method:  http.MethodGet,
-		Path:    "/metrics",
-		Status:  http.StatusOK,
-		Latency: 13 * time.Millisecond,
-	})
-
-	body := scrapeBody(t, m)
-
-	if !strings.Contains(body, `registrystats_http_request_duration_seconds_count 1`) {
-		t.Errorf("RecordHTTP() duration count missing:\n%s", body)
-	}
-	if !strings.Contains(body, `registrystats_http_request_duration_seconds_sum 0.013`) {
-		t.Errorf("RecordHTTP() duration sum missing or not in seconds:\n%s", body)
 	}
 }
 
@@ -220,12 +182,6 @@ func TestSetImage_preservesSurvivingSeriesDuringConcurrentScrape(t *testing.T) {
 
 func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	m := New()
-	m.RecordHTTP(webhttp.RequestMetric{
-		Method:  http.MethodGet,
-		Path:    "/metrics",
-		Status:  http.StatusOK,
-		Latency: time.Second,
-	})
 	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	m.ObserveCollectDuration(time.Second)
 	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})

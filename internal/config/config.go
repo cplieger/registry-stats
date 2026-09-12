@@ -30,8 +30,8 @@ const (
 // Config is the effective runtime configuration after env var parsing.
 type Config struct {
 	ListenAddr     string             // TCP listen address (env LISTEN_ADDR)
-	DockerHubRepos []registry.RepoRef // Docker Hub repos: "owner/repo" or "owner/*" (wildcard = all public)
-	GHCRRepos      []registry.RepoRef // GHCR packages: "owner/repo" or "owner/*" (wildcard = all public)
+	DockerHubRepos []registry.RepoRef // Docker Hub repos: "owner/repo" or "owner/*" (wildcard = the repos the owner listing serves)
+	GHCRRepos      []registry.RepoRef // GHCR packages: "owner/package" or "owner/*" (wildcard = the packages the owner listing serves)
 	PollInterval   time.Duration      // time between collections (0 = one-shot, collect once then serve)
 	LogLevel       slog.Level         // parsed from LOG_LEVEL env var
 }
@@ -171,12 +171,13 @@ func parseRepoRefs(s string, reg registry.ID) ([]registry.RepoRef, []Warning) {
 	return refs, warns
 }
 
-// resolveRef returns the canonical lower-case ref because Docker Hub 404s an
-// upper-case ref, ghcr.io will not register one, and the fold makes deduplication
-// case-insensitive. A non-nil error names the refusing rule and is not a sentinel.
+// resolveRef returns the canonical lower-case ref because Docker Hub answers an
+// upper-case namespace or repository with 400 naming its lowercase grammar, and
+// because folding here makes the dedupe in parseRepoRefs case-insensitive.
+// A non-nil error names the refusing rule and is not a sentinel.
 func resolveRef(reg registry.ID, token string) (registry.RepoRef, error) {
 	owner, repo, ok := strings.Cut(token, "/")
-	if !ok || owner == "" || repo == "" {
+	if !ok {
 		return registry.RepoRef{}, errors.New("not owner/repo or owner/*")
 	}
 	if !urlsafe.IsSafeURLSegment(owner) {

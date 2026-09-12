@@ -13,10 +13,16 @@ import (
 
 // Source collects registry-specific statistics. Source must return a known
 // registry.ID; registry.Collection defines the returned cycle accounting.
-// Every ref is already canonical for the registry Source names -- lower case,
-// and accepted by internal/config's urlsafe gate -- so Collect may interpolate
-// Owner and Repo into a request URL without re-checking their shape. A
-// successful Collect returns entries whose Owner and Repo are non-empty: obs
+// Every ref is already canonical and distinct for the registry Source names --
+// lower case, accepted by internal/config's urlsafe gate, and deduplicated on
+// the registry.RepoRef key -- so Collect may interpolate Owner and Repo into a
+// request URL without re-checking their shape.
+// Collect still owns the shape of the request it builds: Repo is "*" for an
+// owner-wide ref, which it expands into that owner's published repositories
+// rather than requesting by name, and a GHCR Repo is the decoded package name,
+// which may carry '/' path elements and needs url.PathEscape (see
+// urlsafe.PackageName).
+// A successful Collect returns entries whose Owner and Repo are non-empty: obs
 // keys the published gauge on that pair, and every construction gate rejects
 // the empty string.
 type Source interface {
@@ -30,9 +36,10 @@ type SourceRefs struct {
 	Refs   []registry.RepoRef
 }
 
-// Options configures a single Run. Metrics, Logger and Sources are required,
-// and no two Sources may report the same registry.ID: Run keys the metric label
-// on it.
+// Options configures a single Run. Metrics and Logger are required, and no two
+// Sources may report the same registry.ID: Run keys the metric label on it. An
+// empty Sources is a supported cycle: Run collects nothing and warns that no
+// repos are configured.
 type Options struct {
 	Metrics *obs.Metrics
 	Logger  *slog.Logger
@@ -54,7 +61,6 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 	start := time.Now()
 	logger.Info("starting collection")
 	var degraded bool
-	var invokedAnySource bool
 
 	for _, sourceRefs := range opts.Sources {
 		if ctx.Err() != nil {
@@ -65,7 +71,6 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 			// that, so the stall rule's 3h window is unaffected.
 			break
 		}
-		invokedAnySource = true
 		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, sourceRefs.Source, sourceRefs.Refs)
 		if !srcHealthy {
 			degraded = true
@@ -75,13 +80,15 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 
 	if ctx.Err() != nil {
 		logger.Warn("collection interrupted",
-			"error", ctx.Err(), "collected", len(images))
+			"error", ctx.Err(), "images", len(images))
 		return images
 	}
 
+	opts.Metrics.ObserveCollectDuration(time.Since(start))
+
 	if len(images) == 0 {
 		switch {
-		case !invokedAnySource:
+		case len(opts.Sources) == 0:
 			// RegistryStatsConfigRejected (alerts/logql.yaml) matches the text of the
 			// "no repos configured" WARN; reword it there and here together.
 			logger.Warn("no repos configured")

@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 	"github.com/cplieger/webhttp/v2"
 )
 
@@ -35,7 +34,7 @@ func TestNew_readinessEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := New(Deps{Metrics: obs.New(), Ready: tt.ready, Logger: testsupport.QuietLogger()})
+			srv := New(Deps{Metrics: obs.New(), Ready: tt.ready, Logger: slog.New(slog.DiscardHandler)})
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 
@@ -100,7 +99,7 @@ func TestNew_recoversHandlerPanicWithTruthfulAccessStatus(t *testing.T) {
 // IdleTimeout are deliberately not asserted: webhttp supplies non-zero
 // defaults not part of this package's contract.
 func TestNew_boundsRequestReadAndWrite(t *testing.T) {
-	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Ready: &webhttp.Ready{}, Logger: slog.New(slog.DiscardHandler)})
 
 	if srv.ReadTimeout <= 0 {
 		t.Errorf("New().ReadTimeout = %s, want a positive deadline (webhttp leaves it unset)", srv.ReadTimeout)
@@ -117,7 +116,7 @@ func TestNew_boundsRequestReadAndWrite(t *testing.T) {
 func TestNew_appliesSecurityHeaders(t *testing.T) {
 	readyTrue := &webhttp.Ready{}
 	readyTrue.Set(true)
-	srv := New(Deps{Metrics: obs.New(), Ready: readyTrue, Logger: testsupport.QuietLogger()})
+	srv := New(Deps{Metrics: obs.New(), Ready: readyTrue, Logger: slog.New(slog.DiscardHandler)})
 
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -137,80 +136,6 @@ func TestNew_appliesSecurityHeaders(t *testing.T) {
 	}
 	if got := h.Get("Strict-Transport-Security"); got != "" {
 		t.Errorf("Strict-Transport-Security = %q, want empty (HSTS off)", got)
-	}
-}
-
-// TestNew_boundsHTTPMetricCardinality pins the label vocabulary of
-// registrystats_http_requests_total through New's REAL route table and
-// middleware chain: the labels are derived by webhttp's
-// WithRecordRouteMetric and handed to Metrics.RecordHTTP, so the property
-// under test is that New reaches for the hook whose labels are bounded by
-// construction rather than the request-aware one.
-//
-// The bound: a client-chosen method token collapses to the fixed "other"
-// bucket and an unmatched path to the fixed "unmatched" marker. The
-// non-collapse: a matched route keeps its real method and route template
-// (including HEAD, which ServeMux routes to the GET pattern but which the
-// metric must still record as HEAD), and an unmatched request keeps its
-// real METHOD, only the path collapsing — a deliberate change from the
-// app's former hand-rolled derivation, which collapsed both labels onto
-// method="unmatched"; that retired value is asserted absent below.
-//
-// Observable only via the metrics exposition: the access log keeps the
-// raw path and verbatim method, so a log assertion cannot witness the
-// collapse.
-func TestNew_boundsHTTPMetricCardinality(t *testing.T) {
-	const hostilePunct = "M!#$%&'*+-.^_`|~" // every byte a valid RFC 9110 tchar
-
-	ready := &webhttp.Ready{}
-	ready.Set(true)
-	m := obs.New()
-	srv := New(Deps{Metrics: m, Ready: ready, Logger: testsupport.QuietLogger()})
-
-	for _, req := range []struct{ method, target string }{
-		{http.MethodGet, "/api/health"},   // matched
-		{http.MethodHead, "/api/health"},  // matched via the GET pattern
-		{http.MethodGet, "/metrics"},      // matched, second route
-		{http.MethodPost, "/api/health"},  // 405: path matches, method does not
-		{http.MethodGet, "/wp-login.php"}, // 404
-		{"WEIRDPROBE", "/wp-login.php"},   // 404 with an arbitrary method token
-		{hostilePunct, "/api/health"},     // 405 with a punctuation-only token
-	} {
-		srv.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(req.method, req.target, nil))
-	}
-
-	rec := httptest.NewRecorder()
-	m.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := rec.Body.String()
-
-	present := map[string]string{
-		`{method="GET",path="/api/health",status="200"}`:  "matched route lost its real method+template (over-collapse)",
-		`{method="HEAD",path="/api/health",status="200"}`: "HEAD was not preserved: ServeMux routes it to the GET pattern, but the metric must still record HEAD so it agrees with the access line for the same request_id",
-		`{method="GET",path="/metrics",status="200"}`:     "second matched route lost its real method+template",
-		`{method="POST",path="unmatched",status="405"}`:   "a 405 must keep its real method and collapse only the path",
-		`{method="GET",path="unmatched",status="404"}`:    "a 404 must keep its real method and collapse only the path",
-		`{method="other",path="unmatched",status="404"}`:  "a non-standard method must bucket to \"other\", not vanish",
-	}
-	for series, why := range present {
-		t.Run("present "+series, func(t *testing.T) {
-			if !strings.Contains(body, series) {
-				t.Errorf("%s: %s missing from exposition:\n%s", why, series, body)
-			}
-		})
-	}
-
-	absent := map[string]string{
-		`method="WEIRDPROBE"`:  "a client-supplied method token reached a metric label (cardinality bound broken)",
-		hostilePunct:           "a punctuation-only method token reached a metric label (cardinality bound broken)",
-		`path="/wp-login.php"`: "a raw unmatched path reached a metric label (cardinality bound broken)",
-		`method="unmatched"`:   "the retired method collapse is back: the method label is bounded by a closed nine-method set plus \"other\", so an unmatched request keeps its real method and only the path collapses",
-	}
-	for probe, why := range absent {
-		t.Run("absent "+probe, func(t *testing.T) {
-			if strings.Contains(body, probe) {
-				t.Errorf("%s: found %q in exposition:\n%s", why, probe, body)
-			}
-		})
 	}
 }
 

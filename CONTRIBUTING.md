@@ -37,9 +37,8 @@ into. Test fakes implement those. Concrete types live in their own packages:
 - `internal/obs`: the observability surface built on
   `github.com/cplieger/metrics`; the `registrystats_*` instances and
   `SetImage`.
-- `internal/registry`, `internal/urlsafe`, `internal/testsupport`: the
-  container-registry domain types (`Entry`, `RepoRef`, `ID`), URL-segment
-  validation, and shared test helpers.
+- `internal/registry`, `internal/urlsafe`: the container-registry domain
+  types (`Entry`, `RepoRef`, `ID`) and URL-segment validation.
 
 Dependencies flow one direction: `main.go` is the only place that imports
 concrete packages together.

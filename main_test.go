@@ -37,7 +37,8 @@ func TestRegistryClient_refusesOffAllowlistRedirect(t *testing.T) {
 		func(w http.ResponseWriter, _ *http.Request) {
 			targetHits.Add(1)
 			w.WriteHeader(http.StatusOK)
-		}))
+		},
+	))
 	defer target.Close()
 
 	src := httptest.NewServer(http.RedirectHandler(target.URL, http.StatusFound))
@@ -448,8 +449,8 @@ func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		runCollect(t.Context(), []collect.SourceRefs{
-		{Source: source, Refs: cfg.DockerHubRepos},
-	}, pub)
+			{Source: source, Refs: cfg.DockerHubRepos},
+		}, pub)
 		close(done)
 	}()
 	<-marker.entered
@@ -510,12 +511,11 @@ func TestActiveSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 	m := obs.New()
 
 	cfg := &config.Config{DockerHubRepos: []registry.RepoRef{{Owner: "o", Repo: "app"}}}
-	sources := []collect.Source{
-		&mainFakeSource{src: registry.DockerHub},
-		&mainFakeSource{src: registry.GHCR},
-	}
 
-	active, sourceIDs := activeSources(cfg, sources)
+	active, sourceIDs := activeSources([]collect.SourceRefs{
+		{Source: &mainFakeSource{src: registry.DockerHub}, Refs: cfg.DockerHubRepos},
+		{Source: &mainFakeSource{src: registry.GHCR}, Refs: cfg.GHCRRepos},
+	})
 	m.MintCollectSources(sourceIDs)
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)

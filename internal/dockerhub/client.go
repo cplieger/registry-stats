@@ -25,7 +25,7 @@ import (
 // is the largest size with a legal second page and maxOwnerPages stops there;
 // reaching the cap means this walk holds only part of the owner.
 // listingElemCap refuses a page that served far more rows than pageSize asked
-// for, before any cross-page accounting runs.
+// for, before the total the envelope advertises is read.
 // responseBodyCap bounds every response this client reads, listing pages and
 // per-repo metadata alike; the largest measured upstream page is about 75 KB.
 const (
@@ -38,28 +38,22 @@ const (
 // Client is the Docker Hub source (it satisfies collect.Source at the wiring
 // site in main). Construct via NewClient; the zero value is not usable.
 type Client struct {
-	http      *http.Client
-	logger    *slog.Logger
-	retryOpts []httpx.GetOption
+	http   *http.Client
+	logger *slog.Logger
 }
 
-// Options configures NewClient beyond the required HTTP client: the
-// per-request retry options and required logger.
+// Options configures NewClient beyond the required HTTP client.
 type Options struct {
 	// Logger receives the client's logs; required.
 	Logger *slog.Logger
-	// RetryOpts apply to each call via httpx.GetBytes; nil means the httpx
-	// defaults.
-	RetryOpts []httpx.GetOption
 }
 
 // NewClient returns a Client that uses the provided *http.Client for all
 // outbound requests, configured by opts.
 func NewClient(client *http.Client, opts Options) *Client {
 	return &Client{
-		http:      client,
-		retryOpts: opts.RetryOpts,
-		logger:    opts.Logger,
+		http:   client,
+		logger: opts.Logger,
 	}
 }
 
@@ -134,7 +128,7 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 			"advertised", advertised,
 			"error", errTextForLog(err))
 	case len(repos) == 0:
-		c.logger.Error("docker hub wildcard expanded no repos", "owner", owner, "repos", 0, "advertised", advertised)
+		c.logger.Warn("docker hub wildcard expanded no repos", "owner", owner, "repos", 0, "advertised", advertised)
 	default:
 		c.logger.Info("docker hub wildcard expanded", "owner", owner, "repos", len(repos), "advertised", advertised)
 	}
@@ -146,7 +140,7 @@ func (c *Client) collectWildcardRef(ctx context.Context, owner string, seen map[
 }
 
 // collectExplicit fetches each non-wildcard ref unless a wildcard already
-// covered it or the same explicit ref was encountered earlier in this pass.
+// covered it.
 func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, seen map[registry.RepoRef]bool) (results []registry.Entry, attempted int) {
 	for _, ref := range refs {
 		if ref.Repo == "*" {
@@ -159,7 +153,6 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 		if seen[ref] {
 			continue
 		}
-		seen[ref] = true
 		attempted++
 
 		repoURL := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/%s/", ref.Owner, ref.Repo)
@@ -196,27 +189,17 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 
 // listRepos paginates the Docker Hub owner listing endpoint. advertised is the
 // total its first page publishes, so the caller can report how much of the
-// owner this walk holds. Which sentinel classifies a failed walk is on
-// errListingMoved and errShapeChanged. A walk stopped at the page cap
-// returns what it collected, reporting the rows its pages carried that passed
-// the repo-name allowlist, so a row lost to a cross-page repeat is not read as
-// truncation. A nil error means the totals reconciled: offset pagination cannot
-// see a repository deleted before the page boundary and one added after it, so
-// the snapshot may still be mixed.
+// owner this walk holds. errShapeChanged classifies a failed walk. A walk
+// stopped at the page cap returns the rows its pages carried and warns; it
+// holds only part of the owner, so the totals do not reconcile there and the
+// error is nil.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
-	seen := make(map[registry.RepoRef]bool)
 	complete := false
-	moved := false
-	laterTotal := 0
-	pageRows := 0
 	advertisedMax := 0
 
 	for page := 1; page <= maxOwnerPages; page++ {
-		if ctx.Err() != nil {
-			return entries, advertised, ctx.Err()
-		}
-		url := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/?page_size=%d&page=%d", owner, pageSize, page)
-		data, err := c.get(ctx, url)
+		pageURL := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/?page_size=%d&page=%d", owner, pageSize, page)
+		data, err := c.get(ctx, pageURL)
 		if err != nil {
 			return entries, advertised, fmt.Errorf("list repos page %d: %w", page, err)
 		}
@@ -225,16 +208,11 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 		if err != nil {
 			return entries, advertised, fmt.Errorf("parse repo list page %d: %w", page, err)
 		}
-		switch {
-		case page == 1:
+		if page == 1 {
 			advertised = pageTotal
-		case pageTotal != advertised:
-			moved = true
-			laterTotal = pageTotal
 		}
 		advertisedMax = max(advertisedMax, pageTotal)
-		pageRows += len(pageRepos)
-		entries = appendDistinct(entries, seen, pageRepos)
+		entries = append(entries, pageRepos...)
 
 		if !more {
 			complete = true
@@ -243,40 +221,16 @@ func (c *Client) listRepos(ctx context.Context, owner string) (entries []registr
 	}
 	if !complete {
 		if len(entries) > advertisedMax {
-			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories against the %d the most any page advertised, on a walk stopped at the page cap",
+			return entries, advertised, fmt.Errorf("%w: owner listing yielded %d name-allowlisted repository rows against the %d the most any page advertised, on a walk stopped at the page cap",
 				errShapeChanged, len(entries), advertisedMax)
 		}
 		c.logger.Warn("docker hub owner listing hit page cap; results may be truncated",
-			"owner", owner, "repos", len(entries), "page_rows", pageRows,
+			"owner", owner, "repos", len(entries),
 			"advertised", advertised, "max_pages", maxOwnerPages)
 		return entries, advertised, nil
 	}
-	if moved {
-		return entries, advertised, fmt.Errorf("%w: yielded %d retained distinct repositories against the %d its first page advertised, and a later page advertised %d",
-			errListingMoved, len(entries), advertised, laterTotal)
-	}
-	if len(entries) != advertised {
-		return entries, advertised, fmt.Errorf("%w: owner listing yielded %d retained distinct repositories from the %d name-allowlisted rows its pages carried, against the %d every page advertised",
-			errShapeChanged, len(entries), pageRows, advertised)
-	}
 
 	return entries, advertised, nil
-}
-
-// appendDistinct appends the page's repositories that entries does not
-// already hold, recording each in seen. listRepos compares its distinct
-// total with the total the listing advertises, so a row repeated across
-// pages must not inflate that count.
-func appendDistinct(entries []registry.Entry, seen map[registry.RepoRef]bool, page []registry.Entry) []registry.Entry {
-	for _, repo := range page {
-		key := registry.RepoRef{Owner: repo.Owner, Repo: repo.Repo}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		entries = append(entries, repo)
-	}
-	return entries
 }
 
 // parseRepoMeta parses a single Docker Hub repo metadata response,
@@ -303,9 +257,9 @@ func parseRepoMeta(data []byte) (int64, error) {
 // response. The upstream "next" token is an absolute URL the caller does
 // not follow, composing each request from its own page index instead.
 // total is the owner's repository count as the envelope advertises it,
-// and it is REQUIRED: it is the only value that can prove a completed
-// walk collected everything, which listRepos owns. Zero repos with a nil
-// error and a zero total reads as a legitimately empty owner.
+// and it is REQUIRED: the caller publishes it as `advertised` on every
+// wildcard record. Zero repos with a nil error and a zero total reads as
+// a legitimately empty owner.
 func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, more bool, total int, err error) {
 	var resp struct {
 		Count   *int   `json:"count"`
@@ -351,12 +305,6 @@ func parseRepoListPage(data []byte, owner string) (entries []registry.Entry, mor
 	return repos, resp.Next != "", *resp.Count, nil
 }
 
-// errListingMoved classifies a completed owner walk when a later page
-// advertises a different total from the first: upstream described two
-// populations, so the listing moved between requests. Every response decoded
-// and each was self-consistent, so this is not a format-change signal.
-var errListingMoved = errors.New("docker hub owner listing moved between page requests")
-
 // errShapeChanged classifies every post-200 schema failure as a
 // format-change signal rather than a transport one: a json/v2 decode
 // rejection, or a decoded envelope that contradicts what was asked for.
@@ -378,14 +326,11 @@ func failureLevel(err error) slog.Level {
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub helper.
 // responseBodyCap always wins because options are applied left to right.
-func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
-	opts := make([]httpx.GetOption, 0, len(c.retryOpts)+3)
-	opts = append(opts, c.retryOpts...)
-	opts = append(opts,
+func (c *Client) get(ctx context.Context, reqURL string) ([]byte, error) {
+	data, err := httpx.GetBytes(ctx, c.http, reqURL,
 		httpx.WithLogger(c.logger),
 		httpx.WithExhaustedLevel(slog.LevelDebug),
 		httpx.WithMaxBodyBytes(responseBodyCap))
-	data, err := httpx.GetBytes(ctx, c.http, url, opts...)
 	if err != nil {
 		if _, ok := errors.AsType[*httpx.ResponseTooLargeError](err); ok {
 			return nil, fmt.Errorf("%w: %w", errShapeChanged, err)

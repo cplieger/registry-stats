@@ -14,7 +14,6 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/collect"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/testsupport"
 )
 
 // fakeSource is a canned-response Source used to exercise
@@ -87,7 +86,7 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 			{Source: dh, Refs: []registry.RepoRef{{Owner: "owner", Repo: "app"}}},
 			{Source: gh, Refs: []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}},
 		},
-		Logger: testsupport.QuietLogger(),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 	want := []obs.ImageMetric{
 		{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 42},
@@ -160,7 +159,7 @@ func TestRun_records_counters_for_invoked_sources(t *testing.T) {
 			workItem(dh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 			workItem(gh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 		},
-		Logger: testsupport.QuietLogger(),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 
 	body := scrape()
@@ -188,7 +187,7 @@ func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
 		Sources: []collect.SourceRefs{
 			workItem(src, registry.RepoRef{Owner: "owner", Repo: "*"}),
 		},
-		Logger: testsupport.QuietLogger(),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 
 	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -200,6 +199,22 @@ func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
 	}
 	if !strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 0`) {
 		t.Errorf("Run(zero-attempt source) metrics did not retain a zero error count:\n%s", body)
+	}
+}
+
+func TestRun_emptyCycleRecordsDuration(t *testing.T) {
+	m := obs.New()
+
+	collect.Run(t.Context(), collect.Options{
+		Metrics: m,
+		Logger:  slog.New(slog.DiscardHandler),
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	m.Handler()(w, r)
+	if body := w.Body.String(); !strings.Contains(body, `registrystats_collect_duration_seconds_count 1`) {
+		t.Errorf("Run(empty cycle) duration count missing one observation:\n%s", body)
 	}
 }
 
