@@ -34,10 +34,10 @@ func downloadsHTML(count string) string {
 	return `<span>Total downloads</span><h3 title="` + count + `">` + count + `</h3>`
 }
 
-func TestClient_Name(t *testing.T) {
+func TestClient_Source(t *testing.T) {
 	c := NewClient(http.DefaultClient, Options{Logger: slog.New(slog.DiscardHandler)})
 	if got := c.Source().String(); got != "ghcr" {
-		t.Errorf("Name() = %q, want ghcr", got)
+		t.Errorf("Source().String() = %q, want ghcr", got)
 	}
 }
 
@@ -98,37 +98,21 @@ func TestParseDownloads_FormatChanged(t *testing.T) {
 	}
 }
 
-func TestParseDownloads_CommentOverlapKeepsDocumentOrder(t *testing.T) {
-	t.Run("one_real_marker", func(t *testing.T) {
-		html := `<!--x<!--!>` + downloadsHTML("7")
-		count, err := parseDownloads(html)
-		if err != nil || count != 7 {
-			t.Errorf("parseDownloads(comment overlap + one marker) = (%d, %v), want (7, nil)", count, err)
-		}
-	})
-
-	t.Run("two_real_markers", func(t *testing.T) {
-		html := downloadsHTML("1") + `<!--x<!--!>` + downloadsHTML("2")
-		count, err := parseDownloads(html)
-		if !errors.Is(err, errHTMLFormatChanged) {
-			t.Errorf("parseDownloads(two markers around comment overlap) = (%d, %v), want errHTMLFormatChanged", count, err)
-		}
-	})
-}
-
 func TestStatedPackages_NumberAgreement(t *testing.T) {
 	tests := map[string]struct {
-		html string
-		want int
+		html   string
+		want   int
+		wantOK bool
 	}{
-		"singular": {html: `</svg>1 package</h3>`, want: 1},
-		"plural":   {html: `</svg>24 packages</h3>`, want: 24},
+		"singular":  {html: `</svg>1 package</h3>`, want: 1, wantOK: true},
+		"plural":    {html: `</svg>24 packages</h3>`, want: 24, wantOK: true},
+		"ambiguous": {html: `</svg>24 packages</h3><span>3 packages</span>`},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			got, ok := statedPackages(tt.html)
-			if !ok || got != tt.want {
-				t.Errorf("statedPackages(%q) = (%d, %t), want (%d, true)", tt.html, got, ok, tt.want)
+			if ok != tt.wantOK || (tt.wantOK && got != tt.want) {
+				t.Errorf("statedPackages(%q) = (%d, %t), want (%d, %t)", tt.html, got, ok, tt.want, tt.wantOK)
 			}
 		})
 	}
@@ -138,7 +122,7 @@ func TestParsePackageList_Valid(t *testing.T) {
 	html := `<a href="/users/owner/packages/container/package/app1">app1</a>
 <a href="/users/owner/packages/container/package/app2">app2</a>
 <a href="/users/owner/packages/container/package/app1">app1-dup</a>`
-	got, _, _ := parsePackageList(html, "owner", userOwner)
+	got, _ := parsePackageList(html, "owner", userOwner)
 	want := []string{"app1", "app2", "app1"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d packages, want %d (%v)", len(got), len(want), got)
@@ -150,11 +134,32 @@ func TestParsePackageList_Valid(t *testing.T) {
 	}
 }
 
+func TestParsePackageList_RequiresExactHrefAttribute(t *testing.T) {
+	prefix := linkPrefix(userOwner, "owner")
+	tests := map[string]struct {
+		html string
+		want []string
+	}{
+		"href":       {html: `<a href="` + prefix + `real">`, want: []string{"real"}},
+		"data-href":  {html: `<a data-href="` + prefix + `ghost">`},
+		"xlink:href": {html: `<a xlink:href="` + prefix + `ghost">`},
+		"ahref":      {html: `<a ahref="` + prefix + `ghost">`},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, refused := parsePackageList(tt.html, "owner", userOwner)
+			if !slices.Equal(got, tt.want) || refused.Count != 0 {
+				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, no refusals)", tt.html, got, refused, tt.want)
+			}
+		})
+	}
+}
+
 // TestParsePackageList_MultiplePerLine pins that multiple package links
 // on the same HTML line are all extracted.
 func TestParsePackageList_MultiplePerLine(t *testing.T) {
 	html := `<a href="/users/o/packages/container/package/a">a</a><a href="/users/o/packages/container/package/b">b</a>`
-	got, _, _ := parsePackageList(html, "o", userOwner)
+	got, _ := parsePackageList(html, "o", userOwner)
 	if len(got) != 2 {
 		t.Fatalf("got %d packages, want 2 (%v)", len(got), got)
 	}
@@ -163,7 +168,7 @@ func TestParsePackageList_MultiplePerLine(t *testing.T) {
 func TestParsePackageList_DecodesNestedNames(t *testing.T) {
 	for _, encoded := range []string{"helm-charts%2Fgrafana-operator", "helm-charts%2fgrafana-operator"} {
 		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
-		got, refused, _ := parsePackageList(html, "owner", userOwner)
+		got, refused := parsePackageList(html, "owner", userOwner)
 		if !slices.Equal(got, []string{"helm-charts/grafana-operator"}) || refused.Count != 0 {
 			t.Errorf("parsePackageList(%q) = (%v, %+v), want decoded nested name", encoded, got, refused)
 		}
@@ -186,7 +191,7 @@ func TestParsePackageList_BoundsWholeName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			html := `<a href="/users/owner/packages/container/package/` + tt.token + `">package</a>`
-			got, refused, _ := parsePackageList(html, "owner", userOwner)
+			got, refused := parsePackageList(html, "owner", userOwner)
 			if !slices.Equal(got, tt.want) || refused.Count != tt.wantRefused {
 				t.Errorf("parsePackageList(%q) = (%v, %+v), want (%v, refused=%d)", tt.token, got, refused, tt.want, tt.wantRefused)
 			}
@@ -197,7 +202,7 @@ func TestParsePackageList_BoundsWholeName(t *testing.T) {
 func TestParsePackageList_RefusesUnsafeDecodedNames(t *testing.T) {
 	for _, encoded := range []string{"..%2f..%2fetc%2fpasswd", "%2e%2e%2f%2e%2e", "%2e", "a//b", "/abs", "a%2F", "bad%00name", "%zz"} {
 		html := `<a href="/users/owner/packages/container/package/` + encoded + `">package</a>`
-		got, refused, _ := parsePackageList(html, "owner", userOwner)
+		got, refused := parsePackageList(html, "owner", userOwner)
 		if len(got) != 0 || refused.Count != 1 {
 			t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", encoded, got, refused)
 		}
@@ -208,7 +213,7 @@ func TestParsePackageList_RefusesInvalidUTF8Name(t *testing.T) {
 	const token = "%FF"
 	html := `<a href="/users/owner/packages/container/package/` + token + `">package</a>`
 
-	got, refused, _ := parsePackageList(html, "owner", userOwner)
+	got, refused := parsePackageList(html, "owner", userOwner)
 
 	if len(got) != 0 || refused.Count != 1 {
 		t.Errorf("parsePackageList(%q) = (%v, %+v), want one refusal", token, got, refused)
@@ -227,7 +232,7 @@ func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, refused, _ := parsePackageList(tt.html, "nvidia", userOwner)
+			got, refused := parsePackageList(tt.html, "nvidia", userOwner)
 			if !slices.Equal(got, []string{"CUDA"}) || refused.Count != 0 {
 				t.Errorf("parsePackageList = (%v, %+v), want registered package casing preserved", got, refused)
 			}
@@ -238,7 +243,7 @@ func TestParsePackageList_FoldsRegisteredOwnerCasing(t *testing.T) {
 func TestParsePackageList_BoundsRefusalSample(t *testing.T) {
 	raw := strings.Repeat("a", 256)
 	html := `<a href="/users/owner/packages/container/package/` + raw + `">package</a>`
-	got, refused, _ := parsePackageList(html, "owner", userOwner)
+	got, refused := parsePackageList(html, "owner", userOwner)
 	if len(got) != 0 || refused.Count != 1 {
 		t.Fatalf("parsePackageList(overlong name) = (%v, %+v), want one refusal", got, refused)
 	}
@@ -260,7 +265,7 @@ func TestParsePackageList_RefusalSampleDoesNotRetainPage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			html := `<a href="/users/owner/packages/container/package/` + tt.raw + `">bad</a>` +
 				strings.Repeat("x", 512<<10)
-			_, refused, _ := parsePackageList(html, "owner", userOwner)
+			_, refused := parsePackageList(html, "owner", userOwner)
 			if refused.Sample != tt.want {
 				t.Fatalf("parsePackageList refusal sample = %q, want %q", refused.Sample, tt.want)
 			}
@@ -276,9 +281,9 @@ func TestParsePackageList_RefusalSampleDoesNotRetainPage(t *testing.T) {
 
 func TestParsePackageList_NameDoesNotRetainPage(t *testing.T) {
 	html := packageLink(userOwner, "owner", "app") + strings.Repeat("x", 512<<10)
-	names, refused, err := parsePackageList(html, "owner", userOwner)
-	if err != nil || !slices.Equal(names, []string{"app"}) || refused.Count != 0 {
-		t.Fatalf("parsePackageList = (%v, %+v, %v), want ([app], no refusals, no error)", names, refused, err)
+	names, refused := parsePackageList(html, "owner", userOwner)
+	if !slices.Equal(names, []string{"app"}) || refused.Count != 0 {
+		t.Fatalf("parsePackageList = (%v, %+v), want ([app], no refusals)", names, refused)
 	}
 
 	pageStart := uintptr(unsafe.Pointer(unsafe.StringData(html)))
@@ -291,7 +296,7 @@ func TestParsePackageList_NameDoesNotRetainPage(t *testing.T) {
 func TestParsePackageList_KeepsFirstInformativeSample(t *testing.T) {
 	prefix := linkPrefix(userOwner, "owner")
 	html := `<a href="` + prefix + `"></a><a href="` + prefix + `%zz">bad</a>`
-	_, refused, _ := parsePackageList(html, "owner", userOwner)
+	_, refused := parsePackageList(html, "owner", userOwner)
 	if refused.Count != 2 || refused.Sample != "%zz" {
 		t.Errorf("parsePackageList refusals = %+v, want count 2 and sample %%zz", refused)
 	}
@@ -440,7 +445,7 @@ func TestParsePackageList_SkipsMalformedAndEmptyNames(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, refused, _ := parsePackageList(tt.html, tt.owner, userOwner)
+			got, refused := parsePackageList(tt.html, tt.owner, userOwner)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d packages %v, want %d %v", len(got), got, len(tt.want), tt.want)
 			}

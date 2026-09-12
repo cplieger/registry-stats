@@ -93,6 +93,31 @@ func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T)
 	}
 }
 
+func TestClient_ListRepos_AdvertisedIsFirstPageTotal(t *testing.T) {
+	// The owner gains a repository between the two page requests: under Docker
+	// Hub's date_registered ordering it appends after the pages already read, so
+	// the later page advertises one more. The walk reports the first page's total.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/repositories/o/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "results": []map[string]any{{"name": "a", "pull_count": 1}}, "next": "page2"})
+		case "2":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 3, "results": []map[string]any{{"name": "b", "pull_count": 2}}, "next": nil})
+		}
+	})
+	srv := httptest.NewTestServer(t, mux)
+	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
+
+	repos, advertised, err := c.listRepos(t.Context(), "o")
+	if err != nil {
+		t.Fatalf("listRepos(later page advertises 3): %v", err)
+	}
+	if len(repos) != 2 || advertised != 2 {
+		t.Errorf("listRepos(later page advertises 3) = (%d repos, advertised %d), want (2, 2): the first page's total", len(repos), advertised)
+	}
+}
+
 func TestClient_OwnerListing_TruncatesAtPageCap(t *testing.T) {
 	// Count only exact owner-listing requests toward the page cap.
 	ownerPages := 0
@@ -447,5 +472,28 @@ func TestClient_Collect_ExhaustedRetryStaysAtDebug(t *testing.T) {
 	}
 	if strings.Contains(logs, `level=WARN msg="http retries exhausted"`) {
 		t.Errorf("Collect() retry exhaustion reached WARN, duplicating the client's own line; logs:\n%s", logs)
+	}
+}
+
+func TestClient_Collect_ListingPastBodyCapIsAFormatChange(t *testing.T) {
+	body := `{"count":0,"results":[],"next":"","padding":"` + strings.Repeat("x", responseBodyCap) + `"}`
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := NewClient(srv.Client(), Options{Logger: logger})
+	collection := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+
+	if !collection.ListingFailed {
+		t.Error("Collect(listing body past responseBodyCap) listingFailed = false, want true")
+	}
+	if len(collection.Entries) != 0 {
+		t.Errorf("Collect(listing body past responseBodyCap) = %d entries, want 0", len(collection.Entries))
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, `level=ERROR msg="docker hub listing wholly failed"`) {
+		t.Errorf("Collect(listing body past responseBodyCap) did not classify the over-cap body as a format change at ERROR; logs:\n%s", logs)
 	}
 }

@@ -234,10 +234,7 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 		if err != nil {
 			return c.partialListing(ctx, owner, page, names, refused, err)
 		}
-		pageNames, pageRefused, err := parsePackageList(html, owner, kind)
-		if err != nil {
-			return c.partialListing(ctx, owner, page, names, refused, err)
-		}
+		pageNames, pageRefused := parsePackageList(html, owner, kind)
 		refused = refused.merge(pageRefused)
 		stated, statedOK, err := listingPagePopulation(html, page, pageNames, pageRefused)
 		if err != nil {
@@ -365,18 +362,22 @@ func isNotFound(err error) bool {
 // Registered owner casing is response data, so the prefix is matched without
 // transforming untrusted HTML. Zero names is not an error here because its
 // meaning depends on the page number, which only the caller knows.
-func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals, err error) {
+func parsePackageList(html, owner string, kind ownerKind) (names []string, refused refusals) {
 	prefix := linkPrefix(kind, owner)
 	const hrefOpen = `href="`
 	for rest := html; ; {
 		hrefAt := strings.Index(rest, hrefOpen)
 		if hrefAt < 0 {
-			return names, refused, nil
+			return names, refused
+		}
+		if hrefAt == 0 || !strings.ContainsRune(htmlWhitespace, rune(rest[hrefAt-1])) {
+			rest = rest[hrefAt+len(hrefOpen):]
+			continue
 		}
 		rest = rest[hrefAt+len(hrefOpen):]
 		value, after, ok := strings.Cut(rest, `"`)
 		if !ok {
-			return names, refused, nil
+			return names, refused
 		}
 		rest = after
 		if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {

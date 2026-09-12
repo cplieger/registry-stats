@@ -190,9 +190,10 @@ func (c *Client) collectExplicit(ctx context.Context, refs []registry.RepoRef, s
 // listRepos paginates the Docker Hub owner listing endpoint. advertised is the
 // total its first page publishes, so the caller can report how much of the
 // owner this walk holds. errShapeChanged classifies a failed walk. A walk
-// stopped at the page cap returns the rows its pages carried and warns; it
-// holds only part of the owner, so the totals do not reconcile there and the
-// error is nil.
+// stopped at the page cap holds only part of the owner, so its totals do not
+// reconcile: it returns errShapeChanged when its pages carried more rows than
+// any page advertised, and otherwise warns and returns those rows with a nil
+// error.
 func (c *Client) listRepos(ctx context.Context, owner string) (entries []registry.Entry, advertised int, err error) {
 	complete := false
 	advertisedMax := 0
@@ -323,7 +324,6 @@ func failureLevel(err error) slog.Level {
 }
 
 // get is the single retry-wrapped HTTP GET used by every Docker Hub helper.
-// responseBodyCap always wins because options are applied left to right.
 func (c *Client) get(ctx context.Context, reqURL string) ([]byte, error) {
 	data, err := httpx.GetBytes(ctx, c.http, reqURL,
 		httpx.WithLogger(c.logger),

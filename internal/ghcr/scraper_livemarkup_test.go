@@ -54,10 +54,7 @@ func liveMarkup(t *testing.T, name string) string {
 func TestParsePackageList_ReadsTheServedListing(t *testing.T) {
 	html := liveMarkup(t, "live-listing")
 
-	names, refused, err := parsePackageList(html, "cplieger", userOwner)
-	if err != nil {
-		t.Fatalf("parsePackageList(served listing) error = %v, want nil", err)
-	}
+	names, refused := parsePackageList(html, "cplieger", userOwner)
 	if refused.Count != 0 {
 		t.Errorf("parsePackageList(served listing) refused %d candidates (%q), want 0",
 			refused.Count, refused.Sample)

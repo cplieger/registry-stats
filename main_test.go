@@ -208,9 +208,11 @@ func TestMain_healthProbeUsesProgressLease(t *testing.T) {
 		age      time.Duration
 		wantCode int
 	}{
-		{name: "inside_lease", interval: "1", age: time.Hour + progressLease - time.Minute, wantCode: 0},
-		{name: "outside_lease", interval: "1", age: time.Hour + progressLease + time.Minute, wantCode: 1},
-		{name: "configured_interval_is_added", interval: "2", age: time.Hour + progressLease + time.Minute, wantCode: 0},
+		// Literal ages, not progressLease arithmetic: an age derived from the constant
+		// moves with it, so no change to the lease could fail this table.
+		{name: "inside_lease", interval: "1", age: time.Hour + 2*time.Minute, wantCode: 0},
+		{name: "outside_lease", interval: "1", age: time.Hour + 4*time.Minute, wantCode: 1},
+		{name: "configured_interval_is_added", interval: "2", age: time.Hour + 4*time.Minute, wantCode: 0},
 		{name: "one_shot_has_no_deadline", interval: "0", age: 24 * time.Hour, wantCode: 0},
 	}
 	for _, tt := range tests {

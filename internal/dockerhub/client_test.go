@@ -14,10 +14,10 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/registry"
 )
 
-func TestClient_Name(t *testing.T) {
+func TestClient_Source(t *testing.T) {
 	c := dockerhub.NewClient(http.DefaultClient, dockerhub.Options{Logger: slog.New(slog.DiscardHandler)})
 	if got := c.Source().String(); got != "dockerhub" {
-		t.Errorf("Name() = %q, want dockerhub", got)
+		t.Errorf("Source().String() = %q, want dockerhub", got)
 	}
 }
 

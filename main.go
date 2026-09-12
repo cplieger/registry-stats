@@ -183,7 +183,8 @@ func logWarnings(warns []config.Warning) {
 // It owns the per-cycle phase of the three operator signals -- the image gauges,
 // the liveness marker and the readiness gate -- and is not their only writer:
 // run() owns boot liveness, cleared pre-bind and re-armed once the listener is up,
-// so the container is healthy before the first cycle finishes.
+// so the container is healthy before the first cycle finishes, then refreshed before
+// every registry request -- that refresh is the mtime the probe's lease reads.
 type publication struct {
 	marker healthSignal
 	m      *obs.Metrics
