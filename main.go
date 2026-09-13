@@ -38,7 +38,8 @@ func main() {
 		case "health":
 			// The serving process reports configuration warnings; the frequent probe stays silent.
 			interval, _ := config.PollInterval()
-			health.RunProbe(health.DefaultPath, health.WithMaxAge(healthMaxAge(interval)))
+			lease := health.Lease{Interval: interval, Cycles: 1, Timeout: progressLease, Attempts: 1}
+			health.RunProbe(health.DefaultPath, health.WithMaxAge(lease.Duration()))
 		default:
 			// slogx first: the stdlib default handler emits no level=ERROR field, which
 			// is what the shipped log rules match on.
@@ -60,13 +61,6 @@ const progressLease = 2 * (requestTimeout + max(
 	httpx.DefaultBaseDelay<<(httpx.DefaultMaxAttempts-2),
 	ghcr.DefaultMinPacing+ghcr.DefaultPacingJitter,
 ))
-
-func healthMaxAge(interval time.Duration) time.Duration {
-	if interval == 0 {
-		return 0
-	}
-	return interval + progressLease
-}
 
 // run wires dependencies and serves until a signal or server error.
 func run() error {
