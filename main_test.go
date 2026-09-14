@@ -27,7 +27,7 @@ import (
 	"github.com/cplieger/registry-stats/v2/internal/config"
 	"github.com/cplieger/registry-stats/v2/internal/obs"
 	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/webhttp/v2"
+	"github.com/cplieger/webhttp/v3"
 )
 
 // TestRegistryClient_refusesOffAllowlistRedirect pins the SSRF

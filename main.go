@@ -26,7 +26,7 @@ import (
 	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/slogx"
-	"github.com/cplieger/webhttp/v2"
+	"github.com/cplieger/webhttp/v3"
 )
 
 // warnValueBytes bounds raw warning attributes while preserving enough input for diagnosis.
