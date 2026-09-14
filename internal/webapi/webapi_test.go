@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/webhttp/v2"
+	"github.com/cplieger/webhttp/v3"
 )
 
 // TestNew_readinessEndpoint pins the wiring of GET /api/health onto webhttp's
