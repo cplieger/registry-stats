@@ -113,6 +113,33 @@ Prometheus datasource; no plugins needed.
 The dashboard shows cumulative downloads, daily deltas, package
 overview, and tracked package count.
 
+The dashboard is versioned with the app: the JSON at release `<tag>`
+matches the metrics that image emits, and its `uid` is stable, so a
+re-import updates the existing dashboard in place. Pin it the way you pin
+the image, using the tag of the image you run. The release asset is
+`https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json`,
+with `grafana-dashboard.json.sha256` beside it; it works as
+grafana-operator `spec.url`, as the Grafana Helm chart
+`dashboards.<provider>.<name>.url`, or as a Terraform `http` data source.
+The OCI artifact is `ghcr.io/cplieger/registry-stats/dashboard:<tag>` for
+grafana-operator `spec.oci`. Renovate tracks either form: the
+`github-releases` datasource for the URL, the `docker` datasource for the
+OCI tag.
+
+```yaml
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: registry-stats
+spec:
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  oci:
+    reference: ghcr.io/cplieger/registry-stats/dashboard:<tag>
+    path: grafana-dashboard.json
+```
+
 ## Alerting
 
 registry-stats reports its state in two places, so the rules ship as two files,
