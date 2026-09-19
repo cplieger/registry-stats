@@ -3,3 +3,7 @@
 !go.sum
 !*.go
 !internal/
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES.md
+!scripts/collect-licenses.sh
