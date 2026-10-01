@@ -493,12 +493,12 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	}
 	gh := &mainFakeSource{
 		src:           registry.GHCR,
-		entries:       []registry.Entry{{Owner: "cplieger", Repo: "vibekit", Pulls: 56}},
+		entries:       []registry.Entry{{Owner: "cplieger", Repo: "marotte", Pulls: 56}},
 		listingFailed: false,
 	}
 	cfg := &config.Config{
 		DockerHubRepos: []registry.RepoRef{{Owner: "cplieger", Repo: "subflux"}},
-		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "vibekit"}},
+		GHCRRepos:      []registry.RepoRef{{Owner: "cplieger", Repo: "marotte"}},
 	}
 	m := obs.New()
 	marker := &mainFakeMarker{}
@@ -517,7 +517,7 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 
 	want := []string{
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
-		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
+		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="marotte"} 56`,
 		`registrystats_collect_duration_seconds_count 1`,
 	}
 	for _, line := range want {
