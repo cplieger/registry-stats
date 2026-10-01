@@ -27,7 +27,7 @@ func TestMetricsHandler(t *testing.T) {
 	m.ObserveCollectDuration(1420 * time.Millisecond)
 	m.SetImage([]ImageMetric{
 		{Registry: registry.DockerHub, Owner: "cplieger", Repo: "subflux", Pulls: 1234},
-		{Registry: registry.GHCR, Owner: "cplieger", Repo: "vibekit", Pulls: 56},
+		{Registry: registry.GHCR, Owner: "cplieger", Repo: "marotte", Pulls: 56},
 	})
 
 	body := scrapeBody(t, m)
@@ -36,7 +36,7 @@ func TestMetricsHandler(t *testing.T) {
 		`registrystats_collects_total{source="dockerhub"} 1`,
 		`registrystats_collect_errors_total{source="ghcr"} 1`,
 		`registrystats_image_pulls_total{owner="cplieger",registry="dockerhub",repo="subflux"} 1234`,
-		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="vibekit"} 56`,
+		`registrystats_image_pulls_total{owner="cplieger",registry="ghcr",repo="marotte"} 56`,
 		`registrystats_collect_duration_seconds_bucket{le="5"} 1`,
 		`registrystats_collect_duration_seconds_bucket{le="10800"} 1`,
 		`registrystats_collect_duration_seconds_bucket{le="18000"} 1`,
