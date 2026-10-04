@@ -3,39 +3,33 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/size.json)](https://github.com/cplieger/registry-stats/pkgs/container/registry-stats) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/registry-stats/pkgs/container/registry-stats) [![base: Distroless](https://img.shields.io/badge/base-Distroless_nonroot-4285F4?logo=google)](https://github.com/cplieger/registry-stats/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/registry-stats/badges/mutation.json)](https://github.com/cplieger/registry-stats/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/registry-stats/releases)
 
 <!-- hub-overview BEGIN -->
-Track how many times your container images are pulled, with a ready-made Grafana dashboard.
+registry-stats graphs the pull counts that Docker Hub and GitHub Container Registry report for your public images, on a ready-made Grafana dashboard. Your Prometheus server scrapes the current counts and keeps the history, so the graphs begin on the day you start registry-stats.
+
+![The bundled Grafana dashboard: total downloads, tracked packages, a per-package table, cumulative downloads over a month and daily download deltas](docs/images/header.png)
 
 ## What it does
 
-When you publish a container image to Docker Hub or GitHub Container Registry (GHCR), each registry tracks how many times that image has been downloaded, but there's no built-in way to see those numbers over time, compare trends, or get alerts. Registry Stats solves this by polling the registries on a schedule and exposing the download counts as Prometheus metrics for dashboards and alerting.
+registry-stats helps you follow the pull counts of your published images over time:
 
-- **Prometheus metrics** (`/metrics`): pull counts as gauges, scraped by any Prometheus-compatible collector for native Grafana dashboards
-- Supports both explicit repos (`myuser/myapp`) and owner wildcards (`myuser/*`) to discover public repos on each poll. Docker Hub wildcards collect up to 198 repositories per owner: its unauthenticated API refuses offsets of 100 or more, so Registry Stats reads two pages of 99. GHCR wildcards read up to fifty listing pages, about 1,500 packages as GitHub currently paginates them; reaching that cap logs a truncation warning. Each poll logs the collected count, and the advertised total where the registry publishes one.
+- Graphs each image's reported total and its daily change on the bundled dashboard.
+- Tracks Docker Hub and GitHub Container Registry (GHCR) images side by side.
+- Picks up an owner's public images with `owner/*` on every check, new ones included, up to 198 Docker Hub repositories or 50 GHCR listing pages per owner.
+- Ships alert rules for a stopped collector, a failing registry and a pull count that drops.
 
-### Why this design
+## Who it is for
 
-- **Stateless**: no on-disk persistence required. The app exposes current counts; time-series history lives in your Prometheus/Mimir backend.
-- **Minimal dependencies**: the only runtime dependencies are the maintainer's own `httpx`, `health`, `metrics`, `webhttp`, `scheduler`, `slogx`, `envx`, and `runesafe` libraries, which supply retry/backoff, the health probe, Prometheus exposition, the HTTP server lifecycle, the poll loop, UTC logging, environment parsing, and the bound on scraped text reaching the log stream. Small, auditable supply chain.
-- **Distroless, rootless container**: runs as `nonroot` on `gcr.io/distroless/static-debian13` with no shell or package manager, minimising attack surface.
-- **Public repos only**: avoids credential management entirely.
+registry-stats is built for people who publish public container images. It checks the registries every hour by default, needs no registry login and keeps no pull history itself.
 
-### Limitations
+You need a Prometheus-compatible server such as Prometheus or Mimir to scrape it, and a Grafana instance for the dashboard. It reads public images only. Keep its port on your own network, because the metrics endpoint has no login.
 
-- **Public repositories only.** Docker Hub uses the unauthenticated API.
-  GHCR download counts are scraped from public package pages. Private
-  repositories and packages are not supported.
-- **GHCR scraping is fragile.** Download counts and package listings
-  are extracted from GitHub's HTML, not an official API. If GitHub
-  changes their page structure, scraping will break. The container
-  logs a clear error with a link to open an issue when this happens.
-- **No historical backfill.** The registries only expose current totals.
-  Time-series data is built by your Prometheus backend as scrapes
-  accumulate.
+One other project suits a different need. Consider [ghcr-badge](https://github.com/eliasbenb/ghcr-badge) if you only want a README badge with a GHCR package's download count. It is an API service that returns the count as JSON and as a shields.io badge.
+
+registry-stats is free software under the GPL-3.0-or-later license.
 <!-- hub-overview END -->
 
 ## Quick start
 
-The image is published to both `ghcr.io/cplieger/registry-stats` and `docker.io/cplieger/registry-stats`; use whichever registry you prefer.
+The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository. Each release is also tagged with its full version, `v<major>.<minor>` and `v<major>`, so you can pin one.
 
 ```yaml
 services:
@@ -45,214 +39,85 @@ services:
     restart: unless-stopped
 
     environment:
-      # Set at least one repo; leaving both empty makes the container report unhealthy after the first collect.
-      DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
-      GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
-      POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
+      # Set at least one of the two lists before the first start, or the container turns unhealthy after its first check.
+      DOCKERHUB_REPOS: ""  # owner/repo or owner/*, comma-separated
+      GHCR_REPOS: ""  # owner/package or owner/*, comma-separated
+      POLL_INTERVAL_HOURS: "1"  # 0 = check once, then keep serving the counts
 
     ports:
+      # The metrics endpoint has no login, so this example publishes it to this host only.
+      # For a collector on another host, publish it on a trusted address such as "192.0.2.10:9100:9100", never "9100:9100".
       - "127.0.0.1:9100:9100"
 ```
 
+1. Save the file as `compose.yaml` in an empty folder.
+2. Fill in `DOCKERHUB_REPOS`, `GHCR_REPOS` or both, for example `GHCR_REPOS: "myuser/*"` for every public package of `myuser`.
+3. Run `docker compose up -d` in that folder.
+
+Run `docker logs registry-stats`. You should see `collection complete` with an `images=` count above 0. If you see `no repos configured`, both lists are empty.
+
+## Adding it to Prometheus and Grafana
+
+1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or another Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The shipped alert rules assume `job="registry-stats"`.
+2. In Grafana, open Dashboards, then New, then Import, and upload [`grafana-dashboard.json`](grafana-dashboard.json).
+3. Select your Prometheus or Mimir data source when Grafana asks for one.
+
+The dashboard needs no plugin. To pin it to the release you run, or to load it with grafana-operator, see [Monitoring and alerts](docs/monitoring.md#dashboard).
+
 ## Configuration reference
 
-### Environment variables
+Settings are environment variables, read once at start, so recreate the container after a change. Every one is optional.
 
-| Variable | Description | Default | Required |
-| --- | --- | --- | --- |
-| `DOCKERHUB_REPOS` | Comma-separated Docker Hub repositories. Use `owner/repo` for one repo or `owner/*` for up to 198 public repos per owner; the unauthenticated API serves two pages of 99 before it refuses offset 100. Each `owner/repo` entry costs one request per cycle, issued back to back, while the unauthenticated API counts requests per client IP (it advertises 180 per minute in `x-ratelimit-limit`), so a list approaching that size can see per-repo failures that recover on the next cycle | _(unset)_ | No |
-| `GHCR_REPOS` | Comma-separated list of public GHCR packages to track. Use `owner/package` for a specific package or `owner/*` to auto-discover an owner's public packages, up to fifty listing pages (about 1,500 packages as GitHub currently paginates). A listing longer than that logs a truncation warning and collects the pages it read. When a poll cannot enumerate an owner's whole listing, images it did not read have no sample for that cycle. This happens at the Docker Hub anonymous cap or when Registry Stats reads only part of a GHCR listing. These series are absent until the next successful poll. The shipped `RegistryStatsCollectionIncomplete` rule fires on these incomplete cycles. Write a nested package with GHCR's percent-encoded slash, for example `owner/helm-charts%2Fgrafana-operator` | _(unset)_ | No |
-| `LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, or `error`. Unrecognized values fall back to `info` | `info` | No |
-| `POLL_INTERVAL_HOURS` | Hours between collection cycles. Set to 0 to collect once and then only serve metrics (no recurring polls). Wildcards are re-expanded on each cycle, picking up newly published images | `1` | No |
-| `LISTEN_ADDR` | TCP listen address for the HTTP server in `host:port` form. The port must match the published container port | `:9100` | No |
-
-### Ports
+| Variable | Description | Default |
+| --- | --- | --- |
+| `DOCKERHUB_REPOS` | Docker Hub repos, comma-separated: `owner/repo`, or `owner/*` for every public repo of one owner, up to 198 | _(unset)_ |
+| `GHCR_REPOS` | GHCR packages, comma-separated: `owner/package`, or `owner/*` for every public package of one owner, up to about 1,500 | _(unset)_ |
+| `POLL_INTERVAL_HOURS` | Hours between checks. `0` checks once, then keeps serving the counts | `1` |
+| `LOG_LEVEL` | `debug`, `info`, `warn` or `error`. Keep `info` for the shipped log alert rules | `info` |
+| `LISTEN_ADDR` | Listen address in `host:port` form. The port must match the published container port | `:9100` |
 
 | Port | Description |
 | --- | --- |
-| `9100` | HTTP server (Prometheus metrics + health endpoint) |
+| `9100` | Prometheus metrics on `/metrics` and the readiness check on `/api/health` |
 
-## API reference
-
-### Endpoints
-
-#### `GET /api/health`
-
-Serving-readiness gate. Returns `{"status":"unready","reason":"..."}` with HTTP 503 until the
-first collect cycle produces data, then `{"status":"ok"}`. Readiness latches: once set, it is
-cleared only on shutdown, so a later failed cycle does not flip the endpoint back to 503
-(per-cycle collection health is the file marker's job; see [Healthcheck](#healthcheck)). The
-Docker healthcheck runs the `health` subcommand against the marker file, not this endpoint.
-
-#### `GET /metrics`
-
-Prometheus text format metrics. Includes:
-
-- `registrystats_image_pulls_total{registry,owner,repo}`: current pull count per image
-- `registrystats_collects_total{source}`: collect runs per source, successful and failed
-- `registrystats_collect_errors_total{source}`: failed collects per source
-- `registrystats_collect_duration_seconds`: collect cycle duration histogram
-- `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds`: runtime metrics
-
-## Grafana integration
-
-Registry Stats exposes Prometheus metrics at `/metrics`. The included
-`grafana-dashboard.json` uses PromQL and requires only a standard
-Prometheus datasource; no plugins needed.
-
-### Setup
-
-1. Add a scrape target for `registry-stats:9100` in your collector
-   (Prometheus, Alloy, or any Prometheus-compatible scraper); the shipped
-   alert rules assume `job="registry-stats"`. The shipped compose example
-   publishes port 9100 on loopback, so a collector on another host needs
-   `"<trusted-ip>:9100:9100"` instead
-2. Import `grafana-dashboard.json` in Grafana
-3. Select your Prometheus/Mimir datasource when prompted
-
-The dashboard shows cumulative downloads, daily deltas, package
-overview, and tracked package count.
-
-The dashboard is versioned with the app: the JSON at release `<tag>`
-matches the metrics that image emits, and its `uid` is stable, so a
-re-import updates the existing dashboard in place. Pin it the way you pin
-the image, using the tag of the image you run. The release asset is
-`https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json`,
-with `grafana-dashboard.json.sha256` beside it; it works as
-grafana-operator `spec.url`, as the Grafana Helm chart
-`dashboards.<provider>.<name>.url`, or as a Terraform `http` data source.
-The OCI artifact is `ghcr.io/cplieger/registry-stats/dashboard:<tag>` for
-grafana-operator `spec.oci`. Renovate tracks either form: the
-`github-releases` datasource for the URL, the `docker` datasource for the
-OCI tag.
-
-```yaml
-apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
-metadata:
-  name: registry-stats
-spec:
-  instanceSelector:
-    matchLabels:
-      dashboards: grafana
-  oci:
-    reference: ghcr.io/cplieger/registry-stats/dashboard:<tag>
-    path: grafana-dashboard.json
-```
-
-## Alerting
-
-registry-stats reports its state in two places, so the rules ship as two files,
-one per expression language. [`alerts/promql.yaml`](alerts/promql.yaml) holds
-five rules, evaluated with Prometheus or the Mimir ruler over the `/metrics`
-endpoint you already scrape (see [Grafana integration](#grafana-integration)).
-[`alerts/logql.yaml`](alerts/logql.yaml) holds three, evaluated with Loki's
-ruler over the container log, because their conditions leave no series to read:
-a repo ref rejected at parse time is never polled, and a cycle where only a
-minority of per-image fetches fail still reports healthy. The exported counts
-go quietly incomplete while no metric moves. Load each half into its own
-ruler: neither ruler parses the other's expressions.
-
-| Alert | Fires when | Severity |
-| --- | --- | --- |
-| `RegistryStatsTargetDown` | `up{job="registry-stats"} == 0` for 15m: the exporter is not being scraped | warning |
-| `RegistryStatsTargetAbsent` | `absent(up{job="registry-stats"})` for 15m: the exporter is not a configured scrape target at all | warning |
-| `RegistryStatsCollectStalled` | no collect cycle has completed within the 6h published-data staleness budget, while the exporter is up and serving its last values | warning |
-| `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a cycle, so those images drop off `/metrics` | warning |
-| `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
-| `RegistryStatsConfigRejected` | a `DOCKERHUB_REPOS` or `GHCR_REPOS` entry was skipped, an `owner/*` wildcard resolved to no public images, none was usable at all, or `POLL_INTERVAL_HOURS` was corrected: malformed, negative, or above the 8,760-hour cap | warning |
-| `RegistryStatsError` | the container logged an `ERROR` - a fetch or parse failure, a changed GHCR page, an unusable configuration, or a 5xx from its own endpoint other than the readiness gate's startup 503 | warning |
-| `RegistryStatsCollectionIncomplete` | a cycle lost images without failing: a truncated owner listing, a listing page whose package count could not be read, a rate limit, or a minority of GHCR packages | warning |
-
-`RegistryStatsCollectStalled` measures absence over 15m under a 6h `for:`,
-rather than absence over 6h directly. A counter that has just started carries
-two samples at the same value, which the direct form reads as a stall, so it
-fires about 30m after every container start. Set the `for:` window to how long
-you will tolerate no published data. The liveness probe handles a stalled
-collect loop separately by monitoring registry-request progress. Drop the rule
-in one-shot mode (`POLL_INTERVAL_HOURS=0`), where a single cycle is the point.
-
-`RegistryStatsCollectionIncomplete` covers incomplete output that the source
-health counters do not always expose. Source health compares successful
-per-image fetches with fetch attempts; owner-listing rows are outside both
-counts. Listing results cannot hide explicit fetch failures, but a truncated
-listing can still remove images without moving
-`registrystats_collect_errors_total` by itself. Keep `LOG_LEVEL` at its `info`
-default for that rule and for `RegistryStatsConfigRejected`'s every-cycle
-members: they key on `WARN` lines. `RegistryStatsConfigRejected` still catches
-a bad ref at any level, because config-parse warnings are emitted before the
-configured level applies.
-
-Thresholds and the `for:` windows are starting points. The scrape `job` label is
-yours: the `up{job="registry-stats"}` selector assumes `job="registry-stats"`
-(matching the setup step above), so adjust it to your scrape config. Adjust the
-`container` selector on the LogQL rules the same way, or to `job` / `service`,
-depending on your log collector. Route by whatever labels your Alertmanager
-uses.
-
-## Healthcheck
-
-The container includes a built-in Docker healthcheck: the `health` subcommand (`/registry-stats health`) exits 0 while a marker file at `/tmp/.healthy` is present. The marker is created as soon as the HTTP API is listening, then updated when each collection cycle completes: a cycle that collected at least one repo keeps it, and a cycle that collected nothing removes it — every registry failing is one way to get there, and a wildcard owner with no public images is another (that cycle also leaves `/api/health` answering 503). The first collect runs in the background, so a slow initial poll cannot exceed the Docker healthcheck grace window and trigger a restart loop; the container reports healthy on boot, then reflects the first cycle's real outcome once it finishes. Clearing a marker left behind by a previous container is the first thing the process does, silently; `WARN health state changed healthy=false` therefore means a collection cycle produced no data, not routine startup. In scheduled mode the probe also enforces a freshness deadline that measures collector progress rather than cycle length. While a cycle is running, the marker is refreshed every time the exporter issues a registry request, so a working cycle keeps the container healthy regardless of the work-list size. The deadline is one poll interval plus a three-minute lease derived from the longest gap the exporter's pacing and retry budget can put between two requests (about one hour and three minutes at the default hourly interval). It trips when the collect loop stops making progress, which a restart can fix, rather than because a large `owner/*` walk takes a long time. Under the example compose (`restart: unless-stopped`), that marks the container unhealthy without restarting it because Docker restart policies act on process exit, not health status. Configure your monitoring to act on the signal. An orchestrator that replaces unhealthy tasks, such as Swarm or a Kubernetes liveness probe, restarts the container. An unhealthy marker recovers on the next successful poll. In one-shot mode (`POLL_INTERVAL_HOURS=0`) there is no next poll and no freshness deadline: a failed single collect leaves the container unhealthy until it is restarted. Partial failures are tolerated: one successful repo keeps the container healthy, and wildcard expansion failures alone do not cause unhealthy status if explicit repos still succeed.
+registry-stats needs no volume. [Configuration](docs/configuration.md) covers wildcards, nested GHCR package names and the Docker Hub rate limit.
 
 ## Security
 
-The Prometheus metrics endpoint is designed for internal scraping and has no
-authentication (standard for internal metrics APIs); do not expose port 9100
-to untrusted networks. The container runs as `nonroot` on a distroless base
-image with no shell or package manager.
+The metrics endpoint has no login. Keep port 9100 on your own network. The example publishes it on `127.0.0.1` only.
 
-The HTTP client follows redirects only within a `docker.com` / `github.com` /
-`githubusercontent.com` host allowlist with a 5-hop cap, so a compromised or
-misconfigured upstream cannot bounce the polling request to an arbitrary
-third-party host (the registries legitimately redirect to their own CDNs and
-blob stores). URL path segments built from registry data are validated
-against an `[A-Za-z0-9._-]` allowlist. Response bodies are capped at
-1 MiB for the Docker Hub JSON API and 2 MiB for GHCR HTML; a response over
-its cap is treated as a format-change signal, not silently truncated. The
-HTTP server sets all four timeouts, and `Retry-After` headers on 429/503 responses are honoured
-up to the configured retry backoff ceiling.
+registry-stats holds no credential, because it reads public pages and the unauthenticated Docker Hub API. The image runs as the distroless `nonroot` user with no shell. Its client follows redirects only to `docker.com`, `github.com` and `githubusercontent.com` hosts. [Security](docs/security.md) has the hardened compose settings and what the image contains.
 
-One accepted scanner finding: semgrep flags the use of `math/rand/v2`, which
-is correct here because it spaces out successive registry requests within a
-cycle, and generates no cryptographic material.
+## Troubleshooting
 
-### Hardened deployment
+The healthcheck runs `/registry-stats health`, which reads a marker file in `/tmp`. The container is healthy while its last check collected at least one image. It turns unhealthy when a whole check collects nothing. It also turns unhealthy when it sends no registry request for one poll interval plus three minutes, which means the collector is stuck. `restart: unless-stopped` does not restart an unhealthy container, so act on the status from your monitoring.
 
-To lock the container down further, layer these directives onto
-the Quick start service:
+The next successful check makes it healthy again. With `POLL_INTERVAL_HOURS=0`, a failed check stays unhealthy until you restart the container.
 
-```yaml
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - "/tmp:size=1m,mode=1777,noexec,nosuid,nodev"
-```
+- `skipping unusable repo ref` in the log means an entry is not `owner/repo` or `owner/*`. The line names the entry and the reason.
+- `ghcr HTML format may be changing` means GitHub changed its package pages, which registry-stats reads because GitHub has no API for download counts. Please [open an issue](https://github.com/cplieger/registry-stats/issues).
+- An image can be missing from one check when an owner listing stops partway or a rate limit hits. It returns on the next check that reads it.
 
-`read_only: true` requires the file-marker health probe to have a writable
-`/tmp`; the tmpfs supplies it. `size=1m` is ample: the marker is the only
-thing registry-stats writes to disk.
+[How registry-stats works](docs/how-it-works.md) explains each case.
 
-## Dependencies
+## Monitoring
 
-All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
+registry-stats serves Prometheus metrics on `/metrics` and writes logfmt logs in UTC. Five PromQL alert rules ship in [`alerts/promql.yaml`](alerts/promql.yaml) and three Loki rules in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists the metrics, the dashboard and the rules, and shows how to load them.
 
-| Dependency | Source |
-| --- | --- |
-| golang | [Go](https://hub.docker.com/_/golang) |
-| Distroless static | [Distroless](https://github.com/GoogleContainerTools/distroless) |
-| pgregory.net/rapid | [pkg.go.dev](https://pkg.go.dev/pgregory.net/rapid) |
+## Documentation
+
+- [Configuration](docs/configuration.md) explains every setting in depth.
+- [How registry-stats works](docs/how-it-works.md) covers the checks, wildcards, health and limits.
+- [Monitoring and alerts](docs/monitoring.md) lists the metrics, the dashboard and the alert rules.
+- [Security](docs/security.md) covers hardening and what the image contains.
 
 ## Credits
 
-This is an original tool that builds upon [Docker Hub API](https://docs.docker.com/docker-hub/api/latest/).
+registry-stats reads pull counts from the [Docker Hub API](https://docs.docker.com/docker-hub/api/latest/) and from the public package pages of GitHub Container Registry.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue first for
-larger changes so the approach can be discussed before implementation.
+Issues and pull requests are welcome. For a larger change, please open an issue first. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 

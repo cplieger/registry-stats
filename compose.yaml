@@ -6,12 +6,12 @@ services:
     restart: unless-stopped
 
     environment:
-      # Set at least one repo; leaving both empty makes the container report unhealthy after the first collect.
-      DOCKERHUB_REPOS: ""  # owner/repo or owner/* format, comma-separated
-      GHCR_REPOS: ""  # owner/package or owner/* format, comma-separated
-      POLL_INTERVAL_HOURS: "1"  # 0 = collect once then serve
+      # Set at least one of the two lists before the first start, or the container turns unhealthy after its first check.
+      DOCKERHUB_REPOS: ""  # owner/repo or owner/*, comma-separated
+      GHCR_REPOS: ""  # owner/package or owner/*, comma-separated
+      POLL_INTERVAL_HOURS: "1"  # 0 = check once, then keep serving the counts
 
     ports:
-      # This endpoint has no authentication, so the example publishes it to this host only.
-      # For a collector on another host, publish on that trusted interface: "192.168.1.10:9100:9100", never "9100:9100".
+      # The metrics endpoint has no login, so this example publishes it to this host only.
+      # For a collector on another host, publish it on a trusted address such as "192.0.2.10:9100:9100", never "9100:9100".
       - "127.0.0.1:9100:9100"
