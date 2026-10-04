@@ -86,7 +86,7 @@ registry-stats needs no volume. [Configuration](docs/configuration.md) covers wi
 
 The metrics endpoint has no login. Keep port 9100 on your own network. The example publishes it on `127.0.0.1` only.
 
-registry-stats holds no credential, because it reads public pages and the unauthenticated Docker Hub API. The image runs as the distroless `nonroot` user with no shell. Its client follows redirects only to `docker.com`, `github.com` and `githubusercontent.com` hosts. [Security](docs/security.md) has the hardened compose settings and what the image contains.
+registry-stats holds no credential, because it reads public pages and the unauthenticated Docker Hub API. The image runs as the distroless `nonroot` user with no shell. Its client follows redirects only to `docker.com`, `github.com` and `githubusercontent.com` hosts. [Security](docs/hardening.md) has the hardened compose settings and what the image contains.
 
 ## Troubleshooting
 
@@ -109,7 +109,7 @@ registry-stats serves Prometheus metrics on `/metrics` and writes logfmt logs in
 - [Configuration](docs/configuration.md) explains every setting in depth.
 - [How registry-stats works](docs/how-it-works.md) covers the checks, wildcards, health and limits.
 - [Monitoring and alerts](docs/monitoring.md) lists the metrics, the dashboard and the alert rules.
-- [Security](docs/security.md) covers hardening and what the image contains.
+- [Security](docs/hardening.md) covers hardening and what the image contains.
 
 ## Credits
 
