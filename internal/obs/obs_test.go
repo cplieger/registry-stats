@@ -192,6 +192,8 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	for _, path := range []string{
 		"../../CONTRIBUTING.md",
 		"../../README.md",
+		"../../docs/how-it-works.md",
+		"../../docs/monitoring.md",
 		"../../alerts/logql.yaml",
 		"../../alerts/promql.yaml",
 		"../../grafana-dashboard.json",
