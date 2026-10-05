@@ -22,8 +22,8 @@ import (
 	"strings"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
+	"github.com/cplieger/registry-stats/internal/registry"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 	"github.com/cplieger/runesafe/v2"
 )
 

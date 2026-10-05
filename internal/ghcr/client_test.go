@@ -11,7 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/registry"
 )
 
 // capturingLogger returns a logger that records every record (Debug and

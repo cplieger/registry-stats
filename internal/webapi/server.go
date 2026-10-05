@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/obs"
+	"github.com/cplieger/registry-stats/internal/obs"
 	"github.com/cplieger/webhttp/v3"
 )
 

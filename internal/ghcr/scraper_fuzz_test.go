@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
 
 // FuzzParseDownloads drives the production download-count parser with

@@ -23,10 +23,10 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	"github.com/cplieger/registry-stats/v2/internal/collect"
-	"github.com/cplieger/registry-stats/v2/internal/config"
-	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/collect"
+	"github.com/cplieger/registry-stats/internal/config"
+	"github.com/cplieger/registry-stats/internal/obs"
+	"github.com/cplieger/registry-stats/internal/registry"
 	"github.com/cplieger/webhttp/v3"
 )
 

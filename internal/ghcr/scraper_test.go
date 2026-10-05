@@ -17,9 +17,9 @@ import (
 	"unsafe"
 
 	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/registry-stats/v2/internal/config"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
-	"github.com/cplieger/registry-stats/v2/internal/urlsafe"
+	"github.com/cplieger/registry-stats/internal/config"
+	"github.com/cplieger/registry-stats/internal/registry"
+	"github.com/cplieger/registry-stats/internal/urlsafe"
 )
 
 // packagePageURL is a representative production GHCR package-page URL:
