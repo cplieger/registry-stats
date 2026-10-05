@@ -117,7 +117,7 @@ registry-stats reads pull counts from the [Docker Hub API](https://docs.docker.c
 
 ## Contributing
 
-Issues and pull requests are welcome. For a larger change, please open an issue first. See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
