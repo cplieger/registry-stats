@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/cplieger/metrics/v4"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/registry"
 )
 
 // Metrics records and serves registry-stats metrics. Construct via New; the

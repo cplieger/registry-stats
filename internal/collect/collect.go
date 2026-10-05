@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/obs"
+	"github.com/cplieger/registry-stats/internal/registry"
 )
 
 // Source collects registry-specific statistics. Source must return a known

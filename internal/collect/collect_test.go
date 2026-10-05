@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/registry-stats/v2/internal/collect"
-	"github.com/cplieger/registry-stats/v2/internal/obs"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/collect"
+	"github.com/cplieger/registry-stats/internal/obs"
+	"github.com/cplieger/registry-stats/internal/registry"
 )
 
 // fakeSource is a canned-response Source used to exercise

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cplieger/registry-stats/v2/internal/dockerhub"
-	"github.com/cplieger/registry-stats/v2/internal/registry"
+	"github.com/cplieger/registry-stats/internal/dockerhub"
+	"github.com/cplieger/registry-stats/internal/registry"
 )
 
 func TestClient_Source(t *testing.T) {
