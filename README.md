@@ -18,9 +18,9 @@ registry-stats helps you follow the pull counts of your published images over ti
 
 ## Who it is for
 
-registry-stats is built for people who publish public container images. It checks the registries every hour by default, needs no registry login and keeps no pull history itself.
+registry-stats is built for people who publish public container images. It checks the registries every hour by default and needs no registry login.
 
-You need a Prometheus-compatible server such as Prometheus or Mimir to scrape it, and a Grafana instance for the dashboard. It reads public images only. Keep its port on your own network, because the metrics endpoint has no login.
+Its graphs and five alerts come from your Prometheus-compatible server, such as Prometheus or Mimir, with Grafana and Alertmanager, and three from Loki. The [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#the-smallest-stack-sends-notifications-only) sets them up. registry-stats reads public images only. Keep its port on your own network, because the metrics endpoint has no login.
 
 One other project suits a different need. Consider [ghcr-badge](https://github.com/eliasbenb/ghcr-badge) if you only want a README badge with a GHCR package's download count. It is an API service that returns the count as JSON and as a shields.io badge.
 
@@ -29,7 +29,7 @@ registry-stats is free software under the GPL-3.0-or-later license.
 
 ## Quick start
 
-The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository. Each release is also tagged with its full version, `v<major>.<minor>` and `v<major>`, so you can pin one.
+The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository. Each release is also [tagged](https://github.com/cplieger/docs/blob/main/docs/images.md#which-tag-to-use) with its full version, `v<major>.<minor>` and `v<major>`, so you can pin one.
 
 ```yaml
 services:
@@ -59,8 +59,7 @@ Run `docker logs registry-stats`. You should see `collection complete` with an `
 ## Adding it to Prometheus and Grafana
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or another Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The shipped alert rules assume `job="registry-stats"`.
-2. In Grafana, open Dashboards, then New, then Import, and upload [`grafana-dashboard.json`](grafana-dashboard.json).
-3. Select your Prometheus or Mimir data source when Grafana asks for one.
+2. Load [`grafana-dashboard.json`](grafana-dashboard.json) into Grafana, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
 
 The dashboard needs no plugin. To pin it to the release you run, or to load it with grafana-operator, see [Monitoring and alerts](docs/monitoring.md#dashboard).
 

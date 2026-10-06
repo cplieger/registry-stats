@@ -33,8 +33,7 @@ registry-stats writes logfmt records to standard error, with UTC timestamps. Lev
 [`grafana-dashboard.json`](../grafana-dashboard.json) uses PromQL and needs only a Prometheus data source, with no plugin. It shows total downloads, the tracked package count, a per-package table, cumulative downloads and daily download deltas, and filters by registry, owner and repo.
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or any Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The example compose publishes the port on `127.0.0.1`, so a collector on another host needs `"<trusted-ip>:9100:9100"` instead.
-2. In Grafana, open Dashboards, then New, then Import, and upload the file.
-3. Select your Prometheus or Mimir data source when Grafana asks for one.
+2. Load the dashboard, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
 
 The dashboard is versioned with the app. The file at release `<tag>` matches the metrics that image emits, and its `uid` stays the same, so a new import updates the existing dashboard in place. Pin it the way you pin the image, with the tag of the image you run.
 
@@ -58,7 +57,7 @@ spec:
 
 ## Alerting
 
-registry-stats reports its state in two places, so the rules ship as one file per expression language, and neither ruler parses the other's expressions. Load each file into its own ruler. Firing alerts from both reach your Alertmanager like any other Prometheus alert.
+registry-stats reports its state in two places, so the rules ship as two files, one for each ruler. [Loading metric alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-metric-alert-rules) and [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) show how to load them.
 
 - The five PromQL rules in [`alerts/promql.yaml`](../alerts/promql.yaml) go to Prometheus or the Mimir ruler, over the `/metrics` endpoint you already scrape.
 - The three LogQL rules in [`alerts/logql.yaml`](../alerts/logql.yaml) go to Loki's ruler, over the container log. Their conditions leave no series to read. A repo entry rejected at start is never polled. With both repo lists empty, `registrystats_collects_total` has no series either. A check where only a minority of image requests fail still reports a healthy registry. In each case the published counts go incomplete while no metric moves.
@@ -117,7 +116,7 @@ None of these conditions has a metric. A ref that never parsed has no series, an
 
 The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
 
-`/api/health` answers 503 at every start until the first check completes, and again during shutdown. The HTTP access log reports a 5xx at `ERROR`, so the last line of the expression excludes that one access record. The exclusion keys on the access record's own `msg`, so diagnostics a failing hook logs for the same request still reach the rule.
+`/api/health` answers 503 at every start until the first check completes, and again during shutdown. The HTTP access log reports a 5xx at `ERROR`, so the second line filter excludes that one access record. The exclusion keys on the access record's own `msg`, so diagnostics a failing hook logs for the same request still reach the rule.
 
 #### `RegistryStatsCollectionIncomplete`
 
@@ -146,4 +145,4 @@ The startup records of `RegistryStatsConfigRejected` work at every level. The re
 
 ### Adapting the rules
 
-Thresholds and the `for:` windows are starting points. The `up{job="registry-stats"}` selector assumes your scrape job is named `registry-stats`, so change it to match your scrape config. Change the `container` selector on the LogQL rules the same way, or to `job` or `service`, depending on your log collector. The LogQL rules extract log fields under an `rs_` prefix. Without it, Loki renames a field to `<name>_extracted` when your collector already sets `level`, `msg`, `path` or `status` as a stream label. Route by whatever labels your Alertmanager uses.
+Thresholds and the `for:` windows are starting points. The `up{job="registry-stats"}` selector assumes your scrape job is named `registry-stats`, so change it to match your scrape config. Change the `container` selector on the LogQL rules the same way, or to `job` or `service`, depending on your log collector. The LogQL rules match the text of each log line with no parser, so labels your collector adds, such as `level` or `msg`, cannot change what they match. Route by whatever labels your Alertmanager uses.

@@ -20,7 +20,7 @@ One scanner finding is accepted. semgrep flags the use of `math/rand/v2`, which 
 
 ## Hardened deployment
 
-To lock the container down further, add these lines to the service in `compose.yaml`:
+Add these lines to the service in `compose.yaml`. [Hardening a compose file](https://github.com/cplieger/docs/blob/main/docs/hardening.md) explains each setting.
 
 ```yaml
     read_only: true
