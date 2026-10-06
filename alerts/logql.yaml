@@ -10,16 +10,14 @@
 groups:
   - name: registry-stats
     rules:
-      # Every rule extracts fields under an rs_ prefix. Loki would otherwise
-      # rename them to <name>_extracted when a collector already sets level,
-      # msg, path or status as a stream label.
+      # Every rule matches the text of each log line with line filters and no parser.
+      # A level, msg, path or status label your collector sets cannot change what it matches.
+      # The msg anchor skips a phrase that appears only inside another field's value.
       - alert: RegistryStatsConfigRejected
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `no repos configured|skipping unusable repo ref|docker hub wildcard expanded no repos|ghcr owner has no public container packages|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped`
-            | logfmt rs_msg="msg"
-            | rs_msg =~ ".*(no repos configured|skipping unusable repo ref|docker hub wildcard expanded no repos|ghcr owner has no public container packages|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped).*" [1h]
+            |~ ` msg="[^"]*(no repos configured|skipping unusable repo ref|docker hub wildcard expanded no repos|ghcr owner has no public container packages|invalid POLL_INTERVAL_HOURS|POLL_INTERVAL_HOURS clamped)` [1h]
           )) > 0
         for: 0m
         labels:
@@ -33,16 +31,14 @@ groups:
             none usable, expanded a wildcard to no public images, or corrected a
             bad POLL_INTERVAL_HOURS. Skipped images are never polled. Read the
             log line for the value to fix.
-      # Keyed on the uppercase slog level, so one rule covers serving and
-      # collection errors. The last line drops only the readiness check's 503
-      # access record, which every start and shutdown logs at ERROR.
+      # Keyed on the uppercase slog level, so one rule covers serving and collection errors.
+      # The second filter drops only the readiness check's 503 access record, which every start and shutdown logs at ERROR.
       - alert: RegistryStatsError
         expr: |
           sum by (container) (count_over_time(
-            {container="registry-stats"} |= `level=ERROR`
-            | logfmt rs_level="level", rs_msg="msg", rs_path="path", rs_status="status"
-            | rs_level = "ERROR"
-            | rs_msg != "http" or rs_path != "/api/health" or rs_status != "503" [1h]
+            {container="registry-stats"}
+            |~ ` level=ERROR msg=`
+            !~ ` level=ERROR msg=http method=\S+ path=/api/health status=503 ` [1h]
           )) > 0
         for: 0m
         labels:
@@ -60,9 +56,7 @@ groups:
         expr: |
           sum by (container) (count_over_time(
             {container="registry-stats"}
-            |~ `hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr listing page states no usable package count|ghcr scrape failed|docker hub fetch failed`
-            | logfmt rs_msg="msg"
-            | rs_msg =~ ".*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr listing page states no usable package count|ghcr scrape failed|docker hub fetch failed).*" [2h]
+            |~ ` msg="[^"]*(hit page cap|listing partially failed|ghcr listing refused package candidates|ghcr listing page states no usable package count|ghcr scrape failed|docker hub fetch failed)` [2h]
           )) > 0
         for: 0m
         labels:
