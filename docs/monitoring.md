@@ -30,29 +30,59 @@ registry-stats writes logfmt records to standard error, with UTC timestamps. Lev
 
 ## Dashboard
 
-[`grafana-dashboard.json`](../grafana-dashboard.json) uses PromQL and needs only a Prometheus data source, with no plugin. It shows total downloads, the tracked package count, a per-package table, cumulative downloads and daily download deltas, and filters by registry, owner and repo.
+[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It shows total downloads, the tracked package count, a per-package table, cumulative downloads and downloads per day, and filters by registry, owner and repo.
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or any Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The example compose publishes the port on `127.0.0.1`, so a collector on another host needs `"<trusted-ip>:9100:9100"` instead.
 2. Load the dashboard, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
+3. Pick your Prometheus or Mimir data source in the Data source list at the top of the dashboard.
 
-The dashboard is versioned with the app. The file at release `<tag>` matches the metrics that image emits, and its `uid` stays the same, so a new import updates the existing dashboard in place. Pin it the way you pin the image, with the tag of the image you run.
+The dashboard is versioned with the app. The file at release `<tag>` matches the metrics that image emits. The file sets `metadata.name` to `registry-stats`, which Grafana uses as the dashboard UID. Because the name stays the same from release to release, importing a newer copy over the existing one, or a file provider reading the newer file, updates it in place. Pin it the way you pin the image, with the tag of the image you run.
 
-- The release asset is `https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json`, with `grafana-dashboard.json.sha256` beside it. It works as grafana-operator `spec.url`, as the Grafana Helm chart's `dashboards.<provider>.<name>.url`, or as a Terraform `http` data source.
-- The OCI artifact is `ghcr.io/cplieger/registry-stats/dashboard:<tag>`, for grafana-operator `spec.oci`.
-- Renovate can track either form, with its `github-releases` datasource for the URL and its `docker` datasource for the OCI tag.
+- The release asset is `https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json`, with `grafana-dashboard.json.sha256` beside it. It works as the Grafana Helm chart's `dashboards.<provider>.<name>.url` with `curlOptions: "-sLf"`, because the release URL redirects, or as a Terraform `http` data source.
+- The OCI artifact is `ghcr.io/cplieger/registry-stats/dashboard:<tag>`, with the artifact type `application/vnd.grafana.dashboard.v2+json`.
+- Renovate can track the release URL with its `github-releases` datasource.
+
+On Grafana 13.1 or older, use the `grafana-dashboard.json` of release [v4.1.1](https://github.com/cplieger/registry-stats/releases/tag/v4.1.1), the last one in the older dashboard format. That file gets no further changes, so you maintain it yourself.
+
+The file is a Grafana dashboard resource with `apiVersion: dashboard.grafana.app/v2`, which grafana-operator's `GrafanaDashboard` does not accept. Load it with a `GrafanaManifest`, as grafana-operator's [dashboards v2 example](https://grafana.github.io/grafana-operator/docs/examples/manifests/dashboards-v2/) shows. A `GrafanaManifest` takes the dashboard inline and has no URL or OCI source. Copy the `spec` object of the release's `grafana-dashboard.json` in place of the comment below, and copy it again when you move to a new tag.
 
 ```yaml
 apiVersion: grafana.integreatly.org/v1beta1
-kind: GrafanaDashboard
+kind: GrafanaManifest
 metadata:
   name: registry-stats
 spec:
   instanceSelector:
     matchLabels:
       dashboards: grafana
-  oci:
-    reference: ghcr.io/cplieger/registry-stats/dashboard:<tag>
-    path: grafana-dashboard.json
+  template:
+    apiVersion: dashboard.grafana.app/v2
+    kind: Dashboard
+    metadata:
+      name: registry-stats
+    spec:
+      # The spec object of grafana-dashboard.json, unchanged.
+```
+
+For a Grafana instance the operator does not manage, also set `namespace` under `template.metadata` to that instance's namespace. You can leave it out when the `Grafana` resource sets `tenantNamespace` in `spec.external`.
+
+If a `GrafanaDashboard` already loads this dashboard from an older tag, keep it on that tag, including in any Renovate rule that bumps it. On grafana-operator v5.25.0, a `GrafanaDashboard` that receives a file in this format deletes the dashboard it manages. The issue is [grafana/grafana-operator#2955](https://github.com/grafana/grafana-operator/issues/2955). Replace it with the `GrafanaManifest` above.
+
+With Terraform, the Grafana provider's [`grafana_apps_dashboard_dashboard_v2`](https://registry.terraform.io/providers/grafana/grafana/latest/docs/resources/apps_dashboard_dashboard_v2) resource takes the file's `spec` object as JSON, and the dashboard's name as `uid`:
+
+```hcl
+data "http" "registry_stats_dashboard" {
+  url = "https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json"
+}
+
+resource "grafana_apps_dashboard_dashboard_v2" "registry_stats" {
+  metadata {
+    uid = "registry-stats"
+  }
+  spec {
+    json = jsonencode(jsondecode(data.http.registry_stats_dashboard.response_body).spec)
+  }
+}
 ```
 
 ## Alerting

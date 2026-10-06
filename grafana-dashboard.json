@@ -1,235 +1,706 @@
 {
-  "title": "Registry Stats",
-  "uid": "registry-stats",
-  "description": "Docker Hub and GHCR image download tracking via Prometheus metrics. Counts are registry-reported request counts - a GHCR manifest GET increments GitHub's published total, so automated digest and manifest reads move these series; they are not completed transfers and not users.",
-  "tags": ["registry", "docker", "ghcr", "downloads"],
-  "timezone": "browser",
-  "refresh": "1h",
-  "time": { "from": "now-30d", "to": "now" },
-  "templating": {
-    "list": [
-      {
-        "name": "datasource",
-        "label": "Data source",
-        "type": "datasource",
-        "query": "prometheus",
-        "current": { "text": "Mimir", "value": "mimir" },
-        "hide": 0
-      },
-      {
-        "name": "repo",
-        "label": "Repository",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "query": "label_values(registrystats_image_pulls_total, repo)",
-        "includeAll": true,
-        "multi": true,
-        "current": { "text": ["All"], "value": ["$__all"] },
-        "refresh": 2,
-        "sort": 1
-      },
-      {
-        "name": "owner",
-        "label": "Owner",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "query": "label_values(registrystats_image_pulls_total{repo=~\"$repo\"}, owner)",
-        "includeAll": true,
-        "multi": true,
-        "current": { "text": ["All"], "value": ["$__all"] },
-        "refresh": 2,
-        "sort": 1
-      },
-      {
-        "name": "registry",
-        "label": "Registry",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "query": "label_values(registrystats_image_pulls_total, registry)",
-        "includeAll": true,
-        "multi": false,
-        "current": { "text": "All", "value": "$__all" },
-        "refresh": 2,
-        "sort": 1
-      }
-    ]
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "registry-stats"
   },
-  "panels": [
-    {
-      "id": 10,
-      "title": "Total Downloads",
-      "description": "Sum of all downloads across all tracked packages and registries. Registry-reported request counts, not completed transfers or users.",
-      "type": "stat",
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "blue", "value": 0 },
-              { "color": "green", "value": 1000 },
-              { "color": "yellow", "value": 100000 }
-            ]
+  "spec": {
+    "annotations": [
+      {
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "datasource": {
+              "name": "-- Grafana --"
+            },
+            "spec": {}
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "builtIn": true,
+          "legacyOptions": {
+            "type": "dashboard"
+          }
+        }
+      }
+    ],
+    "cursorSync": "Crosshair",
+    "description": "Download counts for your Docker Hub and GHCR images, as each registry reports them. The counts are requests, not people or finished downloads, and on GHCR an automated manifest read counts too.",
+    "editable": true,
+    "elements": {
+      "panel-1": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1,
+          "title": "Package overview",
+          "description": "Downloads per package and registry, highest first. Use it to compare packages and to see which registry serves most of a package's downloads. The values are request counts as each registry reports them.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "{{owner}}/{{repo}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "__tenant_id__": true,
+                        "hostname": true,
+                        "instance": true,
+                        "job": true
+                      },
+                      "renameByName": {
+                        "Value": "Downloads",
+                        "owner": "Owner",
+                        "registry": "Registry",
+                        "repo": "Package"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "Downloads"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "noValue": "No packages tracked"
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Registry"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "dockerhub": {
+                                "index": 0,
+                                "text": "Docker Hub"
+                              },
+                              "ghcr": {
+                                "index": 1,
+                                "text": "GHCR"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Downloads"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "short"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byRegexp",
+                      "options": ".*"
+                    },
+                    "properties": [
+                      {
+                        "id": "noValue",
+                        "value": "-"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
           }
         }
       },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
-          "legendFormat": "Total",
-          "instant": true
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "title": "Tracked Packages",
-      "description": "Number of unique packages being tracked",
-      "type": "stat",
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 5 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{ "color": "purple", "value": 0 }]
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "id": 10,
+          "title": "Total downloads",
+          "description": "Downloads added up across the selected packages and registries, as each registry reports them. These are request counts, not people or finished downloads. No packages tracked means no data has arrived for this selection.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "sum(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
+                        "instant": true,
+                        "legendFormat": "Total"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "blue"
+                  },
+                  "noValue": "No packages tracked"
+                },
+                "overrides": []
+              }
+            }
           }
         }
       },
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "colorMode": "value",
-        "graphMode": "none",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "count(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
-          "legendFormat": "Packages",
-          "instant": true
+      "panel-11": {
+        "kind": "Panel",
+        "spec": {
+          "id": 11,
+          "title": "Tracked packages",
+          "description": "How many packages registry-stats tracks for this selection, counted once per registry. A package on both Docker Hub and GHCR counts twice, so the number matches the rows in Package overview. A drop means a package left your list or a registry stopped listing it.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "count(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})",
+                        "instant": true,
+                        "legendFormat": "Packages"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "purple"
+                      }
+                    ]
+                  },
+                  "noValue": "No packages tracked"
+                },
+                "overrides": []
+              }
+            }
+          }
         }
-      ]
+      },
+      "panel-2": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "Cumulative downloads",
+          "description": "Each package's reported total over time, one line per package and registry. A steeper line means faster growth. A step down means the registry restated its count lower, which the shipped alert rules also flag.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
+                        "legendFormat": "{{owner}}/{{repo}} ({{registry}})"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "showLegend": false
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "min": 0,
+                  "custom": {
+                    "drawStyle": "line",
+                    "fillOpacity": 10,
+                    "lineWidth": 2,
+                    "pointSize": 5,
+                    "showPoints": "auto",
+                    "spanNulls": true
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3,
+          "title": "Downloads per day",
+          "description": "New downloads per day for each package and registry, stacked. Tall bars after a release are normal. Automated reads move these counts too, because a GHCR manifest read counts as a download. A bar below zero means the registry restated its total lower.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "expr": "delta(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[1d])",
+                        "interval": "1d",
+                        "legendFormat": "{{owner}}/{{repo}} ({{registry}})"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "showLegend": false
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "custom": {
+                    "drawStyle": "bars",
+                    "fillOpacity": 80,
+                    "gradientMode": "none",
+                    "lineWidth": 0,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "normal"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      }
     },
-    {
-      "id": 1,
-      "title": "Package Overview",
-      "description": "Downloads per package",
-      "type": "table",
-      "gridPos": { "h": 10, "w": 18, "x": 6, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
+    "layout": {
+      "kind": "RowsLayout",
+      "spec": {
+        "rows": [
           {
-            "matcher": { "id": "byName", "options": "repo" },
-            "properties": [{ "id": "displayName", "value": "Package" }]
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Overview",
+              "collapse": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 6,
+                        "height": 5,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-10"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 6,
+                        "y": 0,
+                        "width": 18,
+                        "height": 10,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-1"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 5,
+                        "width": 6,
+                        "height": 5,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-11"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           },
           {
-            "matcher": { "id": "byName", "options": "Value" },
-            "properties": [{ "id": "displayName", "value": "Total Downloads" }]
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Download history",
+              "collapse": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 12,
+                        "height": 13,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-2"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 12,
+                        "y": 0,
+                        "width": 12,
+                        "height": 13,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-3"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           }
         ]
-      },
-      "options": {
-        "cellHeight": "sm",
-        "showHeader": true,
-        "sortBy": [{ "displayName": "Total Downloads", "desc": true }]
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
-          "legendFormat": "{{owner}}/{{repo}}",
-          "instant": true,
-          "format": "table"
-        }
+      }
+    },
+    "links": [],
+    "liveNow": false,
+    "preload": false,
+    "tags": [
+      "registry",
+      "docker",
+      "ghcr",
+      "downloads"
+    ],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-30d",
+      "to": "now",
+      "autoRefresh": "1h",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
       ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true, "hostname": true, "__tenant_id__": true },
-            "renameByName": { "registry": "Registry", "owner": "Owner", "repo": "Package", "Value": "Downloads" }
-          }
-        }
-      ]
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0
     },
-    {
-      "id": 2,
-      "title": "Cumulative Downloads",
-      "description": "Total download count over time per repo",
-      "type": "timeseries",
-      "gridPos": { "h": 13, "w": 12, "x": 0, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "pointSize": 5,
-            "showPoints": "auto",
-            "spanNulls": true
-          }
+    "title": "Registry Stats",
+    "variables": [
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "datasource",
+          "pluginId": "prometheus",
+          "refresh": "never",
+          "regex": "",
+          "current": {
+            "text": "Mimir",
+            "value": "mimir"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Data source",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": true
         }
       },
-      "options": {
-        "legend": { "showLegend": false },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}",
-          "legendFormat": "{{owner}}/{{repo}} ({{registry}})"
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "repo",
+          "current": {
+            "text": [
+              "All"
+            ],
+            "value": [
+              "$__all"
+            ]
+          },
+          "label": "Repository",
+          "hide": "dontHide",
+          "refresh": "onTimeRangeChanged",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "${datasource}"
+            },
+            "spec": {
+              "__legacyStringValue": "label_values(registrystats_image_pulls_total, repo)"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allowCustomValue": false
         }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Daily Download Delta",
-      "description": "New downloads per day per repo. Registry-reported request counts, not completed transfers: on GHCR a manifest GET increments the total, so automated digest and manifest reads move this series.",
-      "type": "timeseries",
-      "gridPos": { "h": 13, "w": 12, "x": 12, "y": 10 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "gradientMode": "none",
-            "lineWidth": 0,
-            "stacking": { "mode": "normal", "group": "A" }
-          }
+      },
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "owner",
+          "current": {
+            "text": [
+              "All"
+            ],
+            "value": [
+              "$__all"
+            ]
+          },
+          "label": "Owner",
+          "hide": "dontHide",
+          "refresh": "onTimeRangeChanged",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "${datasource}"
+            },
+            "spec": {
+              "__legacyStringValue": "label_values(registrystats_image_pulls_total{repo=~\"$repo\"}, owner)"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allowCustomValue": false
         }
       },
-      "options": {
-        "legend": { "showLegend": false },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "delta(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[1d])",
-          "legendFormat": "{{owner}}/{{repo}} ({{registry}})",
-          "interval": "1d"
+      {
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "registry",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "label": "Registry",
+          "hide": "dontHide",
+          "refresh": "onTimeRangeChanged",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "${datasource}"
+            },
+            "spec": {
+              "__legacyStringValue": "label_values(registrystats_image_pulls_total, registry)"
+            }
+          },
+          "regex": "",
+          "sort": "alphabeticalAsc",
+          "options": [],
+          "multi": false,
+          "includeAll": true,
+          "allowCustomValue": false
         }
-      ]
-    }
-  ],
-  "schemaVersion": 42,
-  "version": 2
+      }
+    ]
+  }
 }

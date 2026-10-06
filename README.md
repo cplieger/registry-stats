@@ -59,9 +59,10 @@ Run `docker logs registry-stats`. You should see `collection complete` with an `
 ## Adding it to Prometheus and Grafana
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or another Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The shipped alert rules assume `job="registry-stats"`.
-2. Load [`grafana-dashboard.json`](grafana-dashboard.json) into Grafana, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
+2. Load [`grafana-dashboard.json`](grafana-dashboard.json) into Grafana 13.2 or newer, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
+3. Pick your Prometheus or Mimir data source in the Data source list at the top of the dashboard.
 
-The dashboard needs no plugin. To pin it to the release you run, or to load it with grafana-operator, see [Monitoring and alerts](docs/monitoring.md#dashboard).
+The dashboard needs no plugin. On Grafana 13.1 or older, take `grafana-dashboard.json` from release [v4.1.1](https://github.com/cplieger/registry-stats/releases/tag/v4.1.1), the last one in the older dashboard format. That file gets no further changes, so you maintain it yourself. To pin it to the release you run, or to load it with grafana-operator, see [Monitoring and alerts](docs/monitoring.md#dashboard).
 
 ## Configuration reference
 
@@ -101,7 +102,7 @@ The next successful check makes it healthy again. With `POLL_INTERVAL_HOURS=0`, 
 
 ## Monitoring
 
-registry-stats serves Prometheus metrics on `/metrics` and writes logfmt logs in UTC. Five PromQL alert rules ship in [`alerts/promql.yaml`](alerts/promql.yaml) and three Loki rules in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists the metrics, the dashboard and the rules, and shows how to load them.
+registry-stats serves Prometheus metrics on `/metrics` and writes logfmt logs in UTC. The bundled dashboard needs Grafana 13.2 or newer. Five PromQL alert rules ship in [`alerts/promql.yaml`](alerts/promql.yaml) and three Loki rules in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists the metrics, the dashboard and the rules, and shows how to load them.
 
 ## Documentation
 
