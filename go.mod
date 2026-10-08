@@ -1,6 +1,6 @@
 module github.com/cplieger/registry-stats
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/cplieger/envx/v2 v2.0.4
