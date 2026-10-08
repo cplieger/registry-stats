@@ -335,7 +335,8 @@ func testCollectClientTimeoutDoesNotSetListingFailed(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 
 	client := srv.Client()
-	client.Timeout = 250 * time.Millisecond
+	// The timeout covers the pacing wait, so it must outlast the longest one.
+	client.Timeout = DefaultMinPacing + DefaultPacingJitter + 250*time.Millisecond
 	c := NewClient(client, Options{Logger: slog.New(slog.DiscardHandler)})
 	refs := []registry.RepoRef{{Owner: "owner", Repo: "slow"}, {Owner: "owner", Repo: "fast"}}
 	collection := c.Collect(t.Context(), refs)

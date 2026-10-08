@@ -11,23 +11,18 @@ import (
 	"github.com/cplieger/registry-stats/internal/registry"
 )
 
-// Source collects registry-specific statistics. Source must return a known
-// registry.ID; registry.Collection defines the returned cycle accounting.
-// Every ref is already canonical and distinct for the registry Source names --
-// lower case, accepted by internal/config's urlsafe gate, and deduplicated on
-// the registry.RepoRef key -- so Collect may interpolate Owner and Repo into a
-// request URL without re-checking their shape.
-// Collect still owns the shape of the request it builds: Repo is "*" for an
-// owner-wide ref, which it expands into that owner's published repositories
-// rather than requesting by name, and a GHCR Repo is the decoded package name,
-// which may carry '/' path elements and needs url.PathEscape (see
-// urlsafe.PackageName).
-// A successful Collect returns entries whose Owner and Repo are non-empty: obs
-// keys the published gauge on that pair, and every construction gate rejects
-// the empty string.
+// Source is one registry, named by a known registry.ID. Every ref it receives is
+// canonical and distinct (lower case, passed by internal/config's urlsafe gate,
+// deduplicated on registry.RepoRef), so it may interpolate Owner and Repo into a
+// URL unchecked; Repo "*" is an owner-wide ref to expand, and a GHCR Repo is a
+// decoded package name that needs url.PathEscape (see urlsafe.PackageName).
+// Collect returns entries with non-empty Owner and Repo, the pair obs keys on.
+// ReadDetail logs its own failures; an error matching httpx.ErrRateLimited stops
+// the source's detail reads for the cycle.
 type Source interface {
 	Source() registry.ID
 	Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection
+	ReadDetail(ctx context.Context, ref registry.RepoRef) (registry.Detail, error)
 }
 
 // SourceRefs binds a selected source to the canonical refs it will collect.
@@ -46,15 +41,28 @@ type Options struct {
 	Sources []SourceRefs
 }
 
+// Cycle is one collection cycle's outcome: the per-image records, the
+// presence of every detailed name on each source that covers it, and each
+// invoked source's verdict.
+type Cycle struct {
+	Finished time.Time
+	Images   []obs.ImageMetric
+	Presence []obs.Presence
+	Sources  []obs.SourceCycle
+}
+
 // Run orchestrates a single collection cycle: it invokes each source's
 // Collect, stamps each entry with its source's registry label, and returns the
-// combined per-image records.
+// combined per-image records with the cycle's accounting.
 // The caller owns the health marker and derives it from the returned
-// set. A cancelled cycle stops early and returns what it collected,
-// with no error, so a caller that publishes the set must check
+// images. A cancelled cycle stops early and returns what it collected,
+// with no error, so a caller that publishes the cycle must check
 // ctx.Err() first.
-func Run(ctx context.Context, opts Options) []obs.ImageMetric {
-	var images []obs.ImageMetric
+func Run(ctx context.Context, opts Options) Cycle {
+	var (
+		images  []obs.ImageMetric
+		results []sourceResult
+	)
 
 	logger := opts.Logger
 
@@ -71,20 +79,22 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 			// that, so the stall rule's 6h window is unaffected.
 			break
 		}
-		srcImages, srcHealthy := collectSource(ctx, opts.Metrics, logger, sourceRefs.Source, sourceRefs.Refs)
-		if !srcHealthy {
+		result := collectSource(ctx, opts.Metrics, logger, sourceRefs.Source, sourceRefs.Refs)
+		if !result.healthy {
 			degraded = true
 		}
-		images = append(images, srcImages...)
+		results = append(results, result)
+		images = append(images, result.images...)
 	}
 
 	if ctx.Err() != nil {
 		logger.Warn("collection interrupted",
 			"error", ctx.Err(), "images", len(images))
-		return images
+		return Cycle{Images: images}
 	}
 
-	opts.Metrics.ObserveCollectDuration(time.Since(start))
+	cycle := account(results)
+	cycle.Finished = time.Now()
 
 	if len(images) == 0 {
 		switch {
@@ -97,7 +107,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 		default:
 			logger.Warn("no images found for the configured refs")
 		}
-		return images
+		return cycle
 	}
 
 	if degraded {
@@ -108,7 +118,7 @@ func Run(ctx context.Context, opts Options) []obs.ImageMetric {
 		"images", len(images),
 		"duration", time.Since(start).Round(time.Millisecond))
 
-	return images
+	return cycle
 }
 
 // collectSource invokes one source's Collect and stamps its entries with the
@@ -122,11 +132,14 @@ func collectSource(
 	logger *slog.Logger,
 	src Source,
 	refs []registry.RepoRef,
-) (images []obs.ImageMetric, srcHealthy bool) {
+) sourceResult {
 	collection := src.Collect(ctx, refs)
 	// Unhealthy when a wildcard owner listing wholly failed, or when more
 	// than half the fetch attempts yielded no entry.
-	srcHealthy = !collection.ListingFailed && collection.Fetched*2 >= collection.Attempted
+	srcHealthy := !collection.ListingFailed && collection.Fetched*2 >= collection.Attempted
+	// A 404 produced no entry, so health counts it as a miss; it still answered
+	// the read, so it stamps the last success.
+	answered := !collection.ListingFailed && collection.Definitive*2 >= collection.Attempted
 	source := src.Source()
 	failed := !srcHealthy && ctx.Err() == nil
 	if failed {
@@ -136,14 +149,23 @@ func collectSource(
 	}
 	m.RecordCollect(source, failed)
 
-	images = make([]obs.ImageMetric, 0, len(collection.Entries))
+	images := make([]obs.ImageMetric, 0, len(collection.Entries))
 	for _, e := range collection.Entries {
 		images = append(images, obs.ImageMetric{
-			Registry: source,
-			Owner:    e.Owner,
-			Repo:     e.Repo,
-			Pulls:    e.Pulls,
+			Registry:   source,
+			Owner:      e.Owner,
+			Repo:       e.Repo,
+			Pulls:      e.Pulls,
+			LastPushed: e.LastPushed,
+			Updated:    e.Updated,
 		})
 	}
-	return images, srcHealthy
+	return sourceResult{
+		refs:       refs,
+		collection: collection,
+		images:     images,
+		source:     source,
+		healthy:    srcHealthy,
+		answered:   answered,
+	}
 }

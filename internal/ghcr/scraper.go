@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/internal/registry"
@@ -99,15 +100,10 @@ func linkPrefix(kind ownerKind, owner string) string {
 	return fmt.Sprintf("/users/%s/packages/container/package/", owner)
 }
 
-// fetchHTML fetches a GitHub HTML page, spacing requests by the production
-// pacing interval after the first of the cycle. httpx retries 408, 429, 5xx
-// and transient transport errors with its defaults; other non-2xx statuses
-// fail fast.
-func (c *Client) fetchHTML(ctx context.Context, p *pacer, pageURL string) (string, error) {
-	if err := p.wait(ctx); err != nil {
-		return "", err
-	}
-
+// fetchHTML fetches a GitHub HTML page. httpx retries 408, 429, 5xx and
+// transient transport errors with its defaults; other non-2xx statuses fail
+// fast.
+func (c *Client) fetchHTML(ctx context.Context, pageURL string) (string, error) {
 	body, err := httpx.GetBytes(ctx, c.http, pageURL,
 		httpx.WithLogger(c.opts.Logger),
 		httpx.WithExhaustedLevel(slog.LevelDebug),
@@ -157,28 +153,31 @@ func (r refusals) refuse(candidate string) refusals {
 // scrapePackageList reads one owner's packages listing and returns the
 // package names in listing order plus the candidates it could not use. An
 // error is returned when neither account form yields names; a later-page
-// failure returns names already collected alongside the error.
-func (c *Client) scrapePackageList(ctx context.Context, p *pacer, owner string) ([]string, refusals, error) {
-	orgNames, refused, orgErr := c.readListing(ctx, p, owner, orgOwner)
+// failure returns names already collected alongside the error. whole reports
+// a walk that ended on its own with every page's printed count checked and
+// nothing refused.
+func (c *Client) scrapePackageList(ctx context.Context, owner string) (names []string, refused refusals, whole bool, err error) {
+	orgNames, refused, orgWhole, orgErr := c.readListing(ctx, owner, orgOwner)
 	if len(orgNames) > 0 || errors.Is(orgErr, errEmptyListing) {
-		return orgNames, refused, orgErr
+		return orgNames, refused, orgWhole, orgErr
 	}
+	var userRefused refusals
 
 	// The organization form is the kind probe: names or a listing stating zero
 	// packages identify an organization and a 404 identifies a user. If it
 	// yields neither, the user form is still tried so an organization-form
 	// failure cannot hide a valid user listing.
-	names, userRefused, err := c.readListing(ctx, p, owner, userOwner)
+	names, userRefused, whole, err = c.readListing(ctx, owner, userOwner)
 	refused = refused.merge(userRefused)
 	switch {
 	case len(names) > 0:
-		return names, refused, err
+		return names, refused, whole, err
 	case orgErr != nil && !isNotFound(orgErr):
-		return nil, refused, orgErr
+		return nil, refused, false, orgErr
 	case err == nil:
-		return nil, refused, emptyListingError(owner)
+		return nil, refused, false, emptyListingError(owner)
 	default:
-		return nil, refused, err
+		return nil, refused, whole, err
 	}
 }
 
@@ -192,7 +191,7 @@ func errTextForLog(err error) string {
 // partialListing returns a failed page with the names already collected. It
 // levels the record by cause, as the wholesale arm does: markup drift is
 // actionable and reads on the level=ERROR stream, anything else is a WARN.
-func (c *Client) partialListing(ctx context.Context, owner string, page int, names []string, refused refusals, err error) ([]string, refusals, error) {
+func (c *Client) partialListing(ctx context.Context, owner string, page int, names []string, refused refusals, err error) (kept []string, keptRefused refusals, whole bool, cause error) {
 	if len(names) > 0 && ctx.Err() == nil {
 		level := slog.LevelWarn
 		if errors.Is(err, errHTMLFormatChanged) {
@@ -202,7 +201,7 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 			"owner", owner, "packages", len(names), "page", page,
 			"error", errTextForLog(err))
 	}
-	return names, refused, err
+	return names, refused, false, err
 }
 
 // readListing walks one owner's listing in kind's URL form from page 1 up
@@ -223,22 +222,19 @@ func (c *Client) partialListing(ctx context.Context, owner string, page int, nam
 // walk does not act on it. All three self-heal at the next poll, and an
 // absent series already means "not measured this cycle" per obs.SetImage's
 // retirement contract.
-func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind ownerKind) ([]string, refusals, error) {
-	var (
-		names   []string
-		refused refusals
-	)
+func (c *Client) readListing(ctx context.Context, owner string, kind ownerKind) (names []string, refused refusals, whole bool, err error) {
+	var unchecked bool
 	seen := make(map[string]bool)
 	for page := 1; page <= maxListingPages; page++ {
-		html, err := c.fetchHTML(ctx, p, listingURL(kind, owner, page))
-		if err != nil {
-			return c.partialListing(ctx, owner, page, names, refused, err)
+		html, fetchErr := c.fetchHTML(ctx, listingURL(kind, owner, page))
+		if fetchErr != nil {
+			return c.partialListing(ctx, owner, page, names, refused, fetchErr)
 		}
 		pageNames, pageRefused := parsePackageList(html, owner, kind)
 		refused = refused.merge(pageRefused)
-		stated, statedOK, err := listingPagePopulation(html, page, pageNames, pageRefused)
-		if err != nil {
-			return c.partialListing(ctx, owner, page, names, refused, err)
+		stated, statedOK, countErr := listingPagePopulation(html, page, pageNames, pageRefused)
+		if countErr != nil {
+			return c.partialListing(ctx, owner, page, names, refused, countErr)
 		}
 		kept, added := appendUnseenNames(names, seen, pageNames)
 		names = kept
@@ -250,20 +246,22 @@ func (c *Client) readListing(ctx context.Context, p *pacer, owner string, kind o
 			stated:   stated,
 			statedOK: statedOK,
 		}
-		complete, err := c.listingPageComplete(owner, &acct)
-		if err != nil {
-			return c.partialListing(ctx, owner, page, names, refused, err)
+		unchecked = unchecked || !acct.statedOK
+		complete, pageErr := c.listingPageComplete(owner, &acct)
+		if pageErr != nil {
+			return c.partialListing(ctx, owner, page, names, refused, pageErr)
 		}
 		if complete {
+			whole = !unchecked && refused.Count == 0
 			if len(names) == 0 && acct.statedOK && acct.stated == 0 {
-				return nil, refused, confirmedEmptyListingError(owner)
+				return nil, refused, whole, confirmedEmptyListingError(owner)
 			}
-			return names, refused, nil
+			return names, refused, whole, nil
 		}
 	}
 	c.opts.Logger.Warn("ghcr owner listing hit page cap; results truncated",
 		"owner", owner, "max_pages", maxListingPages)
-	return names, refused, nil
+	return names, refused, false, nil
 }
 
 func listingPagePopulation(html string, page int, names []string, refused refusals) (stated int, statedOK bool, err error) {
@@ -461,20 +459,118 @@ func parseDownloads(html string) (int64, error) {
 	return int64(count), nil
 }
 
+// parsePublished extracts a package page's "Last published" time: the RFC
+// 3339 title attribute of the <h3> right after the one span whose whole text
+// is that label. Anything else fails closed with errHTMLFormatChanged.
+func parsePublished(html string) (time.Time, error) {
+	const label = "Last published"
+	at := -1
+	for i := 0; ; {
+		j := strings.Index(html[i:], label)
+		if j < 0 {
+			break
+		}
+		j += i
+		i = j + len(label)
+		if !strings.HasSuffix(strings.TrimRight(html[:j], htmlWhitespace), ">") ||
+			!strings.HasPrefix(strings.TrimLeft(html[i:], htmlWhitespace), "</span>") {
+			continue
+		}
+		if at >= 0 {
+			return time.Time{}, fmt.Errorf("%w: more than one last-published marker", errHTMLFormatChanged)
+		}
+		at = i
+	}
+	if at < 0 {
+		return time.Time{}, fmt.Errorf("%w: no last-published marker", errHTMLFormatChanged)
+	}
+	rest := strings.TrimLeft(html[at:], htmlWhitespace)
+	rest = strings.TrimLeft(strings.TrimPrefix(rest, "</span>"), htmlWhitespace)
+	const open = `<h3 title="`
+	if !strings.HasPrefix(rest, open) {
+		return time.Time{}, fmt.Errorf("%w: the element after the last-published marker is not %s", errHTMLFormatChanged, open)
+	}
+	raw, _, ok := strings.Cut(rest[len(open):], `"`)
+	if !ok {
+		return time.Time{}, fmt.Errorf("%w: last-published title attribute does not close", errHTMLFormatChanged)
+	}
+	published, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: parse last-published time: %w", errHTMLFormatChanged, err)
+	}
+	return published, nil
+}
+
+// maxVersionCountDigits bounds the printed version count, comma separators
+// included, well above any package GitHub can hold.
+const maxVersionCountDigits = 15
+
+// parseVersionCounts reads the tagged and untagged version totals a package's
+// versions page prints in its two filter links ("1,002 tagged", "2,215
+// untagged"). Each link must appear exactly once and print a plain count; a
+// count shown as a bound ("1000+") or in any other form fails closed, because
+// a lower bound published as a value would read as a real number.
+func parseVersionCounts(html string) (tagged, untagged int64, err error) {
+	if tagged, err = versionFilterCount(html, "tagged"); err != nil {
+		return 0, 0, err
+	}
+	if untagged, err = versionFilterCount(html, "untagged"); err != nil {
+		return 0, 0, err
+	}
+	return tagged, untagged, nil
+}
+
+func versionFilterCount(html, state string) (int64, error) {
+	marker := `versions?filters%5Bversion_type%5D=` + state + `">`
+	if n := strings.Count(html, marker); n != 1 {
+		return 0, fmt.Errorf("%w: %d %s-version filter links", errHTMLFormatChanged, n, state)
+	}
+	text, _, ok := strings.Cut(html[strings.Index(html, marker)+len(marker):], "</a>")
+	if !ok {
+		return 0, fmt.Errorf("%w: %s-version filter link does not close", errHTMLFormatChanged, state)
+	}
+	if i := strings.LastIndexByte(text, '>'); i >= 0 {
+		text = text[i+1:]
+	}
+	digits, ok := strings.CutSuffix(strings.Trim(text, htmlWhitespace), " "+state)
+	if !ok || len(digits) > maxVersionCountDigits || !plainCount(digits) {
+		return 0, fmt.Errorf("%w: %s-version filter link does not print a plain count", errHTMLFormatChanged, state)
+	}
+	count, err := strconv.ParseInt(strings.ReplaceAll(digits, ",", ""), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: parse %s-version count: %w", errHTMLFormatChanged, state, err)
+	}
+	return count, nil
+}
+
+// plainCount reports a digit run, or digits grouped in threes by commas after
+// a first group of one to three ("1,002").
+func plainCount(s string) bool {
+	groups := strings.Split(s, ",")
+	for i, g := range groups {
+		digits := g != "" && strings.Trim(g, "0123456789") == ""
+		grouped := len(groups) == 1 || len(g) == 3 || i == 0 && len(g) < 3
+		if !digits || !grouped {
+			return false
+		}
+	}
+	return true
+}
+
 // expandWildcard scrapes one wildcard owner's packages listing and appends
 // each new (deduplicated) package ref to packages. listingWhollyFailed is
 // true when the listing errored with no names at all: an unknown number of
-// packages went uncollected, which the health verdict must see. A cancelled
-// cycle is a stop, not an outage, and sets neither return.
+// packages went uncollected, which the health verdict must see. whole reports
+// a listing read to its end with nothing left unchecked. A cancelled cycle is
+// a stop, not an outage, and sets no return.
 func (c *Client) expandWildcard(
 	ctx context.Context,
-	p *pacer,
 	ref registry.RepoRef,
 	seen map[registry.RepoRef]bool,
 	packages []registry.RepoRef,
-) (out []registry.RepoRef, listingWhollyFailed bool) {
+) (out []registry.RepoRef, listingWhollyFailed, whole bool) {
 	out = packages
-	names, refused, err := c.scrapePackageList(ctx, p, ref.Owner)
+	names, refused, whole, err := c.scrapePackageList(ctx, ref.Owner)
 	if refused.Count > 0 {
 		// A refused candidate is omitted every cycle, so report it at the default level.
 		c.opts.Logger.Warn("ghcr listing refused package candidates",
@@ -488,7 +584,7 @@ func (c *Client) expandWildcard(
 			// level=error stream on every SIGTERM landing mid-listing.
 			c.opts.Logger.Debug("ghcr package listing cancelled", "owner", ref.Owner,
 				"error", errTextForLog(err))
-			return out, false
+			return out, false, false
 		}
 		// A listing that states zero container packages is a definitive
 		// upstream answer, not an unread listing.
@@ -508,11 +604,11 @@ func (c *Client) expandWildcard(
 			c.opts.Logger.Warn("ghcr owner has no public container packages",
 				"owner", ref.Owner)
 		}
-		return c.appendPackages(names, ref.Owner, seen, out), listingWhollyFailed
+		return c.appendPackages(names, ref.Owner, seen, out), listingWhollyFailed, whole && confirmedEmpty
 	}
 	out = c.appendPackages(names, ref.Owner, seen, out)
 	c.opts.Logger.Info("ghcr wildcard expanded", "owner", ref.Owner, "packages", len(names))
-	return out, false
+	return out, false, whole
 }
 
 // appendPackages adds every not-yet-seen (owner, name) pair to packages.
@@ -537,20 +633,23 @@ func (*Client) appendPackages(
 // packages listing, then appends explicit refs unless already covered by a
 // wildcard. Wildcard refs are folded to the config-canonical explicit spelling,
 // so a case-preserving listing still covers its explicit twin.
-// listingWhollyFailed is true when any owner's listing errored with no names.
+// listingWhollyFailed is true when any owner's listing errored with no names,
+// and listed names each owner whose listing was read whole.
 func (c *Client) buildPackageList(
 	ctx context.Context,
-	p *pacer,
 	refs []registry.RepoRef,
-) (packages []registry.RepoRef, listingWhollyFailed bool) {
+) (packages []registry.RepoRef, listed []string, listingWhollyFailed bool) {
 	seen := make(map[registry.RepoRef]bool)
 	for _, ref := range refs {
 		if ref.Repo != "*" {
 			continue
 		}
-		var wholly bool
-		packages, wholly = c.expandWildcard(ctx, p, ref, seen, packages)
+		var wholly, whole bool
+		packages, wholly, whole = c.expandWildcard(ctx, ref, seen, packages)
 		listingWhollyFailed = listingWhollyFailed || wholly
+		if whole {
+			listed = append(listed, ref.Owner)
+		}
 	}
 	for _, ref := range refs {
 		if ref.Repo == "*" {
@@ -561,5 +660,5 @@ func (c *Client) buildPackageList(
 		}
 		packages = append(packages, ref)
 	}
-	return packages, listingWhollyFailed
+	return packages, listed, listingWhollyFailed
 }

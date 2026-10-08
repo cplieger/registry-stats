@@ -97,7 +97,7 @@ func run() error {
 		refreshPresentMarker(marker)
 	})
 
-	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default()})
+	dh := dockerhub.NewClient(httpClient, dockerhub.Options{Logger: slog.Default(), Pacing: dockerhub.DefaultPacing})
 	gh := ghcr.NewClient(httpClient, ghcr.Options{Logger: slog.Default()})
 	active, sourceIDs := activeSources([]collectpkg.SourceRefs{
 		{Source: dh, Refs: cfg.DockerHubRepos},
@@ -108,8 +108,9 @@ func run() error {
 	marker.Set(true)
 
 	pub := &publication{marker: marker, m: m, ready: &ready}
+	details := collectpkg.NewDetails(slog.Default(), cfg.PollInterval, sourcesOf(active)...)
 	collect := func(ctx context.Context) {
-		runCollect(ctx, active, pub)
+		runCollect(ctx, active, pub, details)
 	}
 
 	bgDone := make(chan struct{})
@@ -186,19 +187,35 @@ type publication struct {
 	mu     sync.Mutex
 }
 
-func (p *publication) publish(ctx context.Context, images []obs.ImageMetric) {
+// publish reports whether it published: the Set methods delete labels absent
+// from a pass, so a cancelled cycle publishes nothing.
+func (p *publication) publish(ctx context.Context, cycle *collectpkg.Cycle) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// SetImage deletes labels absent from a pass, so a cancelled cycle publishes nothing.
 	if ctx.Err() != nil {
-		return
+		return false
 	}
-	p.m.SetImage(images)
-	ok := len(images) > 0
+	p.m.SetImage(cycle.Images)
+	p.m.SetPresence(cycle.Presence)
+	p.m.SetSources(cycle.Sources, cycle.Finished)
+	ok := len(cycle.Images) > 0
 	p.marker.Set(ok)
 	if ok {
 		p.ready.Set(true)
 	}
+	return true
+}
+
+// publishDetails also records the whole check's duration, so a check cancelled
+// before its tag and version reads finish adds no sample.
+func (p *publication) publishDetails(ctx context.Context, values []obs.DetailMetric, ages []obs.DetailAge, elapsed time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	p.m.SetDetails(values, ages)
+	p.m.ObserveCollectDuration(elapsed)
 }
 
 func (p *publication) drain() {
@@ -207,18 +224,33 @@ func (p *publication) drain() {
 	p.ready.Set(false)
 }
 
-// runCollect executes one cycle and publishes its outcome.
-func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication) {
-	images := collectpkg.Run(ctx, collectpkg.Options{
+// runCollect executes one cycle and publishes its outcome, then refreshes the
+// tag and version counts so their reads never delay the pull counts.
+func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication, details *collectpkg.Details) {
+	start := time.Now()
+	cycle := collectpkg.Run(ctx, collectpkg.Options{
 		Metrics: pub.m,
 		Sources: sources,
 		Logger:  slog.Default(),
 	})
-	pub.publish(ctx, images)
+	if !pub.publish(ctx, &cycle) {
+		return
+	}
+	values, ages := details.Refresh(ctx, &cycle)
+	pub.publishDetails(ctx, values, ages, time.Since(start))
 }
 
-// requestTimeout bounds each attempt made by the shared outbound
-// client, which both registry readers use.
+func sourcesOf(active []collectpkg.SourceRefs) []collectpkg.Source {
+	sources := make([]collectpkg.Source, 0, len(active))
+	for _, a := range active {
+		sources = append(sources, a.Source)
+	}
+	return sources
+}
+
+// requestTimeout bounds each attempt made by the shared outbound client,
+// which both registry readers use, including its redirect hops and the pacing
+// wait before each.
 const requestTimeout = 30 * time.Second
 
 func refreshPresentMarker(marker *health.Marker) {

@@ -10,10 +10,10 @@ It reads public images only. That removes any registry credential from the conta
 
 ## Where the counts come from
 
-- Docker Hub counts come from the unauthenticated Docker Hub API. An `owner/repo` entry reads that repo's `pull_count`. An `owner/*` entry reads the owner's listing, whose rows already carry each count.
-- GHCR counts come from the public package pages on github.com, because GitHub publishes no API for download counts. The count is the package-wide "Total downloads" figure each package page prints. registry-stats reads the full number from that figure's `title` attribute, so the count is exact. An `owner/*` entry first reads the owner's package listing.
+- Docker Hub counts come from the unauthenticated Docker Hub API. An `owner/repo` entry reads that repo's `pull_count`. An `owner/*` entry reads the owner's listing, whose rows already carry each count. Both carry the repository's `last_updated` time too.
+- GHCR counts come from the public package pages on github.com, because GitHub publishes no API for download counts. The count is the package-wide "Total downloads" figure each package page prints. registry-stats reads the full number from that figure's `title` attribute, so the count is exact. The same page gives the "Last published" time. An `owner/*` entry first reads the owner's package listing.
 
-GHCR requests are spaced 2 to 5 seconds apart. Reading HTML depends on GitHub's page layout, and a change to that layout breaks it. registry-stats checks each page against the shape it expects. When most packages in one check fail that test, it logs an `ERROR` line with a link to this repository's issues. The line reads `ghcr HTML format may be changing, majority of scrapes hit format errors`.
+Docker Hub requests start at least half a second apart, two per second, which stays under the 180 per minute the anonymous API allows. GHCR requests are spaced 2 to 5 seconds apart. Each registry keeps one spacing for every request it sends, listings, counts, tag reads, retries and redirects alike. Reading HTML depends on GitHub's page layout, and a change to that layout breaks it. registry-stats checks each page against the shape it expects. When most packages in one check fail that test, it logs an `ERROR` line with a link to this repository's issues. The line reads `ghcr HTML format may be changing, majority of scrapes hit format errors`.
 
 ## What one check publishes
 
@@ -24,9 +24,23 @@ A check runs both registries and then replaces the published counts with what it
 - a GHCR listing page prints no usable package count, so completeness cannot be checked,
 - one image's request fails, for example on a rate limit.
 
-Each of these logs a line at `WARN`, or at `ERROR` when the cause is a changed page or response format. The alert rule `RegistryStatsCollectionIncomplete` fires on them. A registry where most requests fail in one check, or whose whole owner listing fails, counts as failed in `registrystats_collect_errors_total`.
+Each of these logs a line at `WARN`, or at `ERROR` when the cause is a changed page or response format. Each of them also sets `registrystats_collect_complete` to 0 for that registry, and so does any image request that ends in neither a count nor a 404. A 404 is a definitive answer that the image is not there, which `registrystats_image_present` reports as 0. The alert rule `RegistryStatsCollectionIncomplete` fires on them. A registry where most requests fail in one check, or whose whole owner listing fails, counts as failed in `registrystats_collect_errors_total`.
 
 A check that collects at least one image logs `collection complete` with its `images=` count. A check that collects nothing logs `no images collected, at least one source failed`, `no images found for the configured refs` or `no repos configured`.
+
+## Tags and versions
+
+Push times, presence, tags and versions cover the first 250 `owner/repo` names in alphabetical order. A name's images on both registries are in or out together. An image past the cap keeps its pull count, and `registrystats_image_details_omitted` counts it.
+
+Presence is set only where a registry's configuration covers the name, through an `owner/repo` entry or that owner's `owner/*`. It reads 0 only for a definitive answer, a 404 or no row in a listing read to its end. A failed read leaves no presence series. Docker Hub gets no presence series for a GHCR package with a slash in its name, because a Docker Hub repository name cannot hold one.
+
+After a check publishes the pull counts, registry-stats reads the tag and version counts. A Docker Hub repository costs one request for its first tag page, whose header states the total. A GHCR package costs one request for its versions page, which prints the tagged and untagged totals. A count printed as a bound, such as `1000+`, is never published.
+
+A count is read again when the image's push or update time changed since the last read, or once that read is 24 hours old. At about 250 names and hourly checks, that is around 11 reads per registry per check, plus one per push.
+
+After a start, the first reads are shared evenly over the checks that begin within a day, the longest-waiting first, so the counts fill in over the first day at any `POLL_INTERVAL_HOURS`. An image whose read fails is retried after the images not yet read, so it never holds up the rest. With `POLL_INTERVAL_HOURS=0`, the one check reads them all. A check that could not read a registry completely keeps the counts of the images it missed, and shows them again once a check reads those images.
+
+A rate-limit answer stops that registry's reads until the next check and keeps every count already read. A failed read removes that image's count until it is read again.
 
 ## Scheduling
 
@@ -53,3 +67,4 @@ Docker restart policies act on process exit, never on health, so `restart: unles
 - No history before the first scrape.
 - GHCR counts depend on GitHub's page layout.
 - Up to 198 Docker Hub repos and about 1,500 GHCR packages per `owner/*` entry. List more as separate `owner/repo` entries.
+- Push times, presence, tag and version counts for the first 250 `owner/repo` names. Later names keep their pull counts only.

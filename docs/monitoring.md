@@ -1,6 +1,6 @@
 # Monitoring and alerts
 
-This page lists what registry-stats emits, how to load the bundled Grafana dashboard, and the alert rules it ships. It is for operators wiring it into Prometheus, Grafana and Loki.
+This page lists what registry-stats emits, how to load its Grafana dashboard, and its alert rules. It is for operators wiring it into Prometheus, Grafana and Loki.
 
 ## Metrics
 
@@ -9,12 +9,25 @@ This page lists what registry-stats emits, how to load the bundled Grafana dashb
 - `registrystats_image_pulls_total{registry,owner,repo}`: the current pull count of each image.
 - `registrystats_collects_total{source}`: checks per registry, successful and failed.
 - `registrystats_collect_errors_total{source}`: failed checks per registry.
-- `registrystats_collect_duration_seconds`: a histogram of check durations.
+- `registrystats_collect_duration_seconds`: a histogram of check durations, tag and version reads included.
+- `registrystats_collect_last_success_timestamp_seconds{source}`: the last check in which most reads got an answer, a 404 included.
+- `registrystats_collect_complete{source}`: 1 when every read of the last check got an answer.
+- `registrystats_image_present{source,owner,repo}`: 1 when read, 0 when definitively absent.
+- `registrystats_image_last_pushed_timestamp_seconds{registry,owner,repo}`: GHCR's "Last published" time.
+- `registrystats_dockerhub_repository_updated_timestamp_seconds{owner,repo}`: Docker Hub's `last_updated` time.
+- `registrystats_dockerhub_tags{owner,repo}`: Docker Hub tag counts.
+- `registrystats_ghcr_versions{owner,repo,state}`: GHCR version counts.
+- `registrystats_details_oldest_read_timestamp_seconds{source}`: when the oldest count on show was read.
+- `registrystats_image_details_omitted{source}`: images past the detail cap.
 - `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds` and the other `process_*` series: runtime metrics.
 
-`registrystats_image_pulls_total` is a gauge even though its name ends in `_total`. A registry can restate its total downward, which a counter may never do, and the rule `RegistryStatsPullCountRegressed` alerts on exactly that. Use `delta()` for pulls over a window, as the dashboard does. `rate()` and `increase()` would read a restated total as a counter reset.
+A registry with no configured repos has no per-registry series.
 
-`GET /api/health` is the readiness check: HTTP 503 until the first check publishes data, then `{"status":"ok"}` until shutdown. [How registry-stats works](how-it-works.md#health-and-readiness) explains it beside the Docker healthcheck.
+`registrystats_image_pulls_total` is a gauge despite its `_total` name, because a registry can restate its total downward. Use `delta()` over a window, as the dashboard does. `rate()` and `increase()` would read a restated total as a counter reset.
+
+`GET /api/health` is the readiness check, which [How registry-stats works](how-it-works.md#health-and-readiness) explains.
+
+[Tags and versions](how-it-works.md#tags-and-versions) explains the 250-name cap on detail series and when presence reads 0.
 
 ## Logs
 
@@ -27,16 +40,24 @@ registry-stats writes logfmt records to standard error, with UTC timestamps. Lev
 | `no images collected, at least one source failed` | ERROR | A check published nothing, and the container turns unhealthy |
 | `skipping unusable repo ref` | WARN | A repo list entry was rejected at start |
 | `ghcr HTML format may be changing, majority of scrapes hit format errors` | ERROR | GitHub changed its package pages |
+| `ghcr package field unreadable` | WARN | A package page had no readable push time |
+| `docker hub tag read failed`, `ghcr version read failed` | WARN or ERROR | A count read failed, at ERROR on a format change |
+| `detail reads stopped` | WARN | A rate limit stopped the tag or version reads until the next check |
+| `image details omitted` | WARN | More than 250 names are tracked |
 
 ## Dashboard
 
-[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It shows total downloads, the tracked package count, a per-package table, cumulative downloads and downloads per day, and filters by registry, owner and repo.
+[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It filters by registry, owner and repo, and adds Docker Hub and GHCR together per package until you turn on Split by registry. Its five tabs are Overview, Packages, History over the last year, Registries and tags, and Collector health, whose Job list scopes it to one scrape job.
+
+Registries out of step lists a package that one registry has and the other definitively does not, pairing images by owner and name. A GHCR package with a slash in its name is never compared, because a Docker Hub repository name cannot hold one. With `owner/*` on both, a package you publish to one registry on purpose stays listed while the configuration covers it. A stale or incomplete read, or a stopped collector, shows an Unknown row.
+
+Collector health shows the worst selected collector, except the checks-per-day and restarts panels, which add collectors up, and Check duration, which pools them. A collector counts once however many tenants hold its series, and a package counts once whether collectors read it together or in turn. The age colours and the 2-hour stale cutoff of Registries out of step assume the default hourly check, so a longer `POLL_INTERVAL_HOURS` reads stale between checks.
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or any Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The example compose publishes the port on `127.0.0.1`, so a collector on another host needs `"<trusted-ip>:9100:9100"` instead.
 2. Load the dashboard, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
 3. Pick your Prometheus or Mimir data source in the Data source list at the top of the dashboard.
 
-The dashboard is versioned with the app. The file at release `<tag>` matches the metrics that image emits. The file sets `metadata.name` to `registry-stats`, which Grafana uses as the dashboard UID. Because the name stays the same from release to release, importing a newer copy over the existing one, or a file provider reading the newer file, updates it in place. Pin it the way you pin the image, with the tag of the image you run.
+The dashboard is versioned with the app, so pin it to the tag of the image you run. Its `metadata.name` is `registry-stats`, which Grafana uses as the dashboard UID, so importing a newer copy, or a file provider reading it, updates it in place.
 
 - The release asset is `https://github.com/cplieger/registry-stats/releases/download/<tag>/grafana-dashboard.json`, with `grafana-dashboard.json.sha256` beside it. It works as the Grafana Helm chart's `dashboards.<provider>.<name>.url` with `curlOptions: "-sLf"`, because the release URL redirects, or as a Terraform `http` data source.
 - The OCI artifact is `ghcr.io/cplieger/registry-stats/dashboard:<tag>`, with the artifact type `application/vnd.grafana.dashboard.v2+json`.
@@ -113,7 +134,7 @@ Use an exact `job` matcher, never a regex. A regex form such as `absent(up{job=~
 
 #### `RegistryStatsCollectStalled`
 
-The rule looks for no completed check over 15 minutes, held for 6 hours, rather than over 6 hours directly. A counter that has just started has two samples at the same value, which the direct form reads as a stall. The direct form would then fire about 30 minutes after every container start and clear at the first scheduled check. The shipped form fires 6 hours after the last completed check, and a restart resets its pending timer at the startup check.
+The rule looks for no completed check over 15 minutes, held for 6 hours, rather than over 6 hours directly. A counter that has just started has two samples at the same value, which the direct form reads as a stall. The shipped form fires 6 hours after the last completed check, and a restart resets its pending timer at the startup check.
 
 The rule watches completed checks, not request progress. If outbound requests stop, the Docker healthcheck trips first, after one poll interval plus a three-minute progress lease. A check that keeps sending requests but does not complete within 6 hours pages here on purpose, because registry-stats has published nothing new for that long. The window assumes the default `POLL_INTERVAL_HOURS` of 1. Set the `for:` window to how long you will accept no new data.
 
@@ -125,7 +146,7 @@ Drop the rule in one-shot mode, `POLL_INTERVAL_HOURS=0`, where the counter advan
 
 Other configured owners are unaffected, and their series keep updating. Read the log for the owner rather than assuming the whole registry failed. The log names the reason, such as a rate limit, an HTTP failure or a page-format change.
 
-Both per-registry counters start at zero in process memory, but that zero is not a scrape sample. If the first failure happens before the first scrape, the first sample is already positive and `increase()` has no earlier sample to subtract. The uptime arm of the expression covers that startup window, and the `increase()` arm covers later failures. A registry with no configured repos has no series, so the rule cannot fire for a registry you never poll.
+Both per-registry counters start at zero in process memory, but that zero is not a scrape sample. If the first failure happens before the first scrape, the first sample is already positive and `increase()` has no earlier sample to subtract. The uptime arm of the expression covers that startup window, and the `increase()` arm covers later failures.
 
 #### `RegistryStatsPullCountRegressed`
 
@@ -140,17 +161,17 @@ The rule matches six messages. The two repo-ref messages and the two wildcard-em
 - A wildcard whose owner publishes no public image logs a `WARN` every check. Make at least one image public.
 - A malformed or negative `POLL_INTERVAL_HOURS` reverts to the 1-hour default. A value above 8,760 hours is capped at 8,760. Until you fix the value, registry-stats polls on an interval you did not ask for.
 
-None of these conditions has a metric. A ref that never parsed has no series, and an empty wildcard has no image series. With both lists empty, `registrystats_collects_total` has no series either, so `RegistryStatsCollectStalled` cannot fire. A skip line is logged once per start, so the alert clears one hour after a restart with a corrected value. The no-repos and wildcard-empty lines repeat every check.
+None of these conditions has a metric, as the Alerting list above explains. A skip line is logged once per start, so the alert clears one hour after a restart with a corrected value. The no-repos and wildcard-empty lines repeat every check.
 
 #### `RegistryStatsError`
 
-The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
+The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. A tag or version read whose response format changed is an `ERROR` too. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
 
 `/api/health` answers 503 at every start until the first check completes, and again during shutdown. The HTTP access log reports a 5xx at `ERROR`, so the second line filter excludes that one access record. The exclusion keys on the access record's own `msg`, so diagnostics a failing hook logs for the same request still reach the rule.
 
 #### `RegistryStatsCollectionIncomplete`
 
-The rule reports a check that left image series off `/metrics`, whether or not the registry's health threshold is crossed. `RegistryStatsSourceDegraded` may fire at the same time. Registry health compares the image requests that succeeded with the ones attempted. Docker Hub rows read from an owner listing count on neither side, so a truncated listing can drop images without moving `registrystats_collect_errors_total`.
+The rule reports a check that left image series off `/metrics`, whether or not the registry's health threshold is crossed. `RegistryStatsSourceDegraded` may fire at the same time. A truncated listing can drop images without moving `registrystats_collect_errors_total`, because listing rows count on neither side of the health ratio.
 
 - `hit page cap` means an owner listing reached its page limit. On Docker Hub, the owner publishes more repositories than an unauthenticated listing can enumerate. On GHCR, a `ghcr listing refused package candidates` record comes with it, and the extra match does not change whether the rule fires.
 - `listing partially failed` means an owner listing lost a page.
@@ -158,7 +179,7 @@ The rule reports a check that left image series off `/metrics`, whether or not t
 - `ghcr listing refused package candidates` means a listing returned usable refs without an error but left out published candidates. No counter can see this.
 - `ghcr listing page states no usable package count` means a listing returned the names it found but could not check that the list is complete.
 
-A GHCR listing that fails wholly logs `ghcr package listing failed`, which this rule does not match. Its refused-candidates record is then this rule's only match, and `RegistryStatsSourceDegraded` reports the outage. A majority of failed GHCR packages also marks the registry unhealthy, so `RegistryStatsSourceDegraded` covers it. One failed explicit repo is a majority when it is the only one. This rule is for minority failures, refused candidates and listings with an unusable package count.
+A GHCR listing that fails wholly logs `ghcr package listing failed`, which this rule does not match. Its refused-candidates record is then this rule's only match, and `RegistryStatsSourceDegraded` reports the outage. A majority of failed GHCR packages also marks the registry unhealthy, so `RegistryStatsSourceDegraded` covers it. One failed explicit repo is a majority when it is the only one.
 
 A Docker Hub parse failure also removes one image series. Its `docker hub parse failed` record is always `ERROR`, so `RegistryStatsError` covers it.
 
@@ -167,7 +188,6 @@ A Docker Hub parse failure also removes one image series. Its `docker hub parse 
 The LogQL rules assume the default `LOG_LEVEL=info`. `RegistryStatsCollectionIncomplete` matches only lines that can also log at `WARN`, and lines that are always `ERROR` belong to `RegistryStatsError`. At `LOG_LEVEL=error`, these change:
 
 - `RegistryStatsCollectionIncomplete` matches only records caused by markup or response-schema drift. Docker Hub listing and fetch failures and GHCR partial listings log at `ERROR` on those causes, and the rule still matches them by message.
-- A Docker Hub metadata response that decodes without a usable pull count logs `docker hub parse failed` at `ERROR` at every level, so `RegistryStatsError` covers it.
 - A GHCR listing that fails wholly on a drift cause also logs at `ERROR`. Its message is not one of the six that `RegistryStatsCollectionIncomplete` matches, so `RegistryStatsError` covers it.
 - The recurring no-repos `WARN` and both wildcard-empty `WARN` lines are silenced. The no-repos condition stays visible through its startup record until that record leaves the one-hour window. The wildcard-empty conditions reach no rule.
 
