@@ -184,10 +184,22 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	m := New()
 	m.MintCollectSources([]registry.ID{registry.DockerHub})
 	m.ObserveCollectDuration(time.Second)
-	m.SetImage([]ImageMetric{{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1}})
+	at := time.Unix(1, 0)
+	m.SetImage([]ImageMetric{
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "repo", Pulls: 1, Updated: at, Detailed: true},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "repo", Pulls: 1, LastPushed: at, Detailed: true},
+	})
+	m.SetPresence([]Presence{{Source: registry.GHCR, Owner: "owner", Repo: "repo", Present: true}})
+	m.SetSources([]SourceCycle{{Source: registry.GHCR, Answered: true, Complete: true}}, at)
+	m.SetDetails([]DetailMetric{
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "repo"},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "repo"},
+	}, []DetailAge{{Source: registry.GHCR, Oldest: at}})
 	body := scrapeBody(t, m)
 
 	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)
+	// A histogram's _bucket, _sum and _count series share the family's HELP line.
+	family := regexp.MustCompile(`^(registrystats_collect_duration_seconds)_(?:bucket|sum|count)$`)
 	consumerSeries := make(map[string]bool)
 	for _, path := range []string{
 		"../../CONTRIBUTING.md",
@@ -203,7 +215,7 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 			t.Fatalf("Setup: read shipped metric consumer %s: %v", path, err)
 		}
 		for _, name := range metricName.FindAllString(string(data), -1) {
-			consumerSeries[name] = true
+			consumerSeries[family.ReplaceAllString(name, "$1")] = true
 		}
 	}
 	for name := range consumerSeries {

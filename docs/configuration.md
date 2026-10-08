@@ -28,7 +28,9 @@ Each check logs how many images it collected, and the total the registry adverti
 
 ### The Docker Hub rate limit
 
-Each `owner/repo` entry on Docker Hub costs one request per check, sent back to back. The unauthenticated API counts requests per client address and advertises 180 per minute in its `x-ratelimit-limit` header. A list close to that size can see some repos fail in one check. They recover on the next check. An `owner/*` entry costs one request per listing page instead.
+Each `owner/repo` entry on Docker Hub costs one request per check, and an `owner/*` entry one request per listing page. At the default hourly check, tag counts add about one request per 24 images per check, plus one for each image pushed since its last read.
+
+The unauthenticated API counts requests per client address and advertises 180 per minute in its `x-ratelimit-limit` header. registry-stats starts each Docker Hub request at least half a second after the one before. At two per second, 198 explicit entries take about 100 seconds. If the limit still hits, the affected repos recover on the next check.
 
 ## Poll interval
 

@@ -249,12 +249,22 @@ func TestMain_healthProbeUsesProgressLease(t *testing.T) {
 // mainFakeSource is a canned collect.Source for driving runCollect.
 type mainFakeSource struct {
 	onCollect     func()
-	src           registry.ID
+	onDetail      func()
 	entries       []registry.Entry
+	absent        []registry.RepoRef
+	detail        registry.Detail
+	src           registry.ID
 	listingFailed bool
 }
 
 func (f *mainFakeSource) Source() registry.ID { return f.src }
+
+func (f *mainFakeSource) ReadDetail(context.Context, registry.RepoRef) (registry.Detail, error) {
+	if f.onDetail != nil {
+		f.onDetail()
+	}
+	return f.detail, nil
+}
 
 func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) registry.Collection {
 	if f.onCollect != nil {
@@ -262,8 +272,10 @@ func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) regist
 	}
 	return registry.Collection{
 		Entries:       f.entries,
+		Absent:        f.absent,
 		Fetched:       len(f.entries),
-		Attempted:     len(f.entries),
+		Attempted:     len(f.entries) + len(f.absent),
+		Definitive:    len(f.entries) + len(f.absent),
 		ListingFailed: f.listingFailed,
 	}
 }
@@ -397,7 +409,7 @@ func TestRunCollect_partialSuccessStaysHealthy(t *testing.T) {
 	runCollect(t.Context(), []collect.SourceRefs{
 		{Source: dh, Refs: cfg.DockerHubRepos},
 		{Source: gh, Refs: cfg.GHCRRepos},
-	}, &publication{marker: marker, m: obs.New(), ready: &webhttp.Ready{}})
+	}, &publication{marker: marker, m: obs.New(), ready: &webhttp.Ready{}}, collect.NewDetails(slog.Default(), 0))
 	if !marker.Healthy() {
 		t.Error("runCollect partial success left marker unhealthy, want healthy")
 	}
@@ -419,7 +431,7 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 
 	runCollect(t.Context(), []collect.SourceRefs{
 		{Source: source, Refs: cfg.DockerHubRepos},
-	}, pub)
+	}, pub, collect.NewDetails(slog.Default(), 0))
 	if !marker.Healthy() {
 		t.Error("runCollect first cycle left marker unhealthy, want healthy")
 	}
@@ -431,7 +443,7 @@ func TestRunCollect_latchesReadinessAcrossFailedCycle(t *testing.T) {
 	source.listingFailed = true
 	runCollect(t.Context(), []collect.SourceRefs{
 		{Source: source, Refs: cfg.DockerHubRepos},
-	}, pub)
+	}, pub, collect.NewDetails(slog.Default(), 0))
 
 	if marker.Healthy() {
 		t.Error("runCollect failed cycle left marker healthy, want unhealthy")
@@ -463,7 +475,7 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 
 	runCollect(ctx, []collect.SourceRefs{
 		{Source: source, Refs: cfg.DockerHubRepos},
-	}, &publication{marker: marker, m: m, ready: ready})
+	}, &publication{marker: marker, m: m, ready: ready}, collect.NewDetails(slog.Default(), 0))
 
 	if marker.Healthy() {
 		t.Error("cancelled cycle set the marker healthy, want untouched")
@@ -479,6 +491,139 @@ func TestRunCollect_cancelledCyclePublishesNothing(t *testing.T) {
 	}
 	if !strings.Contains(body, `registrystats_collect_duration_seconds_count 0`) {
 		t.Errorf("cancelled cycle published a duration sample:\n%s", body)
+	}
+	if strings.Contains(body, `registrystats_collect_last_success_timestamp_seconds{`) || strings.Contains(body, `registrystats_collect_complete{`) {
+		t.Errorf("cancelled cycle published a source verdict:\n%s", body)
+	}
+}
+
+// TestRunCollect_publishesTheCycleThenItsDetails pins the order of one cycle's
+// publication: while the detail read is still in flight, the pull counts, source
+// verdicts and presence are already on /metrics and the tag count is not.
+func TestRunCollect_publishesTheCycleThenItsDetails(t *testing.T) {
+	reading, release := make(chan struct{}), make(chan struct{})
+	source := &mainFakeSource{
+		src:     registry.DockerHub,
+		entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7}},
+		detail:  registry.Detail{Tagged: 12},
+		onDetail: func() {
+			close(reading)
+			<-release
+		},
+	}
+	active := []collect.SourceRefs{{Source: source, Refs: []registry.RepoRef{{Owner: "o", Repo: "app"}}}}
+	m := obs.New()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCollect(t.Context(), active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}},
+			collect.NewDetails(slog.Default(), 0, sourcesOf(active)...))
+	}()
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return rec.Body.String()
+	}
+
+	<-reading
+	during := scrape()
+	close(release)
+	<-done
+	after := scrape()
+
+	for _, line := range []string{
+		`registrystats_image_pulls_total{owner="o",registry="dockerhub",repo="app"} 7`,
+		`registrystats_collect_complete{source="dockerhub"} 1`,
+		`registrystats_collect_last_success_timestamp_seconds{source="dockerhub"} `,
+		`registrystats_image_present{owner="o",repo="app",source="dockerhub"} 1`,
+	} {
+		if !strings.Contains(during, line) {
+			t.Errorf("runCollect exposition during the detail read missing %q:\n%s", line, during)
+		}
+	}
+	if strings.Contains(during, `registrystats_dockerhub_tags{`) {
+		t.Errorf("runCollect published a tag count before its read finished:\n%s", during)
+	}
+	if !strings.Contains(during, `registrystats_collect_duration_seconds_count 0`) {
+		t.Errorf("runCollect observed the check duration before its tag and version reads finished:\n%s", during)
+	}
+	for _, line := range []string{
+		`registrystats_collect_duration_seconds_count 1`,
+		`registrystats_image_details_omitted{source="dockerhub"} 0`,
+		`registrystats_dockerhub_tags{owner="o",repo="app"} 12`,
+		`registrystats_details_oldest_read_timestamp_seconds{source="dockerhub"} `,
+	} {
+		if !strings.Contains(after, line) {
+			t.Errorf("runCollect exposition after the detail read missing %q:\n%s", line, after)
+		}
+	}
+}
+
+func TestRunCollect_anEmptyCycleRecordsDuration(t *testing.T) {
+	m := obs.New()
+
+	runCollect(t.Context(), nil, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}},
+		collect.NewDetails(slog.Default(), 0))
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `registrystats_collect_duration_seconds_count 1`) {
+		t.Errorf("runCollect(no sources) duration count missing one observation:\n%s", body)
+	}
+}
+
+// TestRunCollect_aCycleCancelledDuringItsDetailReadsObservesNoDuration pins the
+// duration's cancellation rule: a check stopped before its tag and version reads
+// finish is not a complete check, so it adds no duration sample.
+func TestRunCollect_aCycleCancelledDuringItsDetailReadsObservesNoDuration(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	source := &mainFakeSource{
+		src:      registry.DockerHub,
+		entries:  []registry.Entry{{Owner: "o", Repo: "app", Pulls: 7}},
+		onDetail: cancel,
+	}
+	active := []collect.SourceRefs{{Source: source, Refs: []registry.RepoRef{{Owner: "o", Repo: "app"}}}}
+	m := obs.New()
+
+	runCollect(ctx, active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}},
+		collect.NewDetails(slog.Default(), 0, sourcesOf(active)...))
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `registrystats_collect_duration_seconds_count 0`) {
+		t.Errorf("runCollect(cancelled during the detail read) observed a check duration:\n%s", body)
+	}
+}
+
+// TestRunCollect_aPackageMissingFromDockerHubPublishesAFreshAbsence pins the
+// series Registries out of step needs for its "Not on Docker Hub now" row when
+// Docker Hub answers 404 for a package GHCR holds: presence 0, a complete read and
+// a fresh last success. The 404 still counts as a failed Docker Hub check.
+func TestRunCollect_aPackageMissingFromDockerHubPublishesAFreshAbsence(t *testing.T) {
+	app := registry.RepoRef{Owner: "o", Repo: "app"}
+	dh := &mainFakeSource{src: registry.DockerHub, absent: []registry.RepoRef{app}}
+	gh := &mainFakeSource{src: registry.GHCR, entries: []registry.Entry{{Owner: "o", Repo: "app", Pulls: 3}}}
+	m := obs.New()
+
+	runCollect(t.Context(), []collect.SourceRefs{
+		{Source: dh, Refs: []registry.RepoRef{app}},
+		{Source: gh, Refs: []registry.RepoRef{app}},
+	}, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}}, collect.NewDetails(slog.Default(), 0))
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, line := range []string{
+		`registrystats_image_present{owner="o",repo="app",source="dockerhub"} 0`,
+		`registrystats_image_present{owner="o",repo="app",source="ghcr"} 1`,
+		`registrystats_collect_complete{source="dockerhub"} 1`,
+		`registrystats_collect_last_success_timestamp_seconds{source="dockerhub"} `,
+		`registrystats_collect_last_success_timestamp_seconds{source="ghcr"} `,
+		`registrystats_collect_errors_total{source="dockerhub"} 1`,
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("runCollect(Docker Hub 404, GHCR present) exposition missing %q:\n%s", line, body)
+		}
 	}
 }
 
@@ -505,7 +650,7 @@ func TestRunCollect_publishesImageMetrics(t *testing.T) {
 	runCollect(t.Context(), []collect.SourceRefs{
 		{Source: dh, Refs: cfg.DockerHubRepos},
 		{Source: gh, Refs: cfg.GHCRRepos},
-	}, &publication{marker: marker, m: m, ready: &webhttp.Ready{}})
+	}, &publication{marker: marker, m: m, ready: &webhttp.Ready{}}, collect.NewDetails(slog.Default(), 0))
 	if !marker.Healthy() {
 		t.Error("runCollect image publication left marker unhealthy, want healthy")
 	}
@@ -568,7 +713,7 @@ func TestRunCollect_holdsPubAcrossPublication(t *testing.T) {
 	go func() {
 		runCollect(t.Context(), []collect.SourceRefs{
 			{Source: source, Refs: cfg.DockerHubRepos},
-		}, pub)
+		}, pub, collect.NewDetails(slog.Default(), 0))
 		close(done)
 	}()
 	<-marker.entered
@@ -652,7 +797,7 @@ func TestActiveSources_preMintsConfiguredSourcesOnly(t *testing.T) {
 		t.Errorf("unconfigured source ghcr has a series; want none\n got:\n%s", body)
 	}
 
-	runCollect(t.Context(), active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}})
+	runCollect(t.Context(), active, &publication{marker: &mainFakeMarker{}, m: m, ready: &webhttp.Ready{}}, collect.NewDetails(slog.Default(), 0))
 	w = httptest.NewRecorder()
 	m.Handler()(w, r)
 	body = w.Body.String()

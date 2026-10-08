@@ -7,28 +7,17 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
-// The readers in this package are the app's only untrusted-input boundary, and every
-// other test in it drives markup this repo wrote. That leaves one question unanswered:
-// does the code still read what GitHub actually serves, and does anything in it read
-// markup GitHub never serves?
-//
-// These fixtures are real responses, captured 2026-09-09 from the two URLs
-// listingURL and scrapePackage build:
-//
-//	https://github.com/cplieger?tab=packages&ecosystem=container&page=1
-//	https://github.com/cplieger/registry-stats/pkgs/container/registry-stats
-//
-// Stored gzipped because they are a quarter-megabyte each and the bytes are the point;
-// one value is masked, narrowly and per field, and nothing else is touched: the
-// listing's `authenticity_token` carried a live anonymous-session CSRF value, which no
-// reader here looks at. To recapture, fetch both URLs (any User-Agent; the pages are
-// served to all), mask that one attribute value, and gzip.
-//
-// The organization form of the listing is deliberately NOT captured: cplieger is a
-// user, so `https://github.com/orgs/cplieger/packages` answers 404 and the production
-// path falls back to the user form. That fallback is what these bytes exercise.
+// liveMarkup reads a gzipped GitHub response from the URLs listingURL,
+// scrapePackage and ReadDetail build. live-listing (cplieger's listing, its
+// authenticity_token masked) and live-package (the registry-stats page, nothing
+// masked) were captured 2026-09-09, live-versions (plex-exporter's tagged
+// versions, html-safe-nonce, visitor-payload and visitor-hmac masked) 2026-10-07.
+// To recapture, mask whichever of those four values a page carries, and gzip.
+// cplieger is a user, so the orgs listing answers 404 and these bytes exercise
+// the user-form fallback.
 func liveMarkup(t *testing.T, name string) string {
 	t.Helper()
 	f, err := os.Open("testdata/" + name + ".html.gz")
@@ -90,8 +79,33 @@ func TestParseDownloads_ReadsTheServedPackagePage(t *testing.T) {
 	}
 }
 
+// TestParsePublished_ReadsTheServedPackagePage pins the "Last published" reader
+// against the time the captured page states.
+func TestParsePublished_ReadsTheServedPackagePage(t *testing.T) {
+	got, err := parsePublished(liveMarkup(t, "live-package"))
+	if err != nil {
+		t.Fatalf("parsePublished(served package page) error = %v, want nil", err)
+	}
+	if want := time.Date(2026, 9, 9, 14, 14, 12, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("parsePublished(served package page) = %v, want %v", got, want)
+	}
+}
+
+// TestParseVersionCounts_ReadsTheServedVersionsPage pins the version-count reader on
+// the largest tracked package, whose counts GitHub prints with thousands separators.
+func TestParseVersionCounts_ReadsTheServedVersionsPage(t *testing.T) {
+	html := liveMarkup(t, "live-versions")
+	if len(html) >= ghcrBodyCap {
+		t.Errorf("served versions page is %d bytes, want it under the %d-byte body cap", len(html), ghcrBodyCap)
+	}
+	tagged, untagged, err := parseVersionCounts(html)
+	if err != nil || tagged != 1002 || untagged != 2215 {
+		t.Errorf("parseVersionCounts(served versions page) = (%d, %d, %v), want (1002, 2215, nil)", tagged, untagged, err)
+	}
+}
+
 func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
-	listing, pkg := liveMarkup(t, "live-listing"), liveMarkup(t, "live-package")
+	listing, pkg, versions := liveMarkup(t, "live-listing"), liveMarkup(t, "live-package"), liveMarkup(t, "live-versions")
 	for _, tc := range []struct {
 		construct string
 		handledBy string
@@ -103,7 +117,7 @@ func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 		{"<?", "unsupported processing-instruction markup"},
 	} {
 		t.Run(tc.construct, func(t *testing.T) {
-			for page, html := range map[string]string{"listing": listing, "package": pkg} {
+			for page, html := range map[string]string{"listing": listing, "package": pkg, "versions": versions} {
 				if n := strings.Count(html, tc.construct); n != 0 {
 					t.Errorf("served %s page carries %q %d time(s); %s is exercised by real input after all",
 						page, tc.construct, n, tc.handledBy)
@@ -115,8 +129,9 @@ func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 
 func TestServedMarkupRawTextBodiesCarryNoLessThanBytes(t *testing.T) {
 	pages := map[string]string{
-		"listing": liveMarkup(t, "live-listing"),
-		"package": liveMarkup(t, "live-package"),
+		"listing":  liveMarkup(t, "live-listing"),
+		"package":  liveMarkup(t, "live-package"),
+		"versions": liveMarkup(t, "live-versions"),
 	}
 	for page, html := range pages {
 		for _, element := range []string{"script", "style", "textarea", "title"} {

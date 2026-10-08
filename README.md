@@ -11,8 +11,8 @@ registry-stats graphs the pull counts that Docker Hub and GitHub Container Regis
 
 registry-stats helps you follow the pull counts of your published images over time:
 
-- Graphs each image's reported total and its daily change on the bundled dashboard.
-- Tracks Docker Hub and GitHub Container Registry (GHCR) images side by side.
+- Graphs each package's downloads over days, weeks and a year, both registries combined or apart.
+- Lists packages missing from a registry, latest pushes and tag counts.
 - Picks up an owner's public images with `owner/*` on every check, new ones included, up to 198 Docker Hub repositories or 50 GHCR listing pages per owner.
 - Ships alert rules for a stopped collector, a failing registry and a pull count that drops.
 

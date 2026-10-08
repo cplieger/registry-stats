@@ -28,11 +28,16 @@ import (
 // empty, so these tests pass the URL production would build.
 const packagePageURL = "https://github.com/users/owner/packages/container/package/pkg"
 
-// downloadsHTML builds a minimal page containing a "Total downloads"
-// marker plus a title="N" attribute that parseDownloads can extract.
+// downloadsHTML builds a minimal package page: a "Last published" time and a
+// "Total downloads" marker plus a title="N" attribute that parseDownloads can
+// extract.
 func downloadsHTML(count string) string {
-	return `<span>Total downloads</span><h3 title="` + count + `">` + count + `</h3>`
+	return `<span>Last published</span><h3 title="` + fixturePublished + `">3 hours ago</h3>` +
+		`<span>Total downloads</span><h3 title="` + count + `">` + count + `</h3>`
 }
+
+// fixturePublished is the "Last published" time every downloadsHTML page states.
+const fixturePublished = "2026-09-09T07:14:12-07:00"
 
 func TestClient_Source(t *testing.T) {
 	c := NewClient(http.DefaultClient, Options{Logger: slog.New(slog.DiscardHandler)})
@@ -314,7 +319,7 @@ func TestFetchHTML_SendsRequestHeaders(t *testing.T) {
 	}))
 
 	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
-	html, err := c.fetchHTML(t.Context(), &pacer{}, packagePageURL)
+	html, err := c.fetchHTML(t.Context(), packagePageURL)
 	if err != nil {
 		t.Fatalf("fetchHTML: %v", err)
 	}
@@ -328,7 +333,7 @@ func TestFetchHTML_BodyPastCapIsFormatChange(t *testing.T) {
 		_, _ = w.Write(bytes.Repeat([]byte("x"), ghcrBodyCap+1))
 	}), slog.New(slog.DiscardHandler))
 
-	html, err := c.fetchHTML(t.Context(), &pacer{}, packagePageURL)
+	html, err := c.fetchHTML(t.Context(), packagePageURL)
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Errorf("fetchHTML(body past ghcrBodyCap) error = %v, want errHTMLFormatChanged", err)
 	}
@@ -423,7 +428,7 @@ func TestScrapePackage_EscapesNestedName(t *testing.T) {
 	}))
 	c := NewClient(srv.Client(), Options{Logger: slog.New(slog.DiscardHandler)})
 
-	entry, err := c.scrapePackage(t.Context(), &pacer{}, registry.RepoRef{
+	entry, err := c.scrapePackage(t.Context(), registry.RepoRef{
 		Owner: "owner",
 		Repo:  "helm-charts/grafana-operator",
 	})
@@ -528,7 +533,7 @@ func TestClient_ScrapePackageList_PaginatesOwnerListing(t *testing.T) {
 				_, _ = w.Write([]byte(tt.pages[page]))
 			}), capturingLogger(&buf))
 
-			got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+			got, refused, _, err := c.scrapePackageList(t.Context(), "owner")
 			if err != nil {
 				t.Fatalf("scrapePackageList: %v", err)
 			}
@@ -612,7 +617,7 @@ func TestClient_ScrapePackageList_BoundsPageCandidates(t *testing.T) {
 				_, _ = w.Write([]byte(`<span>0 packages</span>`))
 			}), slog.New(slog.DiscardHandler))
 
-			got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+			got, _, _, err := c.scrapePackageList(t.Context(), "owner")
 			if count > maxListingCandidates {
 				if !errors.Is(err, errHTMLFormatChanged) || len(got) != 0 {
 					t.Fatalf("scrapePackageList(%d candidates) = (%d names, %v), want no names and errHTMLFormatChanged", count, len(got), err)
@@ -649,7 +654,7 @@ func testClientScrapePackageListRefusedOnlyPageFailsClosed(t *testing.T) {
 		_, _ = w.Write([]byte(`<a href="/users/owner/packages/container/package/%zz">bad</a>`))
 	}), slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, refused, _, err := c.scrapePackageList(t.Context(), "owner")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged", err)
 	}
@@ -672,7 +677,7 @@ func testClientScrapePackageListRepeatedPageIsPartial(t *testing.T) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a") + packageLink(userOwner, "owner", "b")))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, _, _, err := c.scrapePackageList(t.Context(), "owner")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList error = %v, want errHTMLFormatChanged for a page that re-served collected names", err)
 	}
@@ -703,7 +708,7 @@ func testClientScrapePackageListPageCapWarnsOnTruncation(t *testing.T) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "p"+r.URL.Query().Get("page"))))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, _, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList: %v", err)
 	}
@@ -735,7 +740,7 @@ func testClientScrapePackageListLaterPageFailureIsPartial(t *testing.T) {
 		_, _ = w.Write([]byte(packageLink(userOwner, "owner", "a")))
 	}), capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, _, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err == nil {
 		t.Fatal("scrapePackageList error = nil, want the page-2 failure reported")
 	}
@@ -746,7 +751,7 @@ func testClientScrapePackageListLaterPageFailureIsPartial(t *testing.T) {
 		t.Errorf("a partial listing did not warn with the `listing partially failed` literal; logs:\n%s", logs)
 	}
 
-	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	_, _, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed {
 		t.Error("buildPackageList reported a wholly failed listing, want partial (page 1 yielded a name)")
 	}
@@ -805,7 +810,7 @@ func testClientScrapePackageListReturnsUserFormRefusals(t *testing.T) {
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, refused, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList: %v", err)
 	}
@@ -835,7 +840,7 @@ func testClientScrapePackageListOrganizationLaterPageFailureIsPartial(t *testing
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, refused, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err == nil {
 		t.Fatal("scrapePackageList error = nil, want organization page-2 failure")
 	}
@@ -899,7 +904,7 @@ func testClientScrapePackageListOrganizationFirstPageFailureReturnsError(t *test
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	_, _, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	_, _, _, err := c.scrapePackageList(t.Context(), "owner")
 	statusErr, ok := errors.AsType[*httpx.StatusError](err)
 	if !ok || statusErr.Code != http.StatusInternalServerError {
 		t.Fatalf("scrapePackageList error = %v, want organization page-1 HTTP status 500", err)
@@ -930,7 +935,7 @@ func testClientScrapePackageListUserNamesWinOverOrganizationProbeFailure(t *test
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, refused, err := c.scrapePackageList(t.Context(), &pacer{}, "owner")
+	got, refused, _, err := c.scrapePackageList(t.Context(), "owner")
 	if err != nil {
 		t.Fatalf("scrapePackageList(organization 500, valid user listing) error = %v, want nil", err)
 	}
@@ -957,7 +962,7 @@ func testClientScrapePackageListConfirmedEmptyOrganizationSkipsUserProbe(t *test
 	var buf bytes.Buffer
 	c := listingClient(t, mux, capturingLogger(&buf))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
+	got, _, _, err := c.scrapePackageList(t.Context(), "nobody")
 	if len(got) != 0 || !errors.Is(err, errEmptyListing) || errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList(confirmed-empty organization) = (%v, %v), want ([], errEmptyListing)", got, err)
 	}
@@ -983,7 +988,7 @@ func testClientScrapePackageListConfirmedEmptyNamesOnlyActualCause(t *testing.T)
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
+	got, _, _, err := c.scrapePackageList(t.Context(), "nobody")
 	if !errors.Is(err, errEmptyListing) || errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList = (%v, %v), want only errEmptyListing", got, err)
 	}
@@ -1039,7 +1044,7 @@ func testClientScrapePackageListEmptyFirstPageNamesBothCauses(t *testing.T) {
 	})
 	c := listingClient(t, mux, slog.New(slog.DiscardHandler))
 
-	got, _, err := c.scrapePackageList(t.Context(), &pacer{}, "nobody")
+	got, _, _, err := c.scrapePackageList(t.Context(), "nobody")
 	if !errors.Is(err, errHTMLFormatChanged) {
 		t.Fatalf("scrapePackageList = (%v, %v), want errHTMLFormatChanged", got, err)
 	}
@@ -1066,7 +1071,7 @@ func TestClient_ExpandWildcard_ReportsOnlyParseDrift(t *testing.T) {
 				_, _ = w.Write([]byte(tt.html))
 			}), capturingLogger(&buf))
 
-			_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+			_, _, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 			if !whollyFailed {
 				t.Fatal("buildPackageList listingFailed = false, want true")
 			}
@@ -1088,7 +1093,7 @@ func testClientExpandWildcardTransportFailureWarns(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}), capturingLogger(&buf))
 
-	_, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	_, _, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if !whollyFailed {
 		t.Fatal("buildPackageList listingFailed = false, want true for a transport failure")
 	}
@@ -1123,7 +1128,7 @@ func testClientExpandWildcardBoundsRefusedNameSample(t *testing.T) {
 		_, _ = w.Write([]byte(`<span>0 packages</span>`))
 	}), capturingLogger(&buf))
 
-	packages, whollyFailed := c.buildPackageList(t.Context(), &pacer{}, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
+	packages, _, whollyFailed := c.buildPackageList(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "*"}})
 	if whollyFailed || len(packages) != 1 || packages[0].Repo != "good" {
 		t.Fatalf("buildPackageList = (%+v, whollyFailed=%v), want just owner/good", packages, whollyFailed)
 	}

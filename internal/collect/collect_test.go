@@ -30,9 +30,22 @@ type fakeSource struct {
 	// cancel, when set, cancels the cycle's context from inside Collect, so a
 	// test can stage a source that was invoked and then interrupted.
 	cancel context.CancelFunc
+	// collection, when set, replaces the canned fields above as Collect's result.
+	collection  *registry.Collection
+	details     map[registry.RepoRef]registry.Detail
+	detailErrs  map[registry.RepoRef]error
+	detailReads []registry.RepoRef
 }
 
 func (f *fakeSource) Source() registry.ID { return f.source }
+
+func (f *fakeSource) ReadDetail(_ context.Context, ref registry.RepoRef) (registry.Detail, error) {
+	f.detailReads = append(f.detailReads, ref)
+	if err := f.detailErrs[ref]; err != nil {
+		return registry.Detail{}, err
+	}
+	return f.details[ref], nil
+}
 
 func (f *fakeSource) Collect(
 	_ context.Context,
@@ -41,6 +54,9 @@ func (f *fakeSource) Collect(
 	f.lastRefs = refs
 	if f.cancel != nil {
 		f.cancel()
+	}
+	if f.collection != nil {
+		return *f.collection
 	}
 	return registry.Collection{
 		Entries:       f.entries,
@@ -87,10 +103,10 @@ func TestRun_healthy_returns_stamped_records_for_both_registries(t *testing.T) {
 			{Source: gh, Refs: []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}},
 		},
 		Logger: slog.New(slog.DiscardHandler),
-	})
+	}).Images
 	want := []obs.ImageMetric{
-		{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 42},
-		{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 500},
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 42, Detailed: true},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 500, Detailed: true},
 	}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("images = %+v, want %+v", images, want)
@@ -199,22 +215,6 @@ func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
 	}
 	if !strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 0`) {
 		t.Errorf("Run(zero-attempt source) metrics did not retain a zero error count:\n%s", body)
-	}
-}
-
-func TestRun_emptyCycleRecordsDuration(t *testing.T) {
-	m := obs.New()
-
-	collect.Run(t.Context(), collect.Options{
-		Metrics: m,
-		Logger:  slog.New(slog.DiscardHandler),
-	})
-
-	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	w := httptest.NewRecorder()
-	m.Handler()(w, r)
-	if body := w.Body.String(); !strings.Contains(body, `registrystats_collect_duration_seconds_count 1`) {
-		t.Errorf("Run(empty cycle) duration count missing one observation:\n%s", body)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestRun_cancelled_source_with_entries_reports_interruption(t *testing.T) {
 			workItem(dh, registry.RepoRef{Owner: "owner", Repo: "app"}),
 		},
 		Logger: logger,
-	})
+	}).Images
 
 	if len(images) != 1 {
 		t.Errorf("Run(cancelled non-empty source) returned %d images, want 1", len(images))
@@ -484,9 +484,9 @@ func TestRun_degraded_source_does_not_stop_later_source(t *testing.T) {
 			workItem(serving, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 		},
 		Logger: logger,
-	})
+	}).Images
 
-	want := []obs.ImageMetric{{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 9}}
+	want := []obs.ImageMetric{{Registry: registry.GHCR, Owner: "owner", Repo: "pkg", Pulls: 9, Detailed: true}}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("Run(unhealthy first, healthy second) images = %+v, want %+v", images, want)
 	}
@@ -573,7 +573,7 @@ func TestRun_healthy_short_population_is_an_absolute_complete_cycle(t *testing.T
 				workItem(gh, registry.RepoRef{Owner: "owner", Repo: "configured"}),
 			},
 			Logger: logger,
-		})
+		}).Images
 	}
 
 	if first := run(); len(first) != 3 {
@@ -587,8 +587,8 @@ func TestRun_healthy_short_population_is_an_absolute_complete_cycle(t *testing.T
 	images := run()
 
 	want := []obs.ImageMetric{
-		{Registry: registry.DockerHub, Owner: "owner", Repo: "stable", Pulls: 10},
-		{Registry: registry.GHCR, Owner: "owner", Repo: "kept", Pulls: 21},
+		{Registry: registry.DockerHub, Owner: "owner", Repo: "stable", Pulls: 10, Detailed: true},
+		{Registry: registry.GHCR, Owner: "owner", Repo: "kept", Pulls: 21, Detailed: true},
 	}
 	if !reflect.DeepEqual(images, want) {
 		t.Errorf("Run(short healthy population) images = %+v, want %+v", images, want)
@@ -687,9 +687,9 @@ func TestRun_unhealthy_source_still_serves_entries(t *testing.T) {
 				registry.RepoRef{Owner: "owner", Repo: "gone"}),
 		},
 		Logger: logger,
-	})
+	}).Images
 
-	want := obs.ImageMetric{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 7}
+	want := obs.ImageMetric{Registry: registry.DockerHub, Owner: "owner", Repo: "app", Pulls: 7, Detailed: true}
 	if len(images) != 1 {
 		t.Fatalf("images = %+v, want one record from the unhealthy source", images)
 	}

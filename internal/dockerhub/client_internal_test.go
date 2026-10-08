@@ -44,7 +44,7 @@ func TestClient_ListRepos_ExactPageCount(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c := NewClient(srv.Client(), Options{Logger: logger})
-	repos, advertised, err := c.listRepos(t.Context(), "o")
+	repos, advertised, _, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestClient_ListRepos_SecondPageStaysBelowAnonymousOffsetLimit(t *testing.T)
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
-	repos, advertised, err := c.listRepos(t.Context(), "o")
+	repos, advertised, _, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos(two-page anonymous owner): %v", err)
 	}
@@ -109,7 +109,7 @@ func TestClient_ListRepos_AdvertisedIsFirstPageTotal(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
-	repos, advertised, err := c.listRepos(t.Context(), "o")
+	repos, advertised, _, err := c.listRepos(t.Context(), "o")
 	if err != nil {
 		t.Fatalf("listRepos(later page advertises 3): %v", err)
 	}
@@ -174,7 +174,7 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertisedAtPageCap(t *testing.T) 
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
-	repos, advertised, err := c.listRepos(t.Context(), "o")
+	repos, advertised, _, err := c.listRepos(t.Context(), "o")
 	if !shapeChanged(err) {
 		t.Errorf("listRepos(page-capped count 1 with 2 repos) error = %v, want a shape-change error", err)
 	}
@@ -198,7 +198,7 @@ func TestClient_ListRepos_RejectsMoreReposThanAdvertised(t *testing.T) {
 	srv := httptest.NewTestServer(t, mux)
 	c := NewClient(srv.Client(), Options{Logger: slog.Default()})
 
-	_, _, err := c.listRepos(t.Context(), "o")
+	_, _, _, err := c.listRepos(t.Context(), "o")
 
 	if !shapeChanged(err) {
 		t.Errorf("listRepos(count 1 with 2 repos) error = %v, want a shape-change error", err)
@@ -235,7 +235,7 @@ func TestParseRepoMeta(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseRepoMeta([]byte(tt.data))
+			got, _, err := parseRepoMeta([]byte(tt.data))
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseRepoMeta(%q) error = %v, wantErr %v", tt.data, err, tt.wantErr)
 			}
