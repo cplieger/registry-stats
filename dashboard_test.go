@@ -48,10 +48,27 @@ func unsetsMin(overrides []dashOverride, refID string) bool {
 	return false
 }
 
+type dashTransformation struct {
+	Group string `json:"group"`
+	Spec  struct {
+		Options struct {
+			ExcludeByName map[string]bool   `json:"excludeByName"`
+			RenameByName  map[string]string `json:"renameByName"`
+		} `json:"options"`
+	} `json:"spec"`
+}
+
 type dashPanel struct {
 	Spec struct {
 		VizConfig struct {
-			Spec struct {
+			Group string `json:"group"`
+			Spec  struct {
+				Options struct {
+					Legend struct {
+						Calcs []string `json:"calcs"`
+					} `json:"legend"`
+					EnablePagination bool `json:"enablePagination"`
+				} `json:"options"`
 				FieldConfig struct {
 					Defaults struct {
 						Min *float64 `json:"min"`
@@ -63,7 +80,8 @@ type dashPanel struct {
 		Title string `json:"title"`
 		Data  struct {
 			Spec struct {
-				Queries []dashQuery `json:"queries"`
+				Queries         []dashQuery          `json:"queries"`
+				Transformations []dashTransformation `json:"transformations"`
 			} `json:"spec"`
 		} `json:"data"`
 	} `json:"spec"`
@@ -118,14 +136,53 @@ func topLevelArms(expr string) []string {
 	return append(arms, expr[start:])
 }
 
-// Every arm of Registries out of step names its row through a status label, so a
-// row never reaches the table without the reason it is there.
+// collectorJoin appends the collector to the status of every Registries out of step row.
+const collectorJoin = `, "status", " · ", "status", "instance")`
+
+// statusChain returns the or-chain the collector join wraps, or "" when no
+// label_join wraps a parenthesized chain with collectorJoin.
+func statusChain(expr string) string {
+	const join = "label_join(("
+	at := strings.Index(expr, join)
+	if at < 0 {
+		return ""
+	}
+	rest := expr[at+len(join)-1:]
+	depth, quoted := 0, false
+	for i := range len(rest) {
+		switch c := rest[i]; {
+		case c == '"' && (i == 0 || rest[i-1] != '\\'):
+			quoted = !quoted
+		case quoted:
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				if !strings.HasPrefix(rest[i+1:], collectorJoin) {
+					return ""
+				}
+				return rest[1:i]
+			}
+		}
+	}
+	return ""
+}
+
+// Every arm of Registries out of step names its row through a status label, and
+// the status names the collector after it, so a row never reaches the table
+// without the reason it is there or the collector that read it.
 func TestDashboard_OutOfStepArmsEachCarryAStatus(t *testing.T) {
 	p := panelByTitle(t, loadPanels(t), "Registries out of step")
 	if len(p.Spec.Data.Spec.Queries) != 1 {
 		t.Fatalf("Registries out of step has %d queries, want 1", len(p.Spec.Data.Spec.Queries))
 	}
-	arms := topLevelArms(p.Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr)
+	expr := p.Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr
+	chain := statusChain(expr)
+	if chain == "" {
+		t.Fatalf("Registries out of step does not append the collector to the status through label_join(..%s: %.160s", collectorJoin, expr)
+	}
+	arms := topLevelArms(chain)
 	if len(arms) != 5 {
 		t.Errorf("Registries out of step has %d arms, want 5 (two missing-package arms and three Unknown arms)", len(arms))
 	}
@@ -142,8 +199,7 @@ var byClause = regexp.MustCompile(`\b(\w+) by \(([^)]*)\)`)
 // perRegistryByDesign are panels whose subject is a registry's own number, so
 // they keep the registry whatever Split by registry says.
 var perRegistryByDesign = map[string]string{
-	"Counts that went down":             "a drop is one registry restating its total",
-	"GHCR against Docker Hub per image": "compares the two registries by construction",
+	"Counts that went down in this range": "a drop is one registry restating its total",
 }
 
 // Every downloads query groups an image by owner and repo, and adds the registry
@@ -300,5 +356,263 @@ func TestDashboard_SignedChangesAreNotClippedAtAMinimum(t *testing.T) {
 					id, p.Spec.Title, *fc.Defaults.Min, q.Spec.RefID, expr)
 			}
 		}
+	}
+}
+
+var (
+	changeWindow = regexp.MustCompile(`\b(?:delta|changes)\(\(max by \(owner, repo, registry\) \(registrystats_image_pulls_total\{[^}]*\}\)\)\[([^:\]]+):([^\]]+)\]`)
+	changeOffset = regexp.MustCompile(`\b(?:delta|changes)\(\(max by \(owner, repo, registry\) \(registrystats_image_pulls_total\{[^}]*\}\)\)\[[^\]]+\] offset ([^)\s]+)\)`)
+	rangeBefore  = regexp.MustCompile(`\[\$__range:[^\]]+\] offset \$__range\)`)
+	earlierGuard = regexp.MustCompile(`registrystats_image_pulls_total\{[^}]*\} offset \$__range\)\)\[1d:1h\] offset \$__range\)`)
+)
+
+// A tile or table states the downloads of the range the reader picked, and a
+// comparison is against the range of the same length just before it, so no
+// download figure outside a chart's own bars carries a fixed window.
+func TestDashboard_DownloadFiguresFollowTheTimeRange(t *testing.T) {
+	windows := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group == "timeseries" {
+			continue // a bar's window is its own bucket, matched to the query interval
+		}
+		for _, q := range p.Spec.Data.Spec.Queries {
+			e := q.Spec.Query.Spec.Expr
+			for _, m := range changeWindow.FindAllStringSubmatch(e, -1) {
+				windows++
+				if m[1] != "$__range" {
+					t.Errorf("%s %q query %s takes a change over [%s], want [$__range]", name, p.Spec.Title, q.Spec.RefID, m[1])
+				}
+			}
+			for _, m := range changeOffset.FindAllStringSubmatch(e, -1) {
+				if m[1] != "$__range" {
+					t.Errorf("%s %q query %s compares against offset %s, want offset $__range", name, p.Spec.Title, q.Spec.RefID, m[1])
+				}
+			}
+		}
+	}
+	if windows == 0 {
+		t.Error("no download change found outside the charts; the pattern no longer reads the dashboard")
+	}
+}
+
+// Data that starts inside the range before would make that range look small and
+// the change look huge, so every comparison is held back until a package was
+// reported in the day before the range before began.
+func TestDashboard_RangeComparisonsWaitForAWholeEarlierRange(t *testing.T) {
+	comparisons := 0
+	for name, p := range loadPanels(t) {
+		for _, q := range p.Spec.Data.Spec.Queries {
+			e := q.Spec.Query.Spec.Expr
+			if !rangeBefore.MatchString(e) {
+				continue
+			}
+			comparisons++
+			if !earlierGuard.MatchString(e) {
+				t.Errorf("%s %q query %s compares with the range before without checking that the data reaches back to its start: %.160s",
+					name, p.Spec.Title, q.Spec.RefID, e)
+			}
+		}
+	}
+	if comparisons == 0 {
+		t.Error("no comparison with the range before found; the pattern no longer reads the dashboard")
+	}
+}
+
+var fixedWindow = regexp.MustCompile(`\[\d+[smhdwy][\]:]|offset \d+[smhdwy]\b`)
+
+// A bar holds the downloads of its own span, which Grafana sizes from the range,
+// so a fixed window would put a short range's only bar before the range began.
+func TestDashboard_DownloadBarsSpanTheQueryInterval(t *testing.T) {
+	charts := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "timeseries" {
+			continue
+		}
+		for _, q := range p.Spec.Data.Spec.Queries {
+			e := q.Spec.Query.Spec.Expr
+			if !strings.Contains(e, "registrystats_image_pulls_total") {
+				continue
+			}
+			charts++
+			if w := fixedWindow.FindString(e); w != "" || !strings.Contains(e, "[$__interval:") {
+				t.Errorf("%s %q query %s spans %q, want a change over [$__interval:...]: %.160s",
+					name, p.Spec.Title, q.Spec.RefID, cmp.Or(w, "no $__interval"), e)
+			}
+		}
+	}
+	if charts == 0 {
+		t.Error("no download chart found; the pattern no longer reads the dashboard")
+	}
+}
+
+// A subquery's change extrapolates from its first sample to the window start, so its
+// step biases a figure by step / range: a range figure samples every minute, the
+// scrape cadence, which keeps a 6 h figure within a few tenths of a percent.
+func TestDashboard_RangeFiguresSampleEveryMinute(t *testing.T) {
+	figures := 0
+	for name, p := range loadPanels(t) {
+		for _, q := range p.Spec.Data.Spec.Queries {
+			for _, m := range changeWindow.FindAllStringSubmatch(q.Spec.Query.Spec.Expr, -1) {
+				if m[1] != "$__range" {
+					continue
+				}
+				figures++
+				if m[2] != "1m" {
+					t.Errorf("%s %q query %s samples [$__range:%s], want [$__range:1m]", name, p.Spec.Title, q.Spec.RefID, m[2])
+				}
+			}
+		}
+	}
+	if figures == 0 {
+		t.Error("no range figure found; the pattern no longer reads the dashboard")
+	}
+}
+
+// inRange drops a sample at or before the range start. Grafana aligns a range query's
+// start down to its step, so the first sample closes the bucket before the range: off
+// the axis, yet counted by a tooltip or a legend calculation.
+const inRange = " and on () (vector(time()) > $__from / 1000)"
+
+// Every bar's bucket ends inside the range, so a bar chart query ends with inRange.
+func TestDashboard_BarsCountOnlyBucketsInsideTheRange(t *testing.T) {
+	bars := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "timeseries" {
+			continue
+		}
+		for _, q := range p.Spec.Data.Spec.Queries {
+			e := q.Spec.Query.Spec.Expr
+			if !strings.Contains(e, "[$__interval") {
+				continue
+			}
+			bars++
+			if !strings.HasSuffix(e, inRange) {
+				t.Errorf("%s %q query %s keeps the bucket before the range, want it to end with %q: %.160s",
+					name, p.Spec.Title, q.Spec.RefID, inRange, e)
+			}
+		}
+	}
+	if bars == 0 {
+		t.Error("no bar chart query found; the pattern no longer reads the dashboard")
+	}
+}
+
+// Bars cover whole aligned buckets, which start before the range and stop short of its
+// end, so a legend total over them disagrees with Downloads in this range.
+func TestDashboard_DownloadBarLegendsCarryNoTotal(t *testing.T) {
+	charts := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "timeseries" || len(p.Spec.Data.Spec.Queries) == 0 ||
+			!strings.Contains(p.Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr, "registrystats_image_pulls_total") {
+			continue
+		}
+		charts++
+		if calcs := p.Spec.VizConfig.Spec.Options.Legend.Calcs; len(calcs) > 0 {
+			t.Errorf("%s %q legend calculates %v, want no calculation", name, p.Spec.Title, calcs)
+		}
+	}
+	if charts == 0 {
+		t.Error("no download chart found; the pattern no longer reads the dashboard")
+	}
+}
+
+const (
+	// phoneTableWidth is the table width a full-width panel keeps on a 412 px
+	// phone viewport, measured in Grafana 13.2.
+	phoneTableWidth = 338
+	// unsizedColumnWidth is the width Grafana gives a column that states none.
+	unsizedColumnWidth = 150
+)
+
+// columnFloor is the width a table column takes at least: its custom.width or
+// custom.minWidth override, else unsizedColumnWidth.
+func columnFloor(overrides []dashOverride, column string) int {
+	for _, o := range overrides {
+		if o.Matcher.ID != "byName" || o.Matcher.Options != column {
+			continue
+		}
+		for _, p := range o.Properties {
+			if p.ID != "custom.width" && p.ID != "custom.minWidth" {
+				continue
+			}
+			var w int
+			if err := json.Unmarshal(p.Value, &w); err == nil {
+				return w
+			}
+		}
+	}
+	return unsizedColumnWidth
+}
+
+func hiddenColumn(overrides []dashOverride, column string) bool {
+	for _, o := range overrides {
+		if o.Matcher.ID != "byName" || o.Matcher.Options != column {
+			continue
+		}
+		for _, p := range o.Properties {
+			if p.ID == "custom.hidden" && string(p.Value) == "true" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A table wider than a phone scrolls sideways and cuts the column at its edge, so
+// the floors of every shown column fit phoneTableWidth. The shown columns are the
+// ones the organize transformation names and neither excludes nor hides.
+func TestDashboard_TablesFitAPhone(t *testing.T) {
+	tables := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "table" {
+			continue
+		}
+		tables++
+		overrides := p.Spec.VizConfig.Spec.FieldConfig.Overrides
+		width, shown := 0, []string{}
+		for _, tr := range p.Spec.Data.Spec.Transformations {
+			if tr.Group != "organize" {
+				continue
+			}
+			for field, column := range tr.Spec.Options.RenameByName {
+				if tr.Spec.Options.ExcludeByName[field] || hiddenColumn(overrides, column) {
+					continue
+				}
+				width += columnFloor(overrides, column)
+				shown = append(shown, column)
+			}
+		}
+		if width > phoneTableWidth {
+			slices.Sort(shown)
+			t.Errorf("%s %q shows %v at %d px of column floors, want at most %d", name, p.Spec.Title, shown, width, phoneTableWidth)
+		}
+	}
+	if tables == 0 {
+		t.Error("no table found; the pattern no longer reads the dashboard")
+	}
+}
+
+var rowCap = regexp.MustCompile(`\b(?:topk|bottomk)\(\d+,`)
+
+// A panel's height is fixed, so a table whose row count follows the range or Split
+// by registry hides rows behind a scroll and cuts the one at its edge. Grafana sizes
+// a page to whole rows, so every table whose query does not cap its rows pages.
+func TestDashboard_UncappedTablesPageWholeRows(t *testing.T) {
+	uncapped := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "table" || len(p.Spec.Data.Spec.Queries) == 0 {
+			continue
+		}
+		expr := p.Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr
+		if rowCap.MatchString(expr) {
+			continue
+		}
+		uncapped++
+		if !p.Spec.VizConfig.Spec.Options.EnablePagination {
+			t.Errorf("%s %q has no row cap in its query and does not enable pagination: %.120s", name, p.Spec.Title, expr)
+		}
+	}
+	if uncapped == 0 {
+		t.Error("no uncapped table found; the pattern no longer reads the dashboard")
 	}
 }

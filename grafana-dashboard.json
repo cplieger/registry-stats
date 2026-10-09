@@ -56,15 +56,15 @@
       }
     ],
     "cursorSync": "Crosshair",
-    "description": "Download counts for your Docker Hub and GHCR images, grouped per package, with release, registry and tag views and the collector's own health. The counts are requests, not people or finished downloads, and on GHCR an automated manifest read counts too.",
+    "description": "Download counts for your Docker Hub and GHCR images over the dashboard time range, grouped per package, with package and collector views. The counts are requests, not people or finished downloads, and on GHCR an automated manifest read counts too.",
     "editable": true,
     "elements": {
       "panel-1": {
         "kind": "Panel",
         "spec": {
           "id": 1,
-          "title": "Package overview",
-          "description": "Downloads per package over all time, the last 24 hours, 7 and 30 days, and per day over 30 days, where a registry that restates its total lower shows a drop. Docker Hub and GHCR are added together, or get a row each with Split by registry on. GHCR pushed counts every push, Hub updated is Docker Hub's update time, which a description edit also moves, and Hub tags and Untagged are Docker Hub's tag count and GHCR's untagged versions. Those counts can be up to 24 hours old at the default hourly check and fill in over the first day after a restart, see Collector health.",
+          "title": "Package downloads",
+          "description": "Downloads per package over the dashboard time range, with a bar that compares the packages. Docker Hub and GHCR are added together unless Split by registry is on, which gives each registry its own row, named after the package and the registry. A package tracked for only part of the range counts from its first read, so a range that covers the whole history gives each package's total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -81,29 +81,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum by (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[1d:15m]))",
+                        "expr": "label_replace(label_join(label_replace(label_replace(round(sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m]))), \"registry_name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"registry_name\", \"GHCR\", \"registry\", \"ghcr\"), \"package\", \" · \", \"repo\", \"registry_name\"), \"package\", \"$1\", \"package\", \"(.*) · \")",
                         "legendFormat": "",
                         "instant": true,
                         "range": false,
@@ -113,170 +91,9 @@
                     "refId": "B",
                     "hidden": false
                   }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h]))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h]))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "D",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h])) / 30",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "E",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo${split}) (registrystats_image_last_pushed_timestamp_seconds{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}) * 1000",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "F",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo${split}) ((label_replace(registrystats_dockerhub_repository_updated_timestamp_seconds{repo=~\"$repo\",owner=~\"$owner\"}, \"registry\", \"dockerhub\", \"\", \"\") and on (registry) group by (registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))) * 1000",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "G",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo${split}) ((label_replace(registrystats_dockerhub_tags{repo=~\"$repo\",owner=~\"$owner\"}, \"registry\", \"dockerhub\", \"\", \"\") and on (registry) group by (registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "H",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo${split}) ((label_replace(registrystats_ghcr_versions{state=\"untagged\",repo=~\"$repo\",owner=~\"$owner\"}, \"registry\", \"ghcr\", \"\", \"\") and on (registry) group by (registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "I",
-                    "hidden": false
-                  }
                 }
               ],
               "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
                 {
                   "kind": "Transformation",
                   "group": "organize",
@@ -288,35 +105,21 @@
                         "__tenant_id__": true,
                         "hostname": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "registry": true,
+                        "registry_name": true
                       },
                       "renameByName": {
+                        "package": "Package",
+                        "repo": "Repo",
                         "owner": "Owner",
-                        "repo": "Package",
-                        "registry": "Registry",
-                        "Value #A": "Total",
-                        "Value #B": "24 h",
-                        "Value #C": "7 days",
-                        "Value #D": "30 days",
-                        "Value #E": "Per day",
-                        "Value #F": "GHCR pushed",
-                        "Value #G": "Hub updated",
-                        "Value #H": "Hub tags",
-                        "Value #I": "Untagged"
+                        "Value": "In range"
                       },
                       "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "registry": 2,
-                        "Value #A": 3,
-                        "Value #B": 4,
-                        "Value #C": 5,
-                        "Value #D": 6,
-                        "Value #E": 7,
-                        "Value #F": 8,
-                        "Value #G": 9,
-                        "Value #H": 10,
-                        "Value #I": 11
+                        "package": 0,
+                        "Value": 1,
+                        "repo": 2,
+                        "owner": 3
                       }
                     }
                   }
@@ -335,10 +138,11 @@
                 "showHeader": true,
                 "sortBy": [
                   {
-                    "desc": true,
-                    "displayName": "Total"
+                    "displayName": "In range",
+                    "desc": true
                   }
-                ]
+                ],
+                "enablePagination": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -352,36 +156,6 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Registry"
-                    },
-                    "properties": [
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "type": "value",
-                            "options": {
-                              "dockerhub": {
-                                "index": 0,
-                                "text": "Docker Hub"
-                              },
-                              "ghcr": {
-                                "index": 1,
-                                "text": "GHCR"
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 120
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
                       "options": "Package"
                     },
                     "properties": [
@@ -390,26 +164,30 @@
                         "value": [
                           {
                             "title": "Open on Docker Hub",
-                            "url": "https://hub.docker.com/r/${__data.fields.Owner}/${__data.fields.Package}",
+                            "url": "https://hub.docker.com/r/${__data.fields.Owner}/${__data.fields.Repo}",
                             "targetBlank": true
                           },
                           {
                             "title": "Open on GitHub",
-                            "url": "https://github.com/users/${__data.fields.Owner}/packages/container/package/${__data.fields.Package}",
+                            "url": "https://github.com/users/${__data.fields.Owner}/packages/container/package/${__data.fields.Repo}",
                             "targetBlank": true
                           }
                         ]
                       },
                       {
                         "id": "custom.minWidth",
-                        "value": 150
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Total"
+                      "options": "In range"
                     },
                     "properties": [
                       {
@@ -417,84 +195,27 @@
                         "value": "short"
                       },
                       {
-                        "id": "custom.width",
-                        "value": 96
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "24 h"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
+                        "id": "min",
+                        "value": 0
                       },
                       {
-                        "id": "custom.width",
-                        "value": 88
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "7 days"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "gauge",
+                          "mode": "basic",
+                          "valueDisplayMode": "text"
+                        }
                       },
                       {
-                        "id": "custom.width",
-                        "value": 104
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "30 days"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
+                        "id": "fieldMinMax",
+                        "value": true
                       },
                       {
-                        "id": "custom.width",
-                        "value": 112
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Per day"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 112
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Hub tags"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "blue"
+                        }
                       },
                       {
                         "id": "custom.width",
@@ -505,48 +226,24 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Untagged"
+                      "options": "Repo"
                     },
                     "properties": [
                       {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 120
+                        "id": "custom.hidden",
+                        "value": true
                       }
                     ]
                   },
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "GHCR pushed"
+                      "options": "Owner"
                     },
                     "properties": [
                       {
-                        "id": "unit",
-                        "value": "dateTimeFromNow"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 144
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Hub updated"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "dateTimeFromNow"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 144
+                        "id": "custom.hidden",
+                        "value": true
                       }
                     ]
                   },
@@ -568,80 +265,12 @@
           }
         }
       },
-      "panel-2": {
-        "kind": "Panel",
-        "spec": {
-          "id": 2,
-          "title": "Cumulative downloads",
-          "description": "Each package's reported total over time, one line per package, or one per package and registry with Split by registry on. A steeper line means faster growth. A step down means a registry restated its count lower, which the shipped alert rules also flag.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))",
-                        "legendFormat": "{{owner}}/{{repo}} {{registry}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "showLegend": false
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "min": 0,
-                  "custom": {
-                    "drawStyle": "line",
-                    "fillOpacity": 10,
-                    "lineWidth": 2,
-                    "pointSize": 5,
-                    "showPoints": "auto",
-                    "spanNulls": true
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-3": {
         "kind": "Panel",
         "spec": {
           "id": 3,
-          "title": "Downloads per day",
-          "description": "New downloads per day for each package, stacked, split per registry when Split by registry is on. Tall bars after a release are normal, and automated reads move these counts too, because a GHCR manifest read counts as a download. A bar below zero means a registry restated its total lower.",
+          "title": "Downloads per package",
+          "description": "New downloads for each package, stacked, split per registry when Split by registry is on, and the tooltip names the packages of a bar. A bar spans an hour on a range of a day or less, 6 hours on a week and a day from 30 days. Tall bars after a release are normal, and automated reads move these counts too, because a GHCR manifest read counts as a download. A bar below zero means a registry restated its total lower.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -658,8 +287,8 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[1d:15m]))",
-                        "interval": "1d",
+                        "expr": "(sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__interval:1m]))) and on () (vector(time()) > $__from / 1000)",
+                        "interval": "1h",
                         "legendFormat": "{{owner}}/{{repo}} {{registry}}"
                       }
                     },
@@ -669,7 +298,9 @@
                 }
               ],
               "transformations": [],
-              "queryOptions": {}
+              "queryOptions": {
+                "maxDataPoints": 25
+              }
             }
           },
           "vizConfig": {
@@ -693,162 +324,14 @@
                     "drawStyle": "bars",
                     "fillOpacity": 80,
                     "gradientMode": "none",
-                    "lineWidth": 0,
+                    "lineWidth": 1,
                     "stacking": {
                       "group": "A",
                       "mode": "normal"
                     },
-                    "axisSoftMin": 0
+                    "axisSoftMin": 0,
+                    "barAlignment": -1
                   }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-10": {
-        "kind": "Panel",
-        "spec": {
-          "id": 10,
-          "title": "Total downloads",
-          "description": "Downloads added up across the selected packages and registries, as each registry reports them. These are request counts, not people or finished downloads. No packages tracked means no data has arrived for this selection.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum(max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))",
-                        "instant": true,
-                        "legendFormat": "Total"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "color": {
-                    "mode": "fixed",
-                    "fixedColor": "blue"
-                  },
-                  "noValue": "No packages tracked"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-11": {
-        "kind": "Panel",
-        "spec": {
-          "id": 11,
-          "title": "Tracked packages",
-          "description": "How many packages registry-stats tracks for this selection. A package on both Docker Hub and GHCR counts once, or twice with Split by registry on, so the number matches the rows in Package overview. A drop means a package left your list or a registry stopped listing it.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "count(sum by (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})))",
-                        "instant": true,
-                        "legendFormat": "Packages"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "value",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "purple"
-                      }
-                    ]
-                  },
-                  "noValue": "No packages tracked"
                 },
                 "overrides": []
               }
@@ -860,8 +343,8 @@
         "kind": "Panel",
         "spec": {
           "id": 20,
-          "title": "Downloads last 24 h",
-          "description": "Downloads across the selected packages and registries in the last 24 hours, with the trend over the dashboard range. These are request counts as each registry reports them, so automated reads count too. A value below zero means a registry restated its total lower. No downloads yet means no two counts a day apart exist for this selection.",
+          "title": "Downloads in this range",
+          "description": "Downloads across the selected packages and registries over the dashboard time range. These are request counts as each registry reports them, so automated reads count too, and a registry that restates its total lower reduces the number. A package tracked for only part of the range counts from its first read, and No downloads yet means no two reads of it fall in the range.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -878,8 +361,10 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[1d:15m]))",
-                        "legendFormat": "Last 24 h"
+                        "expr": "round(sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])))",
+                        "legendFormat": "In this range",
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -898,7 +383,7 @@
             "spec": {
               "options": {
                 "colorMode": "value",
-                "graphMode": "area",
+                "graphMode": "none",
                 "justifyMode": "center",
                 "reduceOptions": {
                   "calcs": [
@@ -940,8 +425,8 @@
         "kind": "Panel",
         "spec": {
           "id": 21,
-          "title": "Against the 7-day average",
-          "description": "The last 24 hours' downloads against the daily average of the last 7 days, in percent. A large rise with no release behind it usually means an automated reader started polling. No average yet means the last 7 days hold no downloads to compare with.",
+          "title": "Change from the range before",
+          "description": "Downloads in this range against the range of the same length just before it, in percent and as the difference in downloads. The percent is green from 0 up, yellow from -20 to 0 and red below -20, and the difference beside it keeps the text colour. A rise with no release behind it usually means an automated reader started polling. No earlier range yet means the counts do not reach back to the start of the range before.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -958,91 +443,8 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[1d:15m])) / (sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h])) / 7 > 0) - 1) * 100",
-                        "legendFormat": "Change",
-                        "instant": true,
-                        "range": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percent",
-                  "noValue": "No average yet",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "decimals": 0
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-22": {
-        "kind": "Panel",
-        "spec": {
-          "id": 22,
-          "title": "Last 7 days",
-          "description": "Downloads in the last 7 days beside the 7 days before them, as each registry reports them. Compare the two to see whether demand rose or fell. A registry that restates its total lower reduces them. No downloads yet means the counts do not reach back that far.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h]))",
-                        "legendFormat": "Last 7 days",
+                        "expr": "((sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])) / (sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m] offset $__range)) > 0) - 1) * 100) and (count(max_over_time((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"} offset $__range))[1d:1h] offset $__range)) > 0)",
+                        "legendFormat": "Percent",
                         "instant": true,
                         "range": false
                       }
@@ -1062,8 +464,8 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h] offset 7d))",
-                        "legendFormat": "Week before",
+                        "expr": "round(sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])) - sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m] offset $__range))) and (count(max_over_time((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"} offset $__range))[1d:1h] offset $__range)) > 0)",
+                        "legendFormat": "Difference",
                         "instant": true,
                         "range": false
                       }
@@ -1101,104 +503,62 @@
               },
               "fieldConfig": {
                 "defaults": {
-                  "unit": "short",
-                  "noValue": "No downloads yet",
+                  "unit": "percent",
+                  "noValue": "No earlier range yet",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-23": {
-        "kind": "Panel",
-        "spec": {
-          "id": 23,
-          "title": "Last 30 days",
-          "description": "Downloads in the last 30 days across the selected packages and registries, as each registry reports them. A registry that restates its total lower reduces this number, while Share and Downloads by registry count only growth. No downloads yet means the counts do not reach back 30 days.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
+                        "color": "red"
                       },
-                      "spec": {
-                        "expr": "sum(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h]))",
-                        "legendFormat": "Last 30 days",
-                        "instant": true,
-                        "range": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "noValue": "No downloads yet",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
                       {
-                        "value": null,
-                        "color": "blue"
+                        "value": -20,
+                        "color": "yellow"
+                      },
+                      {
+                        "value": 0,
+                        "color": "green"
                       }
                     ]
                   },
                   "color": {
                     "mode": "thresholds"
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
+                    }
+                  ]
                 },
-                "overrides": []
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byFrameRefID",
+                      "options": "B"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "short"
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "text"
+                        }
+                      }
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -1287,7 +647,19 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "decimals": 0
+                  "decimals": 0,
+                  "mappings": [
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -1387,6 +759,18 @@
                   {
                     "matcher": {
                       "id": "byName",
+                      "options": "Owner"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
                       "options": "Pushed"
                     },
                     "properties": [
@@ -1396,7 +780,7 @@
                       },
                       {
                         "id": "custom.width",
-                        "value": 140
+                        "value": 104
                       }
                     ]
                   },
@@ -1415,6 +799,14 @@
                             "targetBlank": true
                           }
                         ]
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
                       }
                     ]
                   },
@@ -1441,7 +833,7 @@
         "spec": {
           "id": 26,
           "title": "Registries out of step",
-          "description": "Packages that one registry has and the other definitively does not at the last complete read, plus an Unknown row when a read was stale or incomplete, a collector stopped reporting, or none reports. Packages pair by owner and name, and a GHCR name with a slash in it is never compared, because Docker Hub cannot hold one. With owner/* on both registries, a package you publish to one on purpose stays listed while your configuration covers it. A read counts as stale after 2 hours, which assumes the default hourly check, and No package missing means every read was fresh and complete, which a collector that reads one registry also shows.",
+          "description": "Packages one registry has and the other definitively lacks at the last complete read, each status naming its collector, plus an Unknown row when a read was stale or incomplete or a collector stopped reporting. Packages pair by owner and name, and a GHCR name with a slash in it is never compared, because Docker Hub cannot hold one. With owner/* on both registries, a package you publish to one on purpose stays listed while your configuration covers it. A read counts as stale after 2 hours, which assumes the default hourly check, and No package missing means every read was fresh and complete, which a collector that reads one registry also shows.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1458,7 +850,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(label_replace((max by (job, instance, owner, repo) (registrystats_image_present{source=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}) == 1) and on (job, instance, owner, repo) (max by (job, instance, owner, repo) (registrystats_image_present{source=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}) == 0) and on (job, instance) (max by (job, instance) (registrystats_collect_complete{source=\"dockerhub\"}) == 1) and on (job, instance) (count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))), \"status\", \"Not on Docker Hub now\", \"\", \"\")) or (label_replace((max by (job, instance, owner, repo) (registrystats_image_present{source=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}) == 1) and on (job, instance, owner, repo) (max by (job, instance, owner, repo) (registrystats_image_present{source=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}) == 0) and on (job, instance) (max by (job, instance) (registrystats_collect_complete{source=\"ghcr\"}) == 1) and on (job, instance) (count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))), \"status\", \"Not on GHCR now\", \"\", \"\")) or (label_replace(group by (job, instance) (registrystats_collect_complete), \"status\", \"Unknown: a registry read was stale or incomplete, see Collector health\", \"\", \"\") unless on (job, instance) ((count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))) and on (job, instance) (min by (job, instance) (registrystats_collect_complete) == 1))) or (label_replace(group by (job, instance) (present_over_time(registrystats_collect_complete[7d])) unless on (job, instance) group by (job, instance) (registrystats_collect_complete), \"status\", \"Unknown: this collector stopped reporting, see Collector health\", \"\", \"\")) or (label_replace(vector(1), \"status\", \"Unknown: registry-stats is not reporting, see Collector health\", \"\", \"\") unless on () count(group by (job, instance) (present_over_time(registrystats_collect_complete[7d]))))",
+                        "expr": "label_replace(label_join(((label_replace((max by (job, instance, owner, repo) (registrystats_image_present{source=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}) == 1) and on (job, instance, owner, repo) (max by (job, instance, owner, repo) (registrystats_image_present{source=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}) == 0) and on (job, instance) (max by (job, instance) (registrystats_collect_complete{source=\"dockerhub\"}) == 1) and on (job, instance) (count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))), \"status\", \"Not on Docker Hub now\", \"\", \"\")) or (label_replace((max by (job, instance, owner, repo) (registrystats_image_present{source=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}) == 1) and on (job, instance, owner, repo) (max by (job, instance, owner, repo) (registrystats_image_present{source=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}) == 0) and on (job, instance) (max by (job, instance) (registrystats_collect_complete{source=\"ghcr\"}) == 1) and on (job, instance) (count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))), \"status\", \"Not on GHCR now\", \"\", \"\")) or (label_replace(group by (job, instance) (registrystats_collect_complete), \"status\", \"Unknown: a registry read was stale or incomplete, see Collector health\", \"\", \"\") unless on (job, instance) ((count by (job, instance) (max by (job, instance, source) (time() - registrystats_collect_last_success_timestamp_seconds < 7200)) == count by (job, instance) (max by (job, instance, source) (registrystats_collect_complete))) and on (job, instance) (min by (job, instance) (registrystats_collect_complete) == 1))) or (label_replace(group by (job, instance) (present_over_time(registrystats_collect_complete[7d])) unless on (job, instance) group by (job, instance) (registrystats_collect_complete), \"status\", \"Unknown: this collector stopped reporting, see Collector health\", \"\", \"\")) or (label_replace(vector(1), \"status\", \"Unknown: registry-stats is not reporting, see Collector health\", \"\", \"\") unless on () count(group by (job, instance) (present_over_time(registrystats_collect_complete[7d]))))), \"status\", \" · \", \"status\", \"instance\"), \"status\", \"$1\", \"status\", \"(.*) · \")",
                         "legendFormat": "",
                         "instant": true,
                         "range": false,
@@ -1482,19 +874,18 @@
                         "__tenant_id__": true,
                         "hostname": true,
                         "job": true,
-                        "Value": true
+                        "Value": true,
+                        "instance": true
                       },
                       "renameByName": {
                         "owner": "Owner",
                         "repo": "Package",
-                        "status": "Status",
-                        "instance": "Collector"
+                        "status": "Status"
                       },
                       "indexByName": {
                         "status": 0,
-                        "owner": 1,
-                        "repo": 2,
-                        "instance": 3
+                        "repo": 1,
+                        "owner": 2
                       }
                     }
                   }
@@ -1510,7 +901,8 @@
             "spec": {
               "options": {
                 "cellHeight": "sm",
-                "showHeader": true
+                "showHeader": true,
+                "enablePagination": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -1521,6 +913,50 @@
                   }
                 },
                 "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Status"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
+                      },
+                      {
+                        "id": "custom.minWidth",
+                        "value": 104
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Package"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.minWidth",
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Owner"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
                   {
                     "matcher": {
                       "id": "byRegexp",
@@ -1543,8 +979,8 @@
         "kind": "Panel",
         "spec": {
           "id": 27,
-          "title": "Images nobody pulled in 30 days",
-          "description": "Packages whose count did not change at all over the last 30 days, with their total, one row per package or per package and registry with Split by registry on. A package here has no readers, not even automated ones, so it may be one to retire, while a count a registry restated lower is a change and keeps its package off the list. A package appears only after every registry it is on has reported it for the full 30 days.",
+          "title": "Images nobody pulled in this range",
+          "description": "Packages whose count did not change at all over the dashboard time range, with their total, one row per package, or per package and registry with Split by registry on. A package here has no readers, not even automated ones, so pick a long range such as 30 days before you retire one. A count a registry restated lower is a change and keeps its package off the list, and a package appears only once every registry it is on reported it before the range began.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1561,7 +997,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "sum by (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})) and on (owner, repo${split}) (sum by (owner, repo${split}) (changes((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h])) == 0) unless on (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}) unless on (owner, repo, registry) max by (owner, repo, registry) (max_over_time(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[1d] offset 30d)))",
+                        "expr": "label_replace(label_join(label_replace(label_replace(sum by (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"})) and on (owner, repo${split}) (sum by (owner, repo${split}) (changes((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])) == 0) unless on (owner, repo${split}) (max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}) unless on (owner, repo, registry) max by (owner, repo, registry) (max_over_time(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[1d] offset $__range))), \"registry_name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"registry_name\", \"GHCR\", \"registry\", \"ghcr\"), \"package\", \" · \", \"repo\", \"registry_name\"), \"package\", \"$1\", \"package\", \"(.*) · \")",
                         "legendFormat": "",
                         "instant": true,
                         "range": false,
@@ -1585,19 +1021,21 @@
                         "__tenant_id__": true,
                         "hostname": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "registry": true,
+                        "registry_name": true
                       },
                       "renameByName": {
+                        "package": "Package",
+                        "repo": "Repo",
                         "owner": "Owner",
-                        "repo": "Package",
-                        "registry": "Registry",
                         "Value": "Total"
                       },
                       "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "registry": 2,
-                        "Value": 3
+                        "package": 0,
+                        "Value": 1,
+                        "repo": 2,
+                        "owner": 3
                       }
                     }
                   }
@@ -1619,11 +1057,12 @@
                     "displayName": "Total",
                     "desc": true
                   }
-                ]
+                ],
+                "enablePagination": true
               },
               "fieldConfig": {
                 "defaults": {
-                  "noValue": "Every package was downloaded in the last 30 days",
+                  "noValue": "Every package was downloaded in this range",
                   "custom": {
                     "align": "auto",
                     "filterable": false
@@ -1633,26 +1072,40 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Registry"
+                      "options": "Package"
                     },
                     "properties": [
                       {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "type": "value",
-                            "options": {
-                              "dockerhub": {
-                                "index": 0,
-                                "text": "Docker Hub"
-                              },
-                              "ghcr": {
-                                "index": 1,
-                                "text": "GHCR"
-                              }
-                            }
-                          }
-                        ]
+                        "id": "custom.minWidth",
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Repo"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Owner"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
                       }
                     ]
                   },
@@ -1665,6 +1118,10 @@
                       {
                         "id": "unit",
                         "value": "short"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
                       }
                     ]
                   },
@@ -1690,8 +1147,8 @@
         "kind": "Panel",
         "spec": {
           "id": 28,
-          "title": "Downloads per day by registry",
-          "description": "New downloads per day on each registry, stacked, with the sum over the range in the legend. A jump on one registry alone points at an automated reader or a release that reached one registry first. A bar below zero means a registry restated its total lower.",
+          "title": "Downloads by registry",
+          "description": "New downloads on each registry, stacked, in bars of an hour on a range of a day or less, 6 hours on a week and a day from 30 days. Downloads in this range gives the exact total, for one registry when the Registry filter picks it. A jump on one registry alone points at an automated reader or a release that reached one registry first. A bar below zero means a registry restated its total lower.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1708,9 +1165,9 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "label_replace(label_replace(sum by (registry) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[1d:15m])), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")",
+                        "expr": "(label_replace(label_replace(sum by (registry) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__interval:1m])), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")) and on () (vector(time()) > $__from / 1000)",
                         "legendFormat": "{{name}}",
-                        "interval": "1d"
+                        "interval": "1h"
                       }
                     },
                     "refId": "A",
@@ -1719,7 +1176,9 @@
                 }
               ],
               "transformations": [],
-              "queryOptions": {}
+              "queryOptions": {
+                "maxDataPoints": 25
+              }
             }
           },
           "vizConfig": {
@@ -1730,11 +1189,8 @@
               "options": {
                 "legend": {
                   "showLegend": true,
-                  "displayMode": "table",
-                  "placement": "right",
-                  "calcs": [
-                    "sum"
-                  ]
+                  "displayMode": "list",
+                  "placement": "bottom"
                 },
                 "tooltip": {
                   "mode": "multi",
@@ -1754,7 +1210,7 @@
                       "mode": "normal"
                     },
                     "showPoints": "never",
-                    "barAlignment": 0,
+                    "barAlignment": -1,
                     "axisSoftMin": 0
                   },
                   "color": {
@@ -1802,8 +1258,8 @@
         "kind": "Panel",
         "spec": {
           "id": 30,
-          "title": "Movers this week",
-          "description": "The 5 packages whose downloads grew most and the 5 that fell most, comparing the last 7 days with the 7 days before. GHCR counts every manifest read, so automated polling moves these numbers as much as people do, and a mover rarely needs an action. A package without counts in both weeks is not listed.",
+          "title": "Movers against the range before",
+          "description": "The 5 packages whose downloads grew most and the 5 that fell most, comparing the dashboard time range with the range of the same length before it. A rise reads green and a fall red. GHCR counts every manifest read, so automated polling moves these numbers as much as people do, and a mover rarely needs an action. A package is listed only once it was reported before the range before began.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1820,7 +1276,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "topk(5, sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h])) - sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h] offset 7d))) or bottomk(5, sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h])) - sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h] offset 7d)))",
+                        "expr": "label_replace(label_join(label_replace(label_replace(topk(5, round(sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])) - sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m] offset $__range))) > 0 and on (owner, repo${split}) sum by (owner, repo${split}) (max_over_time((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"} offset $__range))[1d:1h] offset $__range))) or bottomk(5, round(sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m])) - sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__range:1m] offset $__range))) < 0 and on (owner, repo${split}) sum by (owner, repo${split}) (max_over_time((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"} offset $__range))[1d:1h] offset $__range))), \"registry_name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"registry_name\", \"GHCR\", \"registry\", \"ghcr\"), \"package\", \" · \", \"repo\", \"registry_name\"), \"package\", \"$1\", \"package\", \"(.*) · \")",
                         "legendFormat": "",
                         "instant": true,
                         "range": false,
@@ -1844,19 +1300,21 @@
                         "__tenant_id__": true,
                         "hostname": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "registry": true,
+                        "registry_name": true
                       },
                       "renameByName": {
+                        "package": "Package",
+                        "repo": "Repo",
                         "owner": "Owner",
-                        "repo": "Package",
-                        "registry": "Registry",
                         "Value": "Change"
                       },
                       "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "registry": 2,
-                        "Value": 3
+                        "package": 0,
+                        "Value": 1,
+                        "repo": 2,
+                        "owner": 3
                       }
                     }
                   }
@@ -1878,40 +1336,71 @@
                     "displayName": "Change",
                     "desc": true
                   }
-                ]
+                ],
+                "enablePagination": true
               },
               "fieldConfig": {
                 "defaults": {
-                  "noValue": "No two weeks of counts yet",
+                  "noValue": "No package moved, or the counts do not reach back two ranges yet",
                   "custom": {
                     "align": "auto",
                     "filterable": false
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      },
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "thresholds"
                   }
                 },
                 "overrides": [
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Registry"
+                      "options": "Package"
                     },
                     "properties": [
                       {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "type": "value",
-                            "options": {
-                              "dockerhub": {
-                                "index": 0,
-                                "text": "Docker Hub"
-                              },
-                              "ghcr": {
-                                "index": 1,
-                                "text": "GHCR"
-                              }
-                            }
-                          }
-                        ]
+                        "id": "custom.minWidth",
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Repo"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Owner"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
                       }
                     ]
                   },
@@ -1926,174 +1415,13 @@
                         "value": "short"
                       },
                       {
-                        "id": "decimals",
-                        "value": 0
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-31": {
-        "kind": "Panel",
-        "spec": {
-          "id": 31,
-          "title": "Share of downloads last 30 days",
-          "description": "The 15 packages with the largest share of all downloads in the last 30 days, in percent of the selection. One package far ahead of the rest is often polled by automation rather than pulled by people, and a count a registry restated lower adds nothing. No downloads yet means the counts do not reach back 30 days.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "topk(15, sum by (owner, repo${split}) (clamp_min(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h]), 0))) / on () group_left () (sum(clamp_min(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h]), 0)) > 0) * 100",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "__tenant_id__": true,
-                        "hostname": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "owner": "Owner",
-                        "repo": "Package",
-                        "registry": "Registry",
-                        "Value": "Share"
-                      },
-                      "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "registry": 2,
-                        "Value": 3
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "displayName": "Share",
-                    "desc": true
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No downloads yet",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": false
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Registry"
-                    },
-                    "properties": [
-                      {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "type": "value",
-                            "options": {
-                              "dockerhub": {
-                                "index": 0,
-                                "text": "Docker Hub"
-                              },
-                              "ghcr": {
-                                "index": 1,
-                                "text": "GHCR"
-                              }
-                            }
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Share"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "percent"
-                      },
-                      {
-                        "id": "min",
-                        "value": 0
-                      },
-                      {
-                        "id": "max",
-                        "value": 100
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 1
+                        "id": "custom.width",
+                        "value": 104
                       },
                       {
                         "id": "custom.cellOptions",
                         "value": {
-                          "type": "gauge",
-                          "mode": "basic",
-                          "valueDisplayMode": "text"
+                          "type": "color-text"
                         }
                       }
                     ]
@@ -2107,963 +1435,6 @@
                       {
                         "id": "noValue",
                         "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-40": {
-        "kind": "Panel",
-        "spec": {
-          "id": 40,
-          "title": "Downloads per week by registry",
-          "description": "New downloads per week on each registry over the last year, stacked, with the sum in the legend. Use it to see the long trend that daily bars hide. A bar below zero means a registry restated its total lower.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "label_replace(label_replace(sum by (registry) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[7d:1h])), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")",
-                        "legendFormat": "{{name}}",
-                        "interval": "7d"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {
-                "timeFrom": "1y"
-              }
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "showLegend": true,
-                  "displayMode": "table",
-                  "placement": "right",
-                  "calcs": [
-                    "sum"
-                  ]
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "custom": {
-                    "drawStyle": "bars",
-                    "fillOpacity": 80,
-                    "gradientMode": "none",
-                    "lineWidth": 1,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "normal"
-                    },
-                    "showPoints": "never",
-                    "barAlignment": 0,
-                    "axisSoftMin": 0
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Docker Hub"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "purple"
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-41": {
-        "kind": "Panel",
-        "spec": {
-          "id": 41,
-          "title": "30-day rolling average per package",
-          "description": "Average downloads per day over the 30 days before each point, over the last year, one line per package or per package and registry with Split by registry on. A line that climbs steadily is growing use, and a sudden step that holds is usually a new automated reader. A registry that restates its total lower pulls the line down for the next 30 days.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h])) / 30",
-                        "legendFormat": "{{owner}}/{{repo}} {{registry}}",
-                        "interval": "1d"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {
-                "timeFrom": "1y"
-              }
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "showLegend": true,
-                  "displayMode": "table",
-                  "placement": "right",
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "sortBy": "Last *",
-                  "sortDesc": true
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "custom": {
-                    "drawStyle": "line",
-                    "fillOpacity": 0,
-                    "lineWidth": 2,
-                    "showPoints": "never",
-                    "spanNulls": true
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-50": {
-        "kind": "Panel",
-        "spec": {
-          "id": 50,
-          "title": "Downloads by registry, last 30 days",
-          "description": "Downloads on each registry in the last 30 days across the selected packages. GHCR counts every manifest read and Docker Hub counts its own pulls, so the two are not the same measure. A package whose count a registry restated lower adds nothing, and No downloads yet means the counts do not reach back 30 days.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "label_replace(label_replace(sum by (registry) (clamp_min(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[30d:1h]), 0)), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")",
-                        "legendFormat": "{{name}}",
-                        "instant": true,
-                        "range": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "bargauge",
-            "version": "",
-            "spec": {
-              "options": {
-                "displayMode": "basic",
-                "orientation": "horizontal",
-                "showUnfilled": true,
-                "valueMode": "color",
-                "namePlacement": "left",
-                "sizing": "manual",
-                "minVizHeight": 36,
-                "maxVizHeight": 36,
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 14
-                },
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "min": 0,
-                  "noValue": "No downloads yet",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Docker Hub"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "purple"
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-51": {
-        "kind": "Panel",
-        "spec": {
-          "id": 51,
-          "title": "GHCR against Docker Hub per image",
-          "description": "Each image's downloads on both registries over the last 30 days, and how many GHCR downloads it gets per Docker Hub download. Most images sit close together, and one far above the rest is usually read by an automated tool on GHCR rather than pulled by people. An image on one registry only has no ratio. A registry that restates its total lower reduces that total and can make the ratio negative.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{registry=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}))[30d:1h]))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{registry=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}))[30d:1h]))",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "sum by (owner, repo) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{registry=\"ghcr\",repo=~\"$repo\",owner=~\"$owner\"}))[30d:1h])) / (sum by (owner, repo) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{registry=\"dockerhub\",repo=~\"$repo\",owner=~\"$owner\"}))[30d:1h])) > 0)",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "__tenant_id__": true,
-                        "hostname": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "owner": "Owner",
-                        "repo": "Package",
-                        "Value #A": "GHCR",
-                        "Value #B": "Docker Hub",
-                        "Value #C": "GHCR per Docker Hub"
-                      },
-                      "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "Value #A": 2,
-                        "Value #B": 3,
-                        "Value #C": 4
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "displayName": "GHCR per Docker Hub",
-                    "desc": true
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No downloads yet",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": false
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Docker Hub"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR per Docker Hub"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "none"
-                      },
-                      {
-                        "id": "decimals",
-                        "value": 1
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 208
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-52": {
-        "kind": "Panel",
-        "spec": {
-          "id": 52,
-          "title": "Tags and versions per image",
-          "description": "Hub tags is each image's tag count on Docker Hub, and Tagged and Untagged are its version counts on GHCR. Signatures and attestations count as GHCR versions, and some readers fetch every tag, so a growing count can raise the download numbers. The counts can be up to 24 hours old at the default hourly check and fill in over the first day after a restart, see Collector health.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo) (registrystats_dockerhub_tags{repo=~\"$repo\",owner=~\"$owner\"})",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo) (registrystats_ghcr_versions{state=\"tagged\",repo=~\"$repo\",owner=~\"$owner\"})",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max by (owner, repo) (registrystats_ghcr_versions{state=\"untagged\",repo=~\"$repo\",owner=~\"$owner\"})",
-                        "legendFormat": "",
-                        "instant": true,
-                        "range": false,
-                        "format": "table"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "__tenant_id__": true,
-                        "hostname": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "owner": "Owner",
-                        "repo": "Package",
-                        "Value #A": "Hub tags",
-                        "Value #B": "Tagged",
-                        "Value #C": "Untagged"
-                      },
-                      "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "Value #A": 2,
-                        "Value #B": 3,
-                        "Value #C": 4
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "displayName": "Untagged",
-                    "desc": true
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "No counts read yet",
-                  "custom": {
-                    "align": "auto",
-                    "filterable": false
-                  }
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Hub tags"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 120
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Tagged"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 104
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Untagged"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "custom.width",
-                        "value": 120
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*"
-                    },
-                    "properties": [
-                      {
-                        "id": "noValue",
-                        "value": "-"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        }
-      },
-      "panel-53": {
-        "kind": "Panel",
-        "spec": {
-          "id": 53,
-          "title": "Downloads per day against tag count",
-          "description": "Downloads per day for the image picked in Image, as bars per registry, with its Docker Hub tag count and GHCR tagged version count as lines on the right axis. Downloads that rise in step with the tag count point at a reader that fetches every tag rather than at people pulling the image. Pick an image to fill the chart. A bar below zero means a registry restated its total lower.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "label_replace(label_replace(sum by (registry) ((label_join(delta((max by (owner, repo, registry) (registrystats_image_pulls_total{registry=~\"$registry\"}))[1d:15m]), \"image\", \"/\", \"owner\", \"repo\") * on (image) group_left () label_replace(vector(1), \"image\", \"$image\", \"\", \"\"))), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")",
-                        "legendFormat": "{{name}} downloads",
-                        "interval": "1d"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max((label_join(registrystats_dockerhub_tags, \"image\", \"/\", \"owner\", \"repo\") * on (image) group_left () label_replace(vector(1), \"image\", \"$image\", \"\", \"\")))",
-                        "legendFormat": "Docker Hub tags",
-                        "interval": "1d"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "max((label_join(registrystats_ghcr_versions{state=\"tagged\"}, \"image\", \"/\", \"owner\", \"repo\") * on (image) group_left () label_replace(vector(1), \"image\", \"$image\", \"\", \"\")))",
-                        "legendFormat": "GHCR tagged versions",
-                        "interval": "1d"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "showLegend": true,
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "short",
-                  "custom": {
-                    "drawStyle": "bars",
-                    "fillOpacity": 80,
-                    "gradientMode": "none",
-                    "lineWidth": 1,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "normal"
-                    },
-                    "showPoints": "never",
-                    "barAlignment": 0,
-                    "axisSoftMin": 0
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "min": 0
-                },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byFrameRefID",
-                      "options": "A"
-                    },
-                    "properties": [
-                      {
-                        "id": "min"
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Docker Hub downloads"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "blue"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR downloads"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "purple"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".*(tags|versions)$"
-                    },
-                    "properties": [
-                      {
-                        "id": "custom.axisPlacement",
-                        "value": "right"
-                      },
-                      {
-                        "id": "custom.drawStyle",
-                        "value": "line"
-                      },
-                      {
-                        "id": "custom.lineWidth",
-                        "value": 2
-                      },
-                      {
-                        "id": "custom.fillOpacity",
-                        "value": 0
-                      },
-                      {
-                        "id": "custom.axisLabel",
-                        "value": "Tags"
-                      },
-                      {
-                        "id": "min",
-                        "value": 0
-                      },
-                      {
-                        "id": "custom.stacking",
-                        "value": {
-                          "group": "B",
-                          "mode": "none"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Docker Hub tags"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "orange"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "GHCR tagged versions"
-                    },
-                    "properties": [
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "yellow"
-                        }
                       }
                     ]
                   }
@@ -3077,8 +1448,8 @@
         "kind": "Panel",
         "spec": {
           "id": 60,
-          "title": "Data age per registry",
-          "description": "Time since each registry was last read successfully, for the selected collector read longest ago, while Tag and version data age covers the tag columns. Green is under 120 minutes, yellow from 120 minutes and red from 360 minutes, which assumes the default hourly check, and red means reads of that registry are failing. Not reported yet means no successful read has been published.",
+          "title": "Registry data age",
+          "description": "Time since each registry was last read successfully, for the selected collector read longest ago. Green is under 120 minutes, yellow from 120 minutes and red from 360 minutes, which assumes the default hourly check, and red means reads of that registry are failing. Not reported yet means no successful read has been published.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3156,7 +1527,19 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "decimals": 0
+                  "decimals": 0,
+                  "mappings": [
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -3168,8 +1551,8 @@
         "kind": "Panel",
         "spec": {
           "id": 61,
-          "title": "Last read complete per registry",
-          "description": "Whether every listing and package read of the last check came back with an answer, per registry, for the selected collector that did worst. Green Complete means nothing was left unknown. Yellow Incomplete means a listing was cut short or failed, or some package could not be read, so Registries out of step shows Unknown and the container log names the cause. Not reported yet means no check has finished.",
+          "title": "Last read complete",
+          "description": "Whether every listing and package read of the last check came back with an answer, per registry, for the selected collector that did worst. Green Yes means nothing was left unknown. Yellow No means a listing was cut short or failed, or some package could not be read, so Registries out of step shows Unknown and the container log names the cause. Not reported yet means no check has finished.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3249,13 +1632,23 @@
                       "options": {
                         "0": {
                           "index": 0,
-                          "text": "Incomplete",
+                          "text": "No",
                           "color": "yellow"
                         },
                         "1": {
                           "index": 1,
-                          "text": "Complete",
+                          "text": "Yes",
                           "color": "green"
+                        }
+                      }
+                    },
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
                         }
                       }
                     }
@@ -3267,99 +1660,12 @@
           }
         }
       },
-      "panel-62": {
-        "kind": "Panel",
-        "spec": {
-          "id": 62,
-          "title": "Tag and version data age",
-          "description": "Age of the oldest tag or version count on show, per registry, across the selected collectors. Counts are read again when an image is pushed or once they are 24 hours old, and a cold start spreads the first reads over a day. Green is up to 1560 minutes, which is 26 hours at the default hourly check, and yellow beyond, which means reads keep failing or a rate limit stopped them. No counts read yet means none has been read since the start.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "label_replace(label_replace(time() - min by (source) (registrystats_details_oldest_read_timestamp_seconds{job=~\"$job\"}), \"name\", \"Docker Hub\", \"source\", \"dockerhub\"), \"name\", \"GHCR\", \"source\", \"ghcr\")",
-                        "legendFormat": "{{name}}",
-                        "instant": true,
-                        "range": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                },
-                "textMode": "value_and_name"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "noValue": "No counts read yet",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 93600,
-                        "color": "yellow"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "decimals": 0
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-63": {
         "kind": "Panel",
         "spec": {
           "id": 63,
-          "title": "Images without detail series",
-          "description": "Images past the 250 owner/repo names registry-stats details, which get downloads but no push time, presence, tag or version counts. Names are taken in alphabetical order, so the last ones miss out, and listing fewer images brings them back. The value is the selected collector with the most, and green is none and yellow is 1 or more. Not reported yet means no check has finished.",
+          "title": "Images left out",
+          "description": "Images beyond the first 250 owner/repo names, which registry-stats does not detail: they get downloads but no push time or presence series. Names are taken in alphabetical order, so the last ones miss out, and listing fewer images brings them back. The value is the selected collector with the most, and green is none and yellow is 1 or more. Not reported yet means no check has finished.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3433,7 +1739,19 @@
                   "color": {
                     "mode": "thresholds"
                   },
-                  "decimals": 0
+                  "decimals": 0,
+                  "mappings": [
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -3445,8 +1763,8 @@
         "kind": "Panel",
         "spec": {
           "id": 64,
-          "title": "Checks and failed checks per day",
-          "description": "Checks per day for each registry as lines, added up across the selected collectors, and the checks that failed as red and orange bars. A failed check lost a whole listing or most of its package reads. At the default hourly interval a day holds 24 checks per collector, and any failed bar is worth a look at the container log. No bars means no check finished in the range.",
+          "title": "Checks passed and failed",
+          "description": "Checks per registry across the selected collectors: passed in blue for Docker Hub and purple for GHCR, failed stacked on top in red and orange. A bar spans an hour on a range of a day or less, 6 hours on a week and a day from 30 days, and the legend total adds up the bars. Each collector checks once an hour at the default interval, so no bar means no check finished, and a check at either edge of the range can fall outside the bars. A failed check lost a whole listing or most of its package reads, so any red or orange bar is worth a look at the container log.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3463,9 +1781,9 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "label_replace(label_replace(sum by (source) (max by (job, instance, source) (increase(registrystats_collects_total{job=~\"$job\"}[1d]))), \"name\", \"Docker Hub\", \"source\", \"dockerhub\"), \"name\", \"GHCR\", \"source\", \"ghcr\")",
-                        "legendFormat": "{{name}} checks",
-                        "interval": "1d"
+                        "expr": "(label_replace(label_replace(round(sum by (source) (max by (job, instance, source) (increase(registrystats_collects_total{job=~\"$job\"}[$__interval])))) - round(sum by (source) (max by (job, instance, source) (increase(registrystats_collect_errors_total{job=~\"$job\"}[$__interval])))), \"name\", \"Docker Hub\", \"source\", \"dockerhub\"), \"name\", \"GHCR\", \"source\", \"ghcr\")) and on () (vector(time()) > $__from / 1000)",
+                        "legendFormat": "{{name}} passed",
+                        "interval": "1h"
                       }
                     },
                     "refId": "A",
@@ -3483,9 +1801,9 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "label_replace(label_replace(sum by (source) (max by (job, instance, source) (increase(registrystats_collect_errors_total{job=~\"$job\"}[1d]))), \"name\", \"Docker Hub\", \"source\", \"dockerhub\"), \"name\", \"GHCR\", \"source\", \"ghcr\")",
+                        "expr": "(label_replace(label_replace(round(sum by (source) (max by (job, instance, source) (increase(registrystats_collect_errors_total{job=~\"$job\"}[$__interval])))) > 0, \"name\", \"Docker Hub\", \"source\", \"dockerhub\"), \"name\", \"GHCR\", \"source\", \"ghcr\")) and on () (vector(time()) > $__from / 1000)",
                         "legendFormat": "{{name}} failed",
-                        "interval": "1d"
+                        "interval": "1h"
                       }
                     },
                     "refId": "B",
@@ -3494,7 +1812,9 @@
                 }
               ],
               "transformations": [],
-              "queryOptions": {}
+              "queryOptions": {
+                "maxDataPoints": 25
+              }
             }
           },
           "vizConfig": {
@@ -3505,8 +1825,11 @@
               "options": {
                 "legend": {
                   "showLegend": true,
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "calcs": [
+                    "sum"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
@@ -3517,22 +1840,28 @@
                 "defaults": {
                   "unit": "short",
                   "custom": {
-                    "drawStyle": "line",
-                    "fillOpacity": 0,
-                    "lineWidth": 2,
+                    "drawStyle": "bars",
+                    "fillOpacity": 80,
+                    "lineWidth": 1,
                     "showPoints": "never",
-                    "spanNulls": false
+                    "spanNulls": false,
+                    "barAlignment": -1,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "normal"
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
                   },
-                  "min": 0
+                  "min": 0,
+                  "decimals": 0
                 },
                 "overrides": [
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Docker Hub checks"
+                      "options": "Docker Hub passed"
                     },
                     "properties": [
                       {
@@ -3547,7 +1876,7 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "GHCR checks"
+                      "options": "GHCR passed"
                     },
                     "properties": [
                       {
@@ -3555,29 +1884,6 @@
                         "value": {
                           "mode": "fixed",
                           "fixedColor": "purple"
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "matcher": {
-                      "id": "byRegexp",
-                      "options": ".* failed$"
-                    },
-                    "properties": [
-                      {
-                        "id": "custom.drawStyle",
-                        "value": "bars"
-                      },
-                      {
-                        "id": "custom.fillOpacity",
-                        "value": 80
-                      },
-                      {
-                        "id": "custom.stacking",
-                        "value": {
-                          "group": "A",
-                          "mode": "normal"
                         }
                       }
                     ]
@@ -3623,7 +1929,7 @@
         "spec": {
           "id": 65,
           "title": "Check duration",
-          "description": "How long a full check of both registries takes, tag and version reads included, as the median and the 95th percentile over the day before each point. GHCR pages are spaced 2 to 5 seconds apart and Docker Hub requests half a second apart, so the time grows with the number of images. A climb with no new images means slower or retried requests.",
+          "description": "How long a full check of both registries takes, in minutes, as the median and the 95th percentile over the day before each point. GHCR pages are spaced 2 to 5 seconds apart and Docker Hub requests half a second apart, so the time grows with the number of images. A climb with no new images means slower or retried requests.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3640,7 +1946,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "histogram_quantile(0.5, sum by (le) (increase(registrystats_collect_duration_seconds_bucket{job=~\"$job\"}[1d])))",
+                        "expr": "histogram_quantile(0.5, sum by (le) (increase(registrystats_collect_duration_seconds_bucket{job=~\"$job\"}[1d]))) / 60",
                         "legendFormat": "Median",
                         "interval": "1h"
                       }
@@ -3660,7 +1966,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "histogram_quantile(0.95, sum by (le) (increase(registrystats_collect_duration_seconds_bucket{job=~\"$job\"}[1d])))",
+                        "expr": "histogram_quantile(0.95, sum by (le) (increase(registrystats_collect_duration_seconds_bucket{job=~\"$job\"}[1d]))) / 60",
                         "legendFormat": "95th percentile",
                         "interval": "1h"
                       }
@@ -3692,13 +1998,17 @@
               },
               "fieldConfig": {
                 "defaults": {
-                  "unit": "s",
+                  "unit": "suffix: min",
                   "custom": {
                     "drawStyle": "line",
                     "fillOpacity": 0,
                     "lineWidth": 2,
                     "showPoints": "never",
-                    "spanNulls": true
+                    "spanNulls": true,
+                    "scaleDistribution": {
+                      "type": "log",
+                      "log": 10
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
@@ -3715,8 +2025,8 @@
         "kind": "Panel",
         "spec": {
           "id": 66,
-          "title": "Counts that went down",
-          "description": "Packages whose count is below its highest value of the last 2 days, with how far it fell. A registry restating its total, or a page read that returned a wrong number, causes this, and the shipped alert RegistryStatsPullCountRegressed fires on it too. No count went down means every count kept its high.",
+          "title": "Counts that went down in this range",
+          "description": "Packages whose count is now below its highest value in the dashboard time range, with how far it fell, per registry. A registry restating its total, or a page read that returned a wrong number, causes this, and the download figures of the range are lower by that much. The shipped alert RegistryStatsPullCountRegressed fires on a fall within 2 days. No count went down means every count kept its high.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3733,7 +2043,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "max by (owner, repo, registry) (max_over_time(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[2d]) - registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}) > 0",
+                        "expr": "label_replace(label_join(label_replace(label_replace(max by (owner, repo, registry) (max_over_time(registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}[$__range]) - registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}) > 0, \"registry_name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"registry_name\", \"GHCR\", \"registry\", \"ghcr\"), \"package\", \" · \", \"repo\", \"registry_name\"), \"package\", \"$1\", \"package\", \"(.*) · \")",
                         "legendFormat": "",
                         "instant": true,
                         "range": false,
@@ -3757,19 +2067,21 @@
                         "__tenant_id__": true,
                         "hostname": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "registry": true,
+                        "registry_name": true
                       },
                       "renameByName": {
+                        "package": "Package",
+                        "repo": "Repo",
                         "owner": "Owner",
-                        "repo": "Package",
-                        "registry": "Registry",
                         "Value": "Drop"
                       },
                       "indexByName": {
-                        "owner": 0,
-                        "repo": 1,
-                        "registry": 2,
-                        "Value": 3
+                        "package": 0,
+                        "Value": 1,
+                        "repo": 2,
+                        "owner": 3
                       }
                     }
                   }
@@ -3791,11 +2103,12 @@
                     "displayName": "Drop",
                     "desc": true
                   }
-                ]
+                ],
+                "enablePagination": true
               },
               "fieldConfig": {
                 "defaults": {
-                  "noValue": "No count went down in the last 2 days",
+                  "noValue": "No count went down in this range",
                   "custom": {
                     "align": "auto",
                     "filterable": false
@@ -3805,26 +2118,40 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Registry"
+                      "options": "Package"
                     },
                     "properties": [
                       {
-                        "id": "mappings",
-                        "value": [
-                          {
-                            "type": "value",
-                            "options": {
-                              "dockerhub": {
-                                "index": 0,
-                                "text": "Docker Hub"
-                              },
-                              "ghcr": {
-                                "index": 1,
-                                "text": "GHCR"
-                              }
-                            }
-                          }
-                        ]
+                        "id": "custom.minWidth",
+                        "value": 208
+                      },
+                      {
+                        "id": "custom.wrapText",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Repo"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Owner"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.hidden",
+                        "value": true
                       }
                     ]
                   },
@@ -3837,6 +2164,10 @@
                       {
                         "id": "unit",
                         "value": "short"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 104
                       }
                     ]
                   },
@@ -3952,91 +2283,18 @@
                           "color": "green"
                         }
                       }
+                    },
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
                     }
                   ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-68": {
-        "kind": "Panel",
-        "spec": {
-          "id": 68,
-          "title": "Uptime",
-          "description": "Time since the registry-stats process started. A short uptime after a crash or a deploy is expected, and one that keeps resetting means the container restarts. Not scraped means no process metrics arrived.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "time() - max(process_start_time_seconds{job=~\"$job\"})",
-                        "legendFormat": "Uptime",
-                        "instant": true,
-                        "range": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "none",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                },
-                "textMode": "value"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "noValue": "Not scraped",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "decimals": 0
                 },
                 "overrides": []
               }
@@ -4124,7 +2382,19 @@
                     "mode": "thresholds"
                   },
                   "decimals": 0,
-                  "min": 0
+                  "min": 0,
+                  "mappings": [
+                    {
+                      "type": "special",
+                      "options": {
+                        "match": "null",
+                        "result": {
+                          "color": "text",
+                          "index": 9
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -4229,20 +2499,19 @@
                     {
                       "kind": "RowsLayoutRow",
                       "spec": {
-                        "title": "Right now",
+                        "title": "Summary",
                         "collapse": false,
                         "layout": {
-                          "kind": "AutoGridLayout",
+                          "kind": "GridLayout",
                           "spec": {
-                            "maxColumnCount": 5,
-                            "columnWidthMode": "narrow",
-                            "rowHeightMode": "custom",
-                            "rowHeight": 106,
-                            "fillScreen": false,
                             "items": [
                               {
-                                "kind": "AutoGridLayoutItem",
+                                "kind": "GridLayoutItem",
                                 "spec": {
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 9,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-20"
@@ -4250,8 +2519,12 @@
                                 }
                               },
                               {
-                                "kind": "AutoGridLayoutItem",
+                                "kind": "GridLayoutItem",
                                 "spec": {
+                                  "x": 9,
+                                  "y": 0,
+                                  "width": 10,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-21"
@@ -4259,29 +2532,55 @@
                                 }
                               },
                               {
-                                "kind": "AutoGridLayoutItem",
+                                "kind": "GridLayoutItem",
                                 "spec": {
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-22"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "AutoGridLayoutItem",
-                                "spec": {
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-23"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "AutoGridLayoutItem",
-                                "spec": {
+                                  "x": 19,
+                                  "y": 0,
+                                  "width": 5,
+                                  "height": 3,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-24"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "kind": "RowsLayoutRow",
+                      "spec": {
+                        "title": "Recent activity",
+                        "collapse": false,
+                        "layout": {
+                          "kind": "GridLayout",
+                          "spec": {
+                            "items": [
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 12,
+                                  "height": 12,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-25"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 0,
+                                  "width": 12,
+                                  "height": 12,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-28"
                                   }
                                 }
                               }
@@ -4305,7 +2604,7 @@
                                   "x": 0,
                                   "y": 0,
                                   "width": 14,
-                                  "height": 9,
+                                  "height": 6,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-26"
@@ -4318,50 +2617,10 @@
                                   "x": 14,
                                   "y": 0,
                                   "width": 10,
-                                  "height": 9,
+                                  "height": 6,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-27"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Recent activity",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 9,
-                                  "height": 11,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-25"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 9,
-                                  "y": 0,
-                                  "width": 15,
-                                  "height": 11,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-28"
                                   }
                                 }
                               }
@@ -4386,59 +2645,6 @@
                     {
                       "kind": "RowsLayoutRow",
                       "spec": {
-                        "title": "Packages",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 5,
-                                  "height": 6,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-10"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 5,
-                                  "y": 0,
-                                  "width": 19,
-                                  "height": 12,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-30"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 6,
-                                  "width": 5,
-                                  "height": 6,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-11"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
                         "title": "Package overview",
                         "collapse": false,
                         "layout": {
@@ -4450,80 +2656,39 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
-                                  "width": 24,
-                                  "height": 16,
+                                  "width": 12,
+                                  "height": 32,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-1"
                                   }
                                 }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Download history",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
+                              },
                               {
                                 "kind": "GridLayoutItem",
                                 "spec": {
-                                  "x": 0,
+                                  "x": 12,
                                   "y": 0,
                                   "width": 12,
                                   "height": 13,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-30"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 12,
+                                  "y": 13,
+                                  "width": 12,
+                                  "height": 19,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-3"
                                   }
                                 }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 12,
-                                  "y": 0,
-                                  "width": 12,
-                                  "height": 13,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-2"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Share",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 24,
-                                  "height": 16,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-31"
-                                  }
-                                }
                               }
                             ]
                           }
@@ -4533,186 +2698,6 @@
                   ]
                 }
               }
-            }
-          },
-          {
-            "kind": "TabsLayoutTab",
-            "spec": {
-              "title": "History",
-              "layout": {
-                "kind": "RowsLayout",
-                "spec": {
-                  "rows": [
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Last year",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 24,
-                                  "height": 11,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-40"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 11,
-                                  "width": 24,
-                                  "height": 13,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-41"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          {
-            "kind": "TabsLayoutTab",
-            "spec": {
-              "title": "Registries and tags",
-              "layout": {
-                "kind": "RowsLayout",
-                "spec": {
-                  "rows": [
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Registries",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 8,
-                                  "height": 5,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-50"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 8,
-                                  "y": 0,
-                                  "width": 16,
-                                  "height": 9,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-51"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    },
-                    {
-                      "kind": "RowsLayoutRow",
-                      "spec": {
-                        "title": "Tags and versions",
-                        "collapse": false,
-                        "layout": {
-                          "kind": "GridLayout",
-                          "spec": {
-                            "items": [
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 0,
-                                  "y": 0,
-                                  "width": 12,
-                                  "height": 12,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-52"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 12,
-                                  "y": 0,
-                                  "width": 12,
-                                  "height": 12,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-53"
-                                  }
-                                }
-                              }
-                            ]
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              },
-              "variables": [
-                {
-                  "kind": "QueryVariable",
-                  "spec": {
-                    "name": "image",
-                    "label": "Image",
-                    "description": "The image the downloads against tag count chart shows.",
-                    "current": {
-                      "text": "",
-                      "value": ""
-                    },
-                    "hide": "dontHide",
-                    "refresh": "onTimeRangeChanged",
-                    "skipUrlSync": false,
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "__legacyStringValue": "query_result(label_join(count by (owner, repo) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\"}), \"image\", \"/\", \"owner\", \"repo\"))"
-                      }
-                    },
-                    "regex": "/image=\"([^\"]+)\"/",
-                    "sort": "alphabeticalAsc",
-                    "options": [],
-                    "multi": false,
-                    "includeAll": false,
-                    "allowCustomValue": false
-                  }
-                }
-              ]
             }
           },
           {
@@ -4731,7 +2716,7 @@
                         "layout": {
                           "kind": "AutoGridLayout",
                           "spec": {
-                            "maxColumnCount": 4,
+                            "maxColumnCount": 3,
                             "columnWidthMode": "narrow",
                             "rowHeightMode": "custom",
                             "rowHeight": 120,
@@ -4752,15 +2737,6 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-61"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "AutoGridLayoutItem",
-                                "spec": {
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-62"
                                   }
                                 }
                               },
@@ -4793,7 +2769,7 @@
                                   "x": 0,
                                   "y": 0,
                                   "width": 12,
-                                  "height": 9,
+                                  "height": 11,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-64"
@@ -4806,7 +2782,7 @@
                                   "x": 12,
                                   "y": 0,
                                   "width": 12,
-                                  "height": 9,
+                                  "height": 11,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-65"
@@ -4817,7 +2793,7 @@
                                 "kind": "GridLayoutItem",
                                 "spec": {
                                   "x": 0,
-                                  "y": 9,
+                                  "y": 11,
                                   "width": 24,
                                   "height": 6,
                                   "element": {
@@ -4839,7 +2815,7 @@
                         "layout": {
                           "kind": "AutoGridLayout",
                           "spec": {
-                            "maxColumnCount": 4,
+                            "maxColumnCount": 3,
                             "columnWidthMode": "narrow",
                             "rowHeightMode": "custom",
                             "rowHeight": 106,
@@ -4851,15 +2827,6 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-67"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "AutoGridLayoutItem",
-                                "spec": {
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-68"
                                   }
                                 }
                               },

@@ -63,24 +63,3 @@ func FuzzDockerHubRepoListUnmarshal(f *testing.F) {
 		}
 	})
 }
-
-// FuzzParseTagCount drives the tag-total parser. Invariant: a nil error implies a
-// non-negative count, so a response with no usable count never publishes a 0.
-func FuzzParseTagCount(f *testing.F) {
-	f.Add([]byte(`{"count":341,"next":"x","results":[{}]}`))
-	f.Add([]byte(`{"count":0}`))
-	f.Add([]byte(`{"count":null}`))
-	f.Add([]byte(`{"count":-3}`))
-	f.Add([]byte(`{"Count":3}`))
-	f.Add([]byte(`[]`))
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		n, err := parseTagCount(data)
-		if err == nil && n < 0 {
-			t.Errorf("parseTagCount(%q) = %d with nil error, want an error on a negative count", data, n)
-		}
-		if err != nil && !shapeChanged(err) {
-			t.Errorf("parseTagCount(%q) error = %v, want a shape change", data, err)
-		}
-	})
-}

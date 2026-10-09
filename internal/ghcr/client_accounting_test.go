@@ -2,7 +2,6 @@ package ghcr
 
 import (
 	"bytes"
-	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/registry-stats/internal/registry"
 )
 
@@ -122,74 +120,9 @@ func TestClient_Collect_ListsOnlyOwnersReadWhole(t *testing.T) {
 	}
 }
 
-func TestClient_ReadDetail_ReadsTheVersionsPageThroughThePacer(t *testing.T) {
-	inSynctest(func(t *testing.T) {
-		var asked []string
-		var at []time.Time
-		c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			asked = append(asked, r.URL.String())
-			at = append(at, time.Now())
-			if strings.Contains(r.URL.Path, "/versions") {
-				_, _ = w.Write([]byte(versionsHTML("12", "340")))
-				return
-			}
-			_, _ = w.Write([]byte(downloadsHTML("1")))
-		}), capturingLogger(&bytes.Buffer{}))
-		ref := registry.RepoRef{Owner: "owner", Repo: "pkg"}
-
-		c.Collect(t.Context(), []registry.RepoRef{ref})
-		got, err := c.ReadDetail(t.Context(), ref)
-
-		if err != nil || got != (registry.Detail{Tagged: 12, Untagged: 340}) {
-			t.Fatalf("ReadDetail(owner/pkg) = (%+v, %v), want ({12 340}, nil)", got, err)
-		}
-		if want := "/users/owner/packages/container/pkg/versions?filters%5Bversion_type%5D=tagged"; asked[1] != want {
-			t.Errorf("ReadDetail requested %q, want %q", asked[1], want)
-		}
-		if gap := at[1].Sub(at[0]); gap < DefaultMinPacing {
-			t.Errorf("ReadDetail followed the Collect request after %v, want at least %v (one pacer for both)", gap, DefaultMinPacing)
-		}
-	})(t)
-}
-
-func TestClient_ReadDetail_FailuresAreLoggedByCause(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		body    string
-		want    string
-		limited bool
-	}{
-		{"format change", http.StatusOK, versionsHTML("1000+", "1"), `level=ERROR msg="ghcr version read failed" package=owner/pkg`, false},
-		{"rate limit", http.StatusTooManyRequests, "", `level=WARN msg="ghcr version read failed" package=owner/pkg`, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, inSynctest(func(t *testing.T) {
-			var buf bytes.Buffer
-			c := listingClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(tt.body))
-			}), capturingLogger(&buf))
-
-			_, err := c.ReadDetail(t.Context(), registry.RepoRef{Owner: "owner", Repo: "pkg"})
-
-			if err == nil {
-				t.Fatalf("ReadDetail(%s) error = nil, want an error", tt.name)
-			}
-			if got := errors.Is(err, httpx.ErrRateLimited); got != tt.limited {
-				t.Errorf("ReadDetail(%s) errors.Is(err, ErrRateLimited) = %v, want %v", tt.name, got, tt.limited)
-			}
-			if !strings.Contains(buf.String(), tt.want) {
-				t.Errorf("ReadDetail(%s) logs lack %q:\n%s", tt.name, tt.want, buf.String())
-			}
-		}))
-	}
-}
-
 // TestClient_PacesRetriesAndRedirectHops pins pacing at the request a server
-// sees: a retried attempt, the request after it, and the redirect GitHub sends
-// an organization's /users/ URL each start at least DefaultMinPacing after the
-// previous one.
+// sees: a retried attempt and the redirect GitHub sends an organization's
+// /users/ URL each start at least DefaultMinPacing after the previous one.
 func TestClient_PacesRetriesAndRedirectHops(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var at []time.Time
@@ -198,25 +131,19 @@ func TestClient_PacesRetriesAndRedirectHops(t *testing.T) {
 			switch {
 			case len(at) == 1:
 				w.WriteHeader(http.StatusInternalServerError)
-			case strings.HasPrefix(r.URL.Path, "/users/owner/packages/container/pkg/versions"):
-				http.Redirect(w, r, "/orgs/owner/packages/container/pkg/versions?"+r.URL.RawQuery, http.StatusFound)
-			case strings.HasPrefix(r.URL.Path, "/orgs/"):
-				_, _ = w.Write([]byte(versionsHTML("12", "340")))
+			case strings.HasPrefix(r.URL.Path, "/users/"):
+				http.Redirect(w, r, "/orgs/owner/packages/container/package/pkg", http.StatusFound)
 			default:
 				_, _ = w.Write([]byte(downloadsHTML("1")))
 			}
 		}), capturingLogger(&bytes.Buffer{}))
-		ref := registry.RepoRef{Owner: "owner", Repo: "pkg"}
 
-		if got := c.Collect(t.Context(), []registry.RepoRef{ref}); len(got.Entries) != 1 {
-			t.Fatalf("Collect(owner/pkg) entries = %d, want 1 after one retry", len(got.Entries))
-		}
-		if _, err := c.ReadDetail(t.Context(), ref); err != nil {
-			t.Fatalf("ReadDetail(owner/pkg) error = %v", err)
+		if got := c.Collect(t.Context(), []registry.RepoRef{{Owner: "owner", Repo: "pkg"}}); len(got.Entries) != 1 {
+			t.Fatalf("Collect(owner/pkg) entries = %d, want 1 after one retry and a redirect", len(got.Entries))
 		}
 
-		if len(at) != 4 {
-			t.Fatalf("server saw %d requests, want 4 (failed attempt, retry, versions page, redirect hop)", len(at))
+		if len(at) != 3 {
+			t.Fatalf("server saw %d requests, want 3 (failed attempt, retry, redirect hop)", len(at))
 		}
 		for i := 1; i < len(at); i++ {
 			if gap := at[i].Sub(at[i-1]); gap < DefaultMinPacing {

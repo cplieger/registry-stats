@@ -1,10 +1,13 @@
 package collect_test
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/registry-stats/internal/collect"
 	"github.com/cplieger/registry-stats/internal/obs"
@@ -17,6 +20,15 @@ func runCycle(t *testing.T, sources ...collect.SourceRefs) collect.Cycle {
 }
 
 func ref(owner, repo string) registry.RepoRef { return registry.RepoRef{Owner: owner, Repo: repo} }
+
+func mustTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	v, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("Setup: parse %q: %v", s, err)
+	}
+	return v
+}
 
 func entries(refs ...registry.RepoRef) []registry.Entry {
 	out := make([]registry.Entry, 0, len(refs))
@@ -251,5 +263,21 @@ func TestRun_CarriesTheRegistryTimesOntoTheImages(t *testing.T) {
 	}
 	if cycle.Finished.IsZero() {
 		t.Error("Run Finished is zero, want the cycle's end time for the last-success stamp")
+	}
+}
+
+func TestCapWatch_WarnsOnceWhenImagesStartToMissTheCap(t *testing.T) {
+	var buf bytes.Buffer
+	w := collect.NewCapWatch(slog.New(slog.NewTextHandler(&buf, nil)))
+	over := []obs.SourceCycle{{Source: registry.GHCR, Omitted: 50}}
+	under := []obs.SourceCycle{{Source: registry.GHCR}}
+
+	for _, sources := range [][]obs.SourceCycle{over, over, under, over} {
+		w.Note(sources)
+	}
+
+	const line = `level=WARN msg="image details omitted" source=ghcr omitted=50`
+	if n := strings.Count(buf.String(), line); n != 2 {
+		t.Errorf("Note logged %q %d times over over, over, under, over, want 2 (each onset); logs:\n%s", line, n, buf.String())
 	}
 }

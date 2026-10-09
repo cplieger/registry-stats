@@ -31,21 +31,10 @@ type fakeSource struct {
 	// test can stage a source that was invoked and then interrupted.
 	cancel context.CancelFunc
 	// collection, when set, replaces the canned fields above as Collect's result.
-	collection  *registry.Collection
-	details     map[registry.RepoRef]registry.Detail
-	detailErrs  map[registry.RepoRef]error
-	detailReads []registry.RepoRef
+	collection *registry.Collection
 }
 
 func (f *fakeSource) Source() registry.ID { return f.source }
-
-func (f *fakeSource) ReadDetail(_ context.Context, ref registry.RepoRef) (registry.Detail, error) {
-	f.detailReads = append(f.detailReads, ref)
-	if err := f.detailErrs[ref]; err != nil {
-		return registry.Detail{}, err
-	}
-	return f.details[ref], nil
-}
 
 func (f *fakeSource) Collect(
 	_ context.Context,
@@ -215,6 +204,22 @@ func TestRun_zero_attempt_source_advances_cycle_counter(t *testing.T) {
 	}
 	if !strings.Contains(body, `registrystats_collect_errors_total{source="dockerhub"} 0`) {
 		t.Errorf("Run(zero-attempt source) metrics did not retain a zero error count:\n%s", body)
+	}
+}
+
+func TestRun_emptyCycleRecordsDuration(t *testing.T) {
+	m := obs.New()
+
+	collect.Run(t.Context(), collect.Options{
+		Metrics: m,
+		Logger:  slog.New(slog.DiscardHandler),
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	w := httptest.NewRecorder()
+	m.Handler()(w, r)
+	if body := w.Body.String(); !strings.Contains(body, `registrystats_collect_duration_seconds_count 1`) {
+		t.Errorf("Run(empty cycle) duration count missing one observation:\n%s", body)
 	}
 }
 

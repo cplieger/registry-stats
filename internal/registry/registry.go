@@ -45,14 +45,6 @@ type Collection struct {
 	ListingFailed bool
 }
 
-// Detail is one image's tag and version counts. Docker Hub reports its tag
-// count as Tagged and leaves Untagged zero; GHCR reports its tagged and
-// untagged version counts.
-type Detail struct {
-	Tagged   int64
-	Untagged int64
-}
-
 // RepoRef is an owner/repository pair. Repo is "*" for refs expanded at collection time.
 type RepoRef struct {
 	Owner string
