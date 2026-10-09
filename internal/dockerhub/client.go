@@ -52,9 +52,9 @@ type Client struct {
 type Options struct {
 	// Logger receives the client's logs; required.
 	Logger *slog.Logger
-	// Pacing is the least time between the starts of two requests, listing,
-	// metadata and tag reads, retries and redirect hops alike. Zero sends them
-	// back to back.
+	// Pacing is the least time between the starts of two requests, listing and
+	// metadata reads, retries and redirect hops alike. Zero sends them back to
+	// back.
 	Pacing time.Duration
 }
 
@@ -89,41 +89,6 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.
 		Definitive:    len(explicit.entries) + len(explicit.absent),
 		ListingFailed: listingFailed,
 	}
-}
-
-// ReadDetail reads one repository's tag count from the first page of its tag
-// listing, whose envelope states the total, and logs a failed read at its
-// cause's level. A 429 the retries could not clear satisfies
-// errors.Is(err, httpx.ErrRateLimited).
-func (c *Client) ReadDetail(ctx context.Context, ref registry.RepoRef) (registry.Detail, error) {
-	data, err := c.get(ctx, fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/%s/tags?page_size=1", ref.Owner, ref.Repo))
-	var tags int64
-	if err == nil {
-		tags, err = parseTagCount(data)
-	}
-	if err != nil {
-		if ctx.Err() == nil {
-			c.logger.Log(ctx, failureLevel(err), "docker hub tag read failed",
-				"repo", ref.Owner+"/"+ref.Repo, "error", errTextForLog(err))
-		}
-		return registry.Detail{}, err
-	}
-	return registry.Detail{Tagged: tags}, nil
-}
-
-// parseTagCount reads the tag total a tag-listing page advertises. The count
-// is REQUIRED: absent, null or negative is a shape change, never a zero.
-func parseTagCount(data []byte) (int64, error) {
-	var resp struct {
-		Count *int64 `json:"count"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("%w: %w", errShapeChanged, err)
-	}
-	if resp.Count == nil || *resp.Count < 0 {
-		return 0, fmt.Errorf("%w: tag count missing or negative", errShapeChanged)
-	}
-	return *resp.Count, nil
 }
 
 // collectWildcards expands every "*" ref into concrete repo entries.

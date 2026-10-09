@@ -108,9 +108,9 @@ func run() error {
 	marker.Set(true)
 
 	pub := &publication{marker: marker, m: m, ready: &ready}
-	details := collectpkg.NewDetails(slog.Default(), cfg.PollInterval, sourcesOf(active)...)
+	capWatch := collectpkg.NewCapWatch(slog.Default())
 	collect := func(ctx context.Context) {
-		runCollect(ctx, active, pub, details)
+		runCollect(ctx, active, pub, capWatch)
 	}
 
 	bgDone := make(chan struct{})
@@ -206,46 +206,22 @@ func (p *publication) publish(ctx context.Context, cycle *collectpkg.Cycle) bool
 	return true
 }
 
-// publishDetails also records the whole check's duration, so a check cancelled
-// before its tag and version reads finish adds no sample.
-func (p *publication) publishDetails(ctx context.Context, values []obs.DetailMetric, ages []obs.DetailAge, elapsed time.Duration) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if ctx.Err() != nil {
-		return
-	}
-	p.m.SetDetails(values, ages)
-	p.m.ObserveCollectDuration(elapsed)
-}
-
 func (p *publication) drain() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ready.Set(false)
 }
 
-// runCollect executes one cycle and publishes its outcome, then refreshes the
-// tag and version counts so their reads never delay the pull counts.
-func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication, details *collectpkg.Details) {
-	start := time.Now()
+// runCollect executes one cycle and publishes its outcome.
+func runCollect(ctx context.Context, sources []collectpkg.SourceRefs, pub *publication, capWatch *collectpkg.CapWatch) {
 	cycle := collectpkg.Run(ctx, collectpkg.Options{
 		Metrics: pub.m,
 		Sources: sources,
 		Logger:  slog.Default(),
 	})
-	if !pub.publish(ctx, &cycle) {
-		return
+	if pub.publish(ctx, &cycle) {
+		capWatch.Note(cycle.Sources)
 	}
-	values, ages := details.Refresh(ctx, &cycle)
-	pub.publishDetails(ctx, values, ages, time.Since(start))
-}
-
-func sourcesOf(active []collectpkg.SourceRefs) []collectpkg.Source {
-	sources := make([]collectpkg.Source, 0, len(active))
-	for _, a := range active {
-		sources = append(sources, a.Source)
-	}
-	return sources
 }
 
 // requestTimeout bounds each attempt made by the shared outbound client,

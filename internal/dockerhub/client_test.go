@@ -350,6 +350,8 @@ func TestClient_Collect_CancelledWildcardListingIsNotAnOutage(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		cancel()
 		<-r.Context().Done()
+		// A returning handler sends an empty 200 the client can still receive.
+		panic(http.ErrAbortHandler)
 	}))
 
 	logger, buf := captureLogger()
@@ -382,11 +384,12 @@ func TestClient_Collect_CancelledMidFetch_IsNotAnOutage(t *testing.T) {
 	defer cancel()
 
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		// Cancel with the request in flight, then hold the handler until
-		// the client aborts, so the fetch deterministically fails on the
-		// stop rather than racing the response body.
+		// Cancel with the request in flight and abort rather than return:
+		// a returning handler sends an empty 200, which the client can
+		// still receive after the cancel and parse as a shape change.
 		cancel()
 		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
 	}))
 
 	logger, buf := captureLogger()

@@ -100,32 +100,6 @@ func (c *Client) Collect(ctx context.Context, refs []registry.RepoRef) registry.
 	return out
 }
 
-// ReadDetail reads one package's tagged and untagged version counts from its
-// versions page, paced with Collect's requests, and logs a failed read at
-// its cause's level. A 429 the retries could not clear satisfies
-// errors.Is(err, httpx.ErrRateLimited).
-func (c *Client) ReadDetail(ctx context.Context, ref registry.RepoRef) (registry.Detail, error) {
-	pageURL := fmt.Sprintf("https://github.com/users/%s/packages/container/%s/versions?filters%%5Bversion_type%%5D=tagged",
-		ref.Owner, url.PathEscape(ref.Repo))
-	html, err := c.fetchHTML(ctx, pageURL)
-	var tagged, untagged int64
-	if err == nil {
-		tagged, untagged, err = parseVersionCounts(html)
-	}
-	if err != nil {
-		if ctx.Err() == nil {
-			level := slog.LevelWarn
-			if errors.Is(err, errHTMLFormatChanged) {
-				level = slog.LevelError
-			}
-			c.opts.Logger.Log(ctx, level, "ghcr version read failed",
-				"package", ref.Owner+"/"+ref.Repo, "error", errTextForLog(err))
-		}
-		return registry.Detail{}, err
-	}
-	return registry.Detail{Tagged: tagged, Untagged: untagged}, nil
-}
-
 // scrapePackage scrapes one package's download count and its "Last
 // published" time. The caller reports and classifies failures. The error is
 // errHTMLFormatChanged for format drift in the download count and carries

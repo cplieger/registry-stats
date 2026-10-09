@@ -9,15 +9,12 @@ This page lists what registry-stats emits, how to load its Grafana dashboard, an
 - `registrystats_image_pulls_total{registry,owner,repo}`: the current pull count of each image.
 - `registrystats_collects_total{source}`: checks per registry, successful and failed.
 - `registrystats_collect_errors_total{source}`: failed checks per registry.
-- `registrystats_collect_duration_seconds`: a histogram of check durations, tag and version reads included.
+- `registrystats_collect_duration_seconds`: a histogram of check durations.
 - `registrystats_collect_last_success_timestamp_seconds{source}`: the last check in which most reads got an answer, a 404 included.
 - `registrystats_collect_complete{source}`: 1 when every read of the last check got an answer.
 - `registrystats_image_present{source,owner,repo}`: 1 when read, 0 when definitively absent.
 - `registrystats_image_last_pushed_timestamp_seconds{registry,owner,repo}`: GHCR's "Last published" time.
 - `registrystats_dockerhub_repository_updated_timestamp_seconds{owner,repo}`: Docker Hub's `last_updated` time.
-- `registrystats_dockerhub_tags{owner,repo}`: Docker Hub tag counts.
-- `registrystats_ghcr_versions{owner,repo,state}`: GHCR version counts.
-- `registrystats_details_oldest_read_timestamp_seconds{source}`: when the oldest count on show was read.
 - `registrystats_image_details_omitted{source}`: images past the detail cap.
 - `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds` and the other `process_*` series: runtime metrics.
 
@@ -27,7 +24,7 @@ A registry with no configured repos has no per-registry series.
 
 `GET /api/health` is the readiness check, which [How registry-stats works](how-it-works.md#health-and-readiness) explains.
 
-[Tags and versions](how-it-works.md#tags-and-versions) explains the 250-name cap on detail series and when presence reads 0.
+[Push times and presence](how-it-works.md#push-times-and-presence) explains the 250-name cap on detail series and when presence reads 0.
 
 ## Logs
 
@@ -41,17 +38,15 @@ registry-stats writes logfmt records to standard error, with UTC timestamps. Lev
 | `skipping unusable repo ref` | WARN | A repo list entry was rejected at start |
 | `ghcr HTML format may be changing, majority of scrapes hit format errors` | ERROR | GitHub changed its package pages |
 | `ghcr package field unreadable` | WARN | A package page had no readable push time |
-| `docker hub tag read failed`, `ghcr version read failed` | WARN or ERROR | A count read failed, at ERROR on a format change |
-| `detail reads stopped` | WARN | A rate limit stopped the tag or version reads until the next check |
 | `image details omitted` | WARN | More than 250 names are tracked |
 
 ## Dashboard
 
-[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It filters by registry, owner and repo, and adds Docker Hub and GHCR together per package until you turn on Split by registry. Its five tabs are Overview, Packages, History over the last year, Registries and tags, and Collector health, whose Job list scopes it to one scrape job.
+[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It filters by registry, owner and repo, and adds Docker Hub and GHCR together per package until you turn on Split by registry. Its three tabs are Overview, Packages and Collector health, whose Job list scopes it to one scrape job. Every download figure covers the dashboard time range, except the all-time total that Images nobody pulled shows beside each image. A chart's bar counts a whole hour, 6 hours or day, so the first bar can start before the range and the newest part of the range waits for its bar. A change compares it with the range of the same length just before it, and shows only once the counts reach back to the start of that earlier range.
 
 Registries out of step lists a package that one registry has and the other definitively does not, pairing images by owner and name. A GHCR package with a slash in its name is never compared, because a Docker Hub repository name cannot hold one. With `owner/*` on both, a package you publish to one registry on purpose stays listed while the configuration covers it. A stale or incomplete read, or a stopped collector, shows an Unknown row.
 
-Collector health shows the worst selected collector, except the checks-per-day and restarts panels, which add collectors up, and Check duration, which pools them. A collector counts once however many tenants hold its series, and a package counts once whether collectors read it together or in turn. The age colours and the 2-hour stale cutoff of Registries out of step assume the default hourly check, so a longer `POLL_INTERVAL_HOURS` reads stale between checks.
+Collector health shows the worst selected collector, except the checks and restarts panels, which add collectors up, and Check duration, which pools them. A collector counts once however many tenants hold its series, and a package counts once whether collectors read it together or in turn. The age colours and the 2-hour stale cutoff of Registries out of step assume the default hourly check, so a longer `POLL_INTERVAL_HOURS` reads stale between checks.
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or any Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The example compose publishes the port on `127.0.0.1`, so a collector on another host needs `"<trusted-ip>:9100:9100"` instead.
 2. Load the dashboard, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
@@ -165,7 +160,7 @@ None of these conditions has a metric, as the Alerting list above explains. A sk
 
 #### `RegistryStatsError`
 
-The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. A tag or version read whose response format changed is an `ERROR` too. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
+The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
 
 `/api/health` answers 503 at every start until the first check completes, and again during shutdown. The HTTP access log reports a 5xx at `ERROR`, so the second line filter excludes that one access record. The exclusion keys on the access record's own `msg`, so diagnostics a failing hook logs for the same request still reach the rule.
 

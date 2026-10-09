@@ -501,62 +501,6 @@ func parsePublished(html string) (time.Time, error) {
 	return published, nil
 }
 
-// maxVersionCountDigits bounds the printed version count, comma separators
-// included, well above any package GitHub can hold.
-const maxVersionCountDigits = 15
-
-// parseVersionCounts reads the tagged and untagged version totals a package's
-// versions page prints in its two filter links ("1,002 tagged", "2,215
-// untagged"). Each link must appear exactly once and print a plain count; a
-// count shown as a bound ("1000+") or in any other form fails closed, because
-// a lower bound published as a value would read as a real number.
-func parseVersionCounts(html string) (tagged, untagged int64, err error) {
-	if tagged, err = versionFilterCount(html, "tagged"); err != nil {
-		return 0, 0, err
-	}
-	if untagged, err = versionFilterCount(html, "untagged"); err != nil {
-		return 0, 0, err
-	}
-	return tagged, untagged, nil
-}
-
-func versionFilterCount(html, state string) (int64, error) {
-	marker := `versions?filters%5Bversion_type%5D=` + state + `">`
-	if n := strings.Count(html, marker); n != 1 {
-		return 0, fmt.Errorf("%w: %d %s-version filter links", errHTMLFormatChanged, n, state)
-	}
-	text, _, ok := strings.Cut(html[strings.Index(html, marker)+len(marker):], "</a>")
-	if !ok {
-		return 0, fmt.Errorf("%w: %s-version filter link does not close", errHTMLFormatChanged, state)
-	}
-	if i := strings.LastIndexByte(text, '>'); i >= 0 {
-		text = text[i+1:]
-	}
-	digits, ok := strings.CutSuffix(strings.Trim(text, htmlWhitespace), " "+state)
-	if !ok || len(digits) > maxVersionCountDigits || !plainCount(digits) {
-		return 0, fmt.Errorf("%w: %s-version filter link does not print a plain count", errHTMLFormatChanged, state)
-	}
-	count, err := strconv.ParseInt(strings.ReplaceAll(digits, ",", ""), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%w: parse %s-version count: %w", errHTMLFormatChanged, state, err)
-	}
-	return count, nil
-}
-
-// plainCount reports a digit run, or digits grouped in threes by commas after
-// a first group of one to three ("1,002").
-func plainCount(s string) bool {
-	groups := strings.Split(s, ",")
-	for i, g := range groups {
-		digits := g != "" && strings.Trim(g, "0123456789") == ""
-		grouped := len(groups) == 1 || len(g) == 3 || i == 0 && len(g) < 3
-		if !digits || !grouped {
-			return false
-		}
-	}
-	return true
-}
-
 // expandWildcard scrapes one wildcard owner's packages listing and appends
 // each new (deduplicated) package ref to packages. listingWhollyFailed is
 // true when the listing errored with no names at all: an unknown number of

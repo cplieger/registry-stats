@@ -191,10 +191,6 @@ func TestMetricsHandler_publishesSeriesUsedByShippedConsumers(t *testing.T) {
 	})
 	m.SetPresence([]Presence{{Source: registry.GHCR, Owner: "owner", Repo: "repo", Present: true}})
 	m.SetSources([]SourceCycle{{Source: registry.GHCR, Answered: true, Complete: true}}, at)
-	m.SetDetails([]DetailMetric{
-		{Registry: registry.DockerHub, Owner: "owner", Repo: "repo"},
-		{Registry: registry.GHCR, Owner: "owner", Repo: "repo"},
-	}, []DetailAge{{Source: registry.GHCR, Oldest: at}})
 	body := scrapeBody(t, m)
 
 	metricName := regexp.MustCompile(`registrystats_[a-z_]+`)

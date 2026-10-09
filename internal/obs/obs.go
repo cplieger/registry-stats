@@ -26,25 +26,14 @@ type Metrics struct {
 	lastSuccess     *metrics.LabeledGauge
 	complete        *metrics.LabeledGauge
 	omitted         *metrics.LabeledGauge
-	hubTags         *metrics.LabeledGauge
-	ghcrVersions    *metrics.LabeledGauge
-	detailsOldest   *metrics.LabeledGauge
 	prevPulls       map[imageKey]bool
 	prevPushed      map[imageKey]bool
 	prevUpdated     map[imageKey]bool
 	prevPresent     map[imageKey]bool
-	prevDetails     map[imageKey]bool
-	prevOldest      map[string]bool
 }
 
 // imageKey is a per-image series identity: the registry label, owner, repo.
 type imageKey [3]string
-
-// The two GHCR version states registrystats_ghcr_versions publishes.
-const (
-	stateTagged   = "tagged"
-	stateUntagged = "untagged"
-)
 
 // Label names the per-image and per-source families share.
 const (
@@ -112,22 +101,7 @@ func New() *Metrics {
 		),
 		omitted: metrics.NewLabeledGauge(
 			"image_details_omitted",
-			"Images past the detail cap, which get no push time, presence, tag or version series",
-			[]string{labelSource},
-		),
-		hubTags: metrics.NewLabeledGauge(
-			"dockerhub_tags",
-			"Tag count per Docker Hub repository",
-			[]string{labelOwner, labelRepo},
-		),
-		ghcrVersions: metrics.NewLabeledGauge(
-			"ghcr_versions",
-			"Version count per GHCR package and state",
-			[]string{labelOwner, labelRepo, "state"},
-		),
-		detailsOldest: metrics.NewLabeledGauge(
-			"details_oldest_read_timestamp_seconds",
-			"Read time of the oldest tag or version count published per source",
+			"Images past the detail cap, which get no push time or presence series",
 			[]string{labelSource},
 		),
 	}
@@ -142,9 +116,6 @@ func New() *Metrics {
 		m.lastSuccess,
 		m.complete,
 		m.omitted,
-		m.hubTags,
-		m.ghcrVersions,
-		m.detailsOldest,
 	)
 	return m
 }
@@ -196,7 +167,7 @@ type ImageMetric struct {
 
 // SetImage replaces the per-image gauges for one collect cycle. images is the
 // whole population this cycle MEASURED: every key absent from it is retired with
-// all of its series, tag and version counts included, so an absent series means
+// all of its series, so an absent series means
 // this cycle did not measure that image (RegistryStatsCollectionIncomplete in
 // alerts/logql.yaml names the causes). Values are Set in place and departed
 // series Deleted one by one, so a series present in both cycles never vanishes
@@ -226,13 +197,6 @@ func (m *Metrics) SetImage(images []ImageMetric) {
 	retire(m.prevPushed, pushed, func(k imageKey) { m.lastPushed.Delete(k[0], k[1], k[2]) })
 	retire(m.prevUpdated, updated, func(k imageKey) { m.repoUpdated.Delete(k[1], k[2]) })
 	m.prevPulls, m.prevPushed, m.prevUpdated = pulls, pushed, updated
-
-	for key := range m.prevDetails {
-		if !pulls[key] {
-			m.deleteDetail(key)
-			delete(m.prevDetails, key)
-		}
-	}
 }
 
 // Presence is one detailed image's presence on a source whose configuration
@@ -287,65 +251,6 @@ func (m *Metrics) SetSources(sources []SourceCycle, at time.Time) {
 		if s.Answered {
 			m.lastSuccess.Set(unixSeconds(at), label)
 		}
-	}
-}
-
-// DetailMetric is one image's tag and version counts.
-type DetailMetric struct {
-	Owner    string
-	Repo     string
-	Detail   registry.Detail
-	Registry registry.ID
-}
-
-// DetailAge is the read time of a source's oldest published detail.
-type DetailAge struct {
-	Oldest time.Time
-	Source registry.ID
-}
-
-// SetDetails replaces the tag and version gauges and the per-source oldest
-// read time. Docker Hub publishes Detail.Tagged as its tag count; GHCR
-// publishes both version states.
-func (m *Metrics) SetDetails(details []DetailMetric, ages []DetailAge) {
-	current := make(map[imageKey]bool, len(details))
-	for _, d := range details {
-		key := imageKey{d.Registry.String(), d.Owner, d.Repo}
-		switch d.Registry {
-		case registry.DockerHub:
-			m.hubTags.Set(float64(d.Detail.Tagged), d.Owner, d.Repo)
-		case registry.GHCR:
-			m.ghcrVersions.Set(float64(d.Detail.Tagged), d.Owner, d.Repo, stateTagged)
-			m.ghcrVersions.Set(float64(d.Detail.Untagged), d.Owner, d.Repo, stateUntagged)
-		default:
-			continue
-		}
-		current[key] = true
-	}
-	retire(m.prevDetails, current, m.deleteDetail)
-	m.prevDetails = current
-
-	oldest := make(map[string]bool, len(ages))
-	for _, a := range ages {
-		label := a.Source.String()
-		m.detailsOldest.Set(unixSeconds(a.Oldest), label)
-		oldest[label] = true
-	}
-	for label := range m.prevOldest {
-		if !oldest[label] {
-			m.detailsOldest.Delete(label)
-		}
-	}
-	m.prevOldest = oldest
-}
-
-func (m *Metrics) deleteDetail(k imageKey) {
-	switch k[0] {
-	case registry.DockerHub.String():
-		m.hubTags.Delete(k[1], k[2])
-	case registry.GHCR.String():
-		m.ghcrVersions.Delete(k[1], k[2], stateTagged)
-		m.ghcrVersions.Delete(k[1], k[2], stateUntagged)
 	}
 }
 

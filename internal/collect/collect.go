@@ -17,12 +17,9 @@ import (
 // URL unchecked; Repo "*" is an owner-wide ref to expand, and a GHCR Repo is a
 // decoded package name that needs url.PathEscape (see urlsafe.PackageName).
 // Collect returns entries with non-empty Owner and Repo, the pair obs keys on.
-// ReadDetail logs its own failures; an error matching httpx.ErrRateLimited stops
-// the source's detail reads for the cycle.
 type Source interface {
 	Source() registry.ID
 	Collect(ctx context.Context, refs []registry.RepoRef) registry.Collection
-	ReadDetail(ctx context.Context, ref registry.RepoRef) (registry.Detail, error)
 }
 
 // SourceRefs binds a selected source to the canonical refs it will collect.
@@ -93,6 +90,7 @@ func Run(ctx context.Context, opts Options) Cycle {
 		return Cycle{Images: images}
 	}
 
+	opts.Metrics.ObserveCollectDuration(time.Since(start))
 	cycle := account(results)
 	cycle.Finished = time.Now()
 
