@@ -20,7 +20,7 @@ import (
 	"github.com/cplieger/registry-stats/internal/pacing"
 	"github.com/cplieger/registry-stats/internal/registry"
 	"github.com/cplieger/registry-stats/internal/urlsafe"
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // Docker Hub refuses an anonymous owner-listing offset at 100, so pageSize 99
