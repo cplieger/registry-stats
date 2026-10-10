@@ -5,14 +5,15 @@
 <!-- hub-overview BEGIN -->
 registry-stats graphs the pull counts that Docker Hub and GitHub Container Registry report for your public images, on a ready-made Grafana dashboard. Your Prometheus server scrapes the current counts and keeps the history, so the graphs begin on the day you start registry-stats.
 
-![The bundled Grafana dashboard's overview: downloads over the selected period and the change from the period before, the latest pushes, daily downloads by registry, and the packages that need attention](docs/images/header.png)
+![The bundled Grafana dashboard's overview: downloads over the selected period and the change from the period before, an attention tile for a package missing from a registry, the most downloaded packages and the ones that grew most, and downloads by registry](docs/images/header.png)
 
 ## What it does
 
 registry-stats helps you follow the pull counts of your published images over time:
 
 - Graphs each package's downloads over days, weeks and a year, both registries combined or apart.
-- Lists packages missing from a registry and the latest pushes.
+- Shows the most downloaded packages and the ones that grew most, and lists packages missing from a registry and the latest pushes.
+- Lights a dashboard tile only while something needs you, such as a stopped collector, a failed check or a count that went down.
 - Picks up an owner's public images with `owner/*` on every check, new ones included, up to 198 Docker Hub repositories or 50 GHCR listing pages per owner.
 - Ships alert rules for a stopped collector, a failing registry and a pull count that drops.
 
