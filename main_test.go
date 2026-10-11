@@ -523,8 +523,8 @@ func TestRunCollect_anEmptyCycleRecordsDuration(t *testing.T) {
 }
 
 // TestRunCollect_aPackageMissingFromDockerHubPublishesAFreshAbsence pins the
-// series Registries out of step needs for its "Not on Docker Hub now" row when
-// Docker Hub answers 404 for a package GHCR holds: presence 0, a complete read and
+// series the Missing from a registry tile needs to count a package absent from
+// Docker Hub when it answers 404 for a package GHCR holds: presence 0, a complete read and
 // a fresh last success. The 404 still counts as a failed Docker Hub check.
 func TestRunCollect_aPackageMissingFromDockerHubPublishesAFreshAbsence(t *testing.T) {
 	app := registry.RepoRef{Owner: "o", Repo: "app"}

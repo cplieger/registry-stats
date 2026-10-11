@@ -128,8 +128,8 @@ func TestRun_CompleteOnlyWhenEveryReadWasDefinitive(t *testing.T) {
 	}
 }
 
-// TestRun_PresenceSeparatesNotConfiguredFromAbsent pins the presence rules the two
-// missing-package rows of Registries out of step read: no series where the
+// TestRun_PresenceSeparatesNotConfiguredFromAbsent pins the presence rules the
+// Missing from a registry tile reads: no series where the
 // configuration does not cover a name or the read was not definitive, 0 only for a
 // definitive absence.
 func TestRun_PresenceSeparatesNotConfiguredFromAbsent(t *testing.T) {
