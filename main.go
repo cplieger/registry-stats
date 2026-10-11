@@ -23,7 +23,7 @@ import (
 	"github.com/cplieger/registry-stats/internal/obs"
 	"github.com/cplieger/registry-stats/internal/registry"
 	"github.com/cplieger/registry-stats/internal/webapi"
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/slogx"
 	"github.com/cplieger/webhttp/v3"
