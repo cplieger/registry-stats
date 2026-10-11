@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"encoding/json"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -119,91 +120,13 @@ func panelByTitle(t *testing.T, panels map[string]dashPanel, title string) dashP
 	return dashPanel{}
 }
 
-// topLevelArms splits expr at every " or " outside parentheses and quotes.
-func topLevelArms(expr string) []string {
-	var arms []string
-	depth, start, quoted := 0, 0, false
-	for i := range len(expr) {
-		switch c := expr[i]; {
-		case c == '"' && (i == 0 || expr[i-1] != '\\'):
-			quoted = !quoted
-		case quoted:
-		case c == '(':
-			depth++
-		case c == ')':
-			depth--
-		case depth == 0 && strings.HasPrefix(expr[i:], " or "):
-			arms = append(arms, expr[start:i])
-			start = i + len(" or ")
-		}
-	}
-	return append(arms, expr[start:])
-}
-
-// collectorJoin appends the collector to the status of every Registries out of step row.
-const collectorJoin = `, "status", " · ", "status", "instance")`
-
-// statusChain returns the or-chain the collector join wraps, or "" when no
-// label_join wraps a parenthesized chain with collectorJoin.
-func statusChain(expr string) string {
-	const join = "label_join(("
-	at := strings.Index(expr, join)
-	if at < 0 {
-		return ""
-	}
-	rest := expr[at+len(join)-1:]
-	depth, quoted := 0, false
-	for i := range len(rest) {
-		switch c := rest[i]; {
-		case c == '"' && (i == 0 || rest[i-1] != '\\'):
-			quoted = !quoted
-		case quoted:
-		case c == '(':
-			depth++
-		case c == ')':
-			depth--
-			if depth == 0 {
-				if !strings.HasPrefix(rest[i+1:], collectorJoin) {
-					return ""
-				}
-				return rest[1:i]
-			}
-		}
-	}
-	return ""
-}
-
-// Every arm of Registries out of step names its row through a status label, and
-// the status names the collector after it, so a row never reaches the table
-// without the reason it is there or the collector that read it.
-func TestDashboard_OutOfStepArmsEachCarryAStatus(t *testing.T) {
-	p := panelByTitle(t, loadPanels(t), "Registries out of step")
-	if len(p.Spec.Data.Spec.Queries) != 1 {
-		t.Fatalf("Registries out of step has %d queries, want 1", len(p.Spec.Data.Spec.Queries))
-	}
-	expr := p.Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr
-	chain := statusChain(expr)
-	if chain == "" {
-		t.Fatalf("Registries out of step does not append the collector to the status through label_join(..%s: %.160s", collectorJoin, expr)
-	}
-	arms := topLevelArms(chain)
-	if len(arms) != 5 {
-		t.Errorf("Registries out of step has %d arms, want 5 (two missing-package arms and three Unknown arms)", len(arms))
-	}
-	status := regexp.MustCompile(`^\(label_replace\(.*, "status", "[^"]+", "", ""\)`)
-	for i, arm := range arms {
-		if !status.MatchString(arm) {
-			t.Errorf("Registries out of step arm %d does not set a status label through label_replace: %.120s", i+1, arm)
-		}
-	}
-}
-
 var byClause = regexp.MustCompile(`\b(\w+) by \(([^)]*)\)`)
 
 // perRegistryByDesign are panels whose subject is a registry's own number, so
 // they keep the registry whatever Split by registry says.
 var perRegistryByDesign = map[string]string{
 	"Counts that went down in ${span} ${spanunit}": "a drop is one registry restating its total",
+	"Counts that went down":                        "a drop is one registry restating its total",
 }
 
 // Every downloads query groups an image by owner and repo, and adds the registry
@@ -648,17 +571,25 @@ func loadDoc(t *testing.T) map[string]any {
 
 func autoGridRules(t *testing.T) map[string]any {
 	t.Helper()
-	doc := loadDoc(t)
 	rules := map[string]any{}
+	for _, item := range autoGridItems(t) {
+		name, _ := dig(item, "element", "name").(string)
+		rules[name] = item["conditionalRendering"]
+	}
+	return rules
+}
+
+// autoGridItems returns the spec of every AutoGridLayoutItem in the dashboard.
+func autoGridItems(t *testing.T) []map[string]any {
+	t.Helper()
+	var items []map[string]any
 	var walk func(v any)
 	walk = func(v any) {
 		switch n := v.(type) {
 		case map[string]any:
 			if n["kind"] == "AutoGridLayoutItem" {
 				spec, _ := n["spec"].(map[string]any)
-				element, _ := spec["element"].(map[string]any)
-				name, _ := element["name"].(string)
-				rules[name] = spec["conditionalRendering"]
+				items = append(items, spec)
 			}
 			for _, child := range n {
 				walk(child)
@@ -669,45 +600,86 @@ func autoGridRules(t *testing.T) map[string]any {
 			}
 		}
 	}
-	walk(doc)
-	return rules
+	walk(loadDoc(t))
+	return items
 }
 
-func showsOnlyWithData(rule any) bool {
-	group, _ := rule.(map[string]any)
-	spec, _ := group["spec"].(map[string]any)
-	items, _ := spec["items"].([]any)
-	if group["kind"] != "ConditionalRenderingGroup" || spec["visibility"] != "show" || len(items) == 0 {
-		return false
-	}
+func ruleKinds(rule any) []string {
+	items, _ := dig(rule, "spec", "items").([]any)
+	kinds := make([]string, 0, len(items))
 	for _, it := range items {
-		item, _ := it.(map[string]any)
-		itemSpec, _ := item["spec"].(map[string]any)
-		if item["kind"] != "ConditionalRenderingData" || itemSpec["value"] != true {
-			return false
+		kind, _ := dig(it, "kind").(string)
+		kinds = append(kinds, kind)
+	}
+	return kinds
+}
+
+// startsHiddenUntilData returns why rule does not keep its panel hidden until the query
+// returns data, or "". Grafana 13.2.3 shows an item while its has-data rule is undecided,
+// on load and on every refresh slower than 200 ms (grafana/grafana#134713), so an "any"
+// group adds a range-size rule that is always false. A display: none panel measures no
+// width, so its query runs only with a pinned maxDataPoints.
+func startsHiddenUntilData(rule any, panel map[string]any) string {
+	items, _ := dig(rule, "spec", "items").([]any)
+	if dig(rule, "kind") != "ConditionalRenderingGroup" || dig(rule, "spec", "visibility") != "show" ||
+		dig(rule, "spec", "condition") != "or" || len(items) != 2 {
+		return "want a show group matching any of two rules"
+	}
+	hasData, neverTrue := false, false
+	for _, it := range items {
+		switch dig(it, "kind") {
+		case "ConditionalRenderingData":
+			hasData = dig(it, "spec", "value") == true
+		case "ConditionalRenderingTimeRangeSize":
+			neverTrue = dig(it, "spec", "value") == "0s"
 		}
 	}
-	return true
+	if !hasData || !neverTrue {
+		return `want a has-data rule and a time range size rule of "0s"`
+	}
+	if points, _ := dig(panel, "data", "spec", "queryOptions", "maxDataPoints").(float64); points < 1 || points != float64(int(points)) {
+		return "want a positive whole queryOptions.maxDataPoints on the panel"
+	}
+	return ""
 }
 
 var badCaseFilter = regexp.MustCompile(`\s(?:[<>]=?|[!=]=)\s+-?\d|\bunless\b`)
 
-// An attention tile (a stat painted on a coloured background) is hidden until its
-// condition holds: Grafana honours a "has data" rule only on an auto-grid item, and
-// a query that returns a 0 for the healthy case would keep the tile on screen.
-func TestDashboard_AttentionTilesShowOnlyWhileTheirConditionHolds(t *testing.T) {
-	rules := autoGridRules(t)
-	tiles := 0
+// hiddenTables are the tables whose normal state is empty, so they show only with rows.
+var hiddenTables = []string{"Not pulled in ${span} ${spanunit}"}
+
+// hiddenPanels returns the attention tiles, stats painted on a coloured background, and
+// the hiddenTables.
+func hiddenPanels(t *testing.T) map[string]dashPanel {
+	t.Helper()
+	hidden := map[string]dashPanel{}
 	for name, p := range loadPanels(t) {
-		if p.Spec.VizConfig.Group != "stat" || p.Spec.VizConfig.Spec.Options.ColorMode != "background" {
-			continue
+		tile := p.Spec.VizConfig.Group == "stat" && p.Spec.VizConfig.Spec.Options.ColorMode == "background"
+		if tile || slices.Contains(hiddenTables, p.Spec.Title) {
+			hidden[name] = p
 		}
+	}
+	return hidden
+}
+
+// An attention tile or a hidden table stays hidden until its condition holds: Grafana
+// honours a "has data" rule only on an auto-grid item, and a query that returns a 0 or
+// a row for the healthy case would keep the panel on screen.
+func TestDashboard_HiddenPanelsShowOnlyWhileTheirConditionHolds(t *testing.T) {
+	rules := autoGridRules(t)
+	specs := panelSpecs(t)
+	tiles := 0
+	hidden := hiddenPanels(t)
+	for _, title := range hiddenTables {
+		panelByTitle(t, loadPanels(t), title)
+	}
+	for name, p := range hidden {
 		tiles++
 		rule, placed := rules[name]
 		if !placed {
 			t.Errorf("%s %q is not placed by an AutoGridLayoutItem, so no rule can hide it", name, p.Spec.Title)
-		} else if !showsOnlyWithData(rule) {
-			t.Errorf("%s %q conditionalRendering = %v, want a show group of has-data rules", name, p.Spec.Title, rule)
+		} else if why := startsHiddenUntilData(rule, specs[name]); why != "" {
+			t.Errorf("%s %q conditionalRendering %v: %s", name, p.Spec.Title, ruleKinds(rule), why)
 		}
 		for _, q := range p.Spec.Data.Spec.Queries {
 			if e := q.Spec.Query.Spec.Expr; !badCaseFilter.MatchString(e) {
@@ -715,9 +687,202 @@ func TestDashboard_AttentionTilesShowOnlyWhileTheirConditionHolds(t *testing.T) 
 			}
 		}
 	}
-	if tiles == 0 {
+	if tiles <= len(hiddenTables) {
 		t.Error("no attention tile found; the pattern no longer reads the dashboard")
 	}
+}
+
+// Any auto-grid item a has-data rule gates, attention tile or not, starts hidden.
+func TestDashboard_DataGatedItemsStartHidden(t *testing.T) {
+	specs := panelSpecs(t)
+	gated := 0
+	for _, item := range autoGridItems(t) {
+		rule := item["conditionalRendering"]
+		if !slices.Contains(ruleKinds(rule), "ConditionalRenderingData") {
+			continue
+		}
+		gated++
+		name, _ := dig(item, "element", "name").(string)
+		if why := startsHiddenUntilData(rule, specs[name]); why != "" {
+			t.Errorf("%s %v conditionalRendering %v: %s", name, specs[name]["title"], ruleKinds(rule), why)
+		}
+	}
+	if gated == 0 {
+		t.Error("no auto-grid item gated by a has-data rule found; the pattern no longer reads the dashboard")
+	}
+}
+
+// Without preload a lit tile below the fold sits in a lazy loader: it skips a refresh until
+// it is scrolled to, then queries, blinks and reflows the panels under it.
+func TestDashboard_PreloadsSoGatedPanelsBelowTheFoldRefresh(t *testing.T) {
+	if preload := dig(loadDoc(t), "spec", "preload"); preload != true {
+		t.Errorf("spec.preload = %v, want true", preload)
+	}
+}
+
+type tabLink struct {
+	title  string
+	tab    string
+	macros []string
+	sets   url.Values
+}
+
+// tabLinks returns every panel link that opens a tab of this dashboard, by panel name:
+// one to ${__url.path}, or to /d/ and this dashboard's uid.
+func tabLinks(t *testing.T) map[string][]tabLink {
+	t.Helper()
+	uid, _ := dig(loadDoc(t), "metadata", "name").(string)
+	links := map[string][]tabLink{}
+	for name, spec := range panelSpecs(t) {
+		raw, _ := spec["links"].([]any)
+		for _, l := range raw {
+			target, _ := dig(l, "url").(string)
+			path, query, _ := strings.Cut(target, "?")
+			if path != "${__url.path}" && path != "/d/"+uid && !strings.HasPrefix(path, "/d/"+uid+"/") {
+				continue
+			}
+			link := tabLink{sets: url.Values{}}
+			link.title, _ = dig(l, "title").(string)
+			for part := range strings.SplitSeq(query, "&") {
+				if strings.HasPrefix(part, "${") {
+					link.macros = append(link.macros, part)
+					continue
+				}
+				values, err := url.ParseQuery(part)
+				if err != nil {
+					t.Fatalf("%s link %q: parse %q: %v", name, link.title, part, err)
+				}
+				for k, v := range values {
+					link.sets[k] = append(link.sets[k], v...)
+				}
+			}
+			link.tab = link.sets.Get("dtab")
+			links[name] = append(links[name], link)
+		}
+	}
+	return links
+}
+
+var spaceRun = regexp.MustCompile(` +`)
+
+// tabSlugs returns each tab's dtab value and the dtab of the tab holding each panel.
+// Grafana 13.2.3 turns each run of spaces in the title into a dash, and a later tab
+// repeating an earlier slug gets __2, __3 and so on (getSlugForRowOrTab,
+// public/app/features/dashboard-scene/utils/utils.ts).
+func tabSlugs(doc map[string]any) (slugs []string, tabOf map[string]string) {
+	tabs, _ := dig(doc, "spec", "layout", "spec", "tabs").([]any)
+	repeats := map[string]int{}
+	tabOf = map[string]string{}
+	for _, tab := range tabs {
+		title, _ := dig(tab, "spec", "title").(string)
+		slug := spaceRun.ReplaceAllString(title, "-")
+		repeats[slug]++
+		if n := repeats[slug]; n > 1 {
+			slug += "__" + strconv.Itoa(n)
+		}
+		slugs = append(slugs, slug)
+		for _, name := range elementNames(tab) {
+			tabOf[name] = slug
+		}
+	}
+	return slugs, tabOf
+}
+
+func elementNames(v any) []string {
+	var names []string
+	switch n := v.(type) {
+	case map[string]any:
+		if name, ok := n["name"].(string); ok && n["kind"] == "ElementReference" {
+			names = append(names, name)
+		}
+		for _, child := range n {
+			names = append(names, elementNames(child)...)
+		}
+	case []any:
+		for _, child := range n {
+			names = append(names, elementNames(child)...)
+		}
+	}
+	return names
+}
+
+// A link to another tab keeps the time range and every filter on screen, so the tab
+// it opens shows the same packages over the same range. A switch it sets literally
+// must hold one of the switch's own values, or the tab opens with the switch off.
+func TestDashboard_TabLinksKeepTheRangeAndFilters(t *testing.T) {
+	doc := loadDoc(t)
+	slugs, tabOf := tabSlugs(doc)
+	docVars, _ := dig(doc, "spec", "variables").([]any)
+	checked := 0
+	for name, links := range tabLinks(t) {
+		for _, link := range links {
+			checked++
+			if !slices.Contains(slugs, link.tab) {
+				t.Errorf("%s link %q opens dtab=%q, want one of %v", name, link.title, link.tab, slugs)
+			}
+			if link.tab == tabOf[name] {
+				t.Errorf("%s link %q opens dtab=%q, the tab the panel is on", name, link.title, link.tab)
+			}
+			if !slices.Contains(link.macros, "${__url_time_range}") {
+				t.Errorf("%s link %q does not carry ${__url_time_range}", name, link.title)
+			}
+			all := slices.Contains(link.macros, "${__all_variables}")
+			for _, v := range docVars {
+				spec, _ := dig(v, "spec").(map[string]any)
+				varName, _ := spec["name"].(string)
+				set, literal := link.sets["var-"+varName]
+				if literal && dig(v, "kind") == "SwitchVariable" &&
+					set[0] != spec["enabledValue"] && set[0] != spec["disabledValue"] {
+					t.Errorf("%s link %q sets var-%s=%q, want the switch's enabledValue %q or disabledValue %q",
+						name, link.title, varName, set[0], spec["enabledValue"], spec["disabledValue"])
+				}
+				carried := all || literal || slices.Contains(link.macros, "${"+varName+":queryparam}")
+				if spec["hide"] == "dontHide" && !carried {
+					t.Errorf("%s link %q drops the %s filter: want ${__all_variables}, ${%s:queryparam} or var-%s",
+						name, link.title, varName, varName, varName)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Error("no link to a tab found; the pattern no longer reads the dashboard")
+	}
+}
+
+// Missing from a registry is a count; the packages behind it are the single-registry
+// rows of Package downloads, which exist only with Split by registry on.
+func TestDashboard_MissingFromARegistryLinkSplitsByRegistry(t *testing.T) {
+	doc := loadDoc(t)
+	_, split := variable(doc, "split")
+	_, tabOf := tabSlugs(doc)
+	panels := loadPanels(t)
+	detailTab := ""
+	for name, p := range panels {
+		if strings.HasPrefix(p.Spec.Title, "Package downloads in ") {
+			detailTab = tabOf[name]
+		}
+	}
+	if detailTab == "" {
+		t.Fatal(`Setup: no tab holds a panel titled "Package downloads in ..."`)
+	}
+	links := tabLinks(t)
+	for name, p := range panels {
+		if p.Spec.Title != "Missing from a registry" {
+			continue
+		}
+		if len(links[name]) != 1 {
+			t.Fatalf("%s has %d links to a tab, want 1", name, len(links[name]))
+		}
+		link := links[name][0]
+		if link.tab != detailTab {
+			t.Errorf("link %q opens dtab=%q, want %q, the tab holding Package downloads", link.title, link.tab, detailTab)
+		}
+		if got := link.sets["var-split"]; len(got) != 1 || got[0] != split["enabledValue"] {
+			t.Errorf("link %q sets var-split to %q, want the switch's enabledValue %q", link.title, got, split["enabledValue"])
+		}
+		return
+	}
+	t.Fatal(`Setup: no panel titled "Missing from a registry"`)
 }
 
 func rowsPlacing(t *testing.T, doc map[string]any) map[string]map[string]any {
@@ -787,18 +952,15 @@ func variableQuery(doc map[string]any, name string) string {
 	return text
 }
 
-// Hidden attention tiles live in a row that a hidden variable shows, because an empty
-// row still draws its header. The variable counts every tile's own query and nothing
-// else, so the row shows exactly while one of its tiles has data.
-func TestDashboard_AttentionRowShowsWhileAnyTileHasData(t *testing.T) {
+// Hidden panels live in a row that a hidden variable shows, because an empty row
+// still draws its header. The variable counts every panel's own query and nothing
+// else, so the row shows exactly while one of its panels has data.
+func TestDashboard_HiddenPanelRowsShowWhileAnyPanelHasData(t *testing.T) {
 	doc := loadDoc(t)
 	rows := rowsPlacing(t, doc)
 	tiles := 0
 	arms := map[string]int{}
-	for name, p := range loadPanels(t) {
-		if p.Spec.VizConfig.Group != "stat" || p.Spec.VizConfig.Spec.Options.ColorMode != "background" {
-			continue
-		}
+	for name, p := range hiddenPanels(t) {
 		tiles++
 		row := rows[name]
 		variable := variableRule(row["conditionalRendering"])
@@ -816,72 +978,166 @@ func TestDashboard_AttentionRowShowsWhileAnyTileHasData(t *testing.T) {
 			}
 		}
 	}
-	if tiles == 0 {
+	if tiles <= len(hiddenTables) {
 		t.Error("no attention tile found; the pattern no longer reads the dashboard")
 	}
 	for variable, want := range arms {
 		if got := strings.Count(variableQuery(doc, variable), `, "tile", "`); got != want {
-			t.Errorf("variable %s counts %d arms, want %d, one per tile query", variable, got, want)
+			t.Errorf("variable %s counts %d arms, want %d, one per hidden panel query", variable, got, want)
 		}
 	}
 }
 
-const spanTitle = "${span} ${spanunit}"
+// rangeWordVars are the variables a title names the range's length with.
+var rangeWordVars = []string{"span", "spanunit", "spanthe"}
+
+// customText is the text Grafana gives a custom variable whose interpolated query
+// is query, which titles render. The parse follows
+// CustomVariable.transformCsvStringToOptions,
+// https://github.com/grafana/scenes/blob/main/packages/scenes/src/variables/variants/CustomVariable.tsx.
+// More than one option would let Grafana keep a stale choice, so it fails.
+func customText(t *testing.T, name, query string) string {
+	t.Helper()
+	entries := regexp.MustCompile(`(?:\\,|[^,])+`).FindAllString(query, -1)
+	if len(entries) != 1 {
+		t.Errorf("variable %s query %q gives %d options, want 1", name, query, len(entries))
+		return ""
+	}
+	if m := regexp.MustCompile(`^\s*(.+)\s:\s(.+)$`).FindStringSubmatch(entries[0]); m != nil {
+		return strings.TrimSpace(m[1])
+	}
+	return strings.TrimSpace(entries[0])
+}
+
+// rangeWords is the text of each range word variable once spanread holds the
+// option Grafana makes of row, or none at all (""), as on a failed first read.
+func rangeWords(t *testing.T, doc map[string]any, row string) map[string]string {
+	t.Helper()
+	_, read := variable(doc, "spanread")
+	pattern, _ := read["regex"].(string)
+	re, err := regexp.Compile(strings.TrimSuffix(strings.TrimPrefix(pattern, "/"), "/"))
+	if err != nil || re.SubexpIndex("value") < 0 || re.SubexpIndex("text") < 0 {
+		t.Fatalf("spanread regex %q: %v, want value and text groups", pattern, err)
+	}
+	var value, text string
+	if row != "" {
+		m := re.FindStringSubmatch(row)
+		if m == nil {
+			t.Fatalf("spanread regex %q does not match %s", pattern, row)
+		}
+		value, text = m[re.SubexpIndex("value")], m[re.SubexpIndex("text")]
+	}
+	fill := strings.NewReplacer("${spanread:text}", text, "${spanread}", value)
+	words := map[string]string{}
+	for _, name := range rangeWordVars {
+		_, vs := variable(doc, name)
+		query, _ := vs["query"].(string)
+		words[name] = customText(t, name, fill.Replace(query))
+	}
+	return words
+}
 
 // A figure over the dashboard time range reads only with the range's length, so every
-// panel outside the charts whose query reads $__range names it through the span
-// variables. They follow the time picker, and their saved values make a title read
-// "the range" while their query cannot run, so a title's own "the" is spanthe, which
-// saves none. Grafana prints a query_result row as "{labels} value timestamp", which
-// each variable's regex takes apart.
+// panel outside the charts whose query reads $__range names it, "Downloads in 30 days",
+// and reads "Downloads in the range" until the length is read or when its first read
+// fails. A comparison keeps its article, "Change from the 30 days before". Every word
+// comes from the one answer of spanread, so no title mixes two reads ("in 30 range")
+// while they arrive. The lengths are spanread's query run at each side of every unit's
+// threshold and at decimal roundings.
 func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 	doc := loadDoc(t)
-	for _, v := range []struct{ name, saved, row, fromRow string }{
-		{"span", "the", `{u="days"} 2.6 1791585738061`, "2.6"},
-		{"spanunit", "range", `{u="days"} 2.6 1791585738061`, "days"},
-		{"spanthe", "", `{w="the"} 2592000 1791585738061`, "the"},
-	} {
-		kind, vs := variable(doc, v.name)
-		if kind != "QueryVariable" || vs["refresh"] != "onTimeRangeChanged" || vs["hide"] != "hideVariable" {
-			t.Errorf("variable %s is %s refresh %v hide %v, want a hidden QueryVariable refreshed on time range change",
-				v.name, cmp.Or(kind, "missing"), vs["refresh"], vs["hide"])
-			continue
+	kind, read := variable(doc, "spanread")
+	if kind != "QueryVariable" || read["refresh"] != "onTimeRangeChanged" || read["hide"] != "hideVariable" {
+		t.Fatalf("spanread is %s refresh %v hide %v, want a hidden QueryVariable refreshed on time range change",
+			cmp.Or(kind, "missing"), read["refresh"], read["hide"])
+	}
+	if current, _ := read["current"].(map[string]any); current["text"] != "" || current["value"] != "" {
+		t.Errorf("spanread saves %v, want it empty so a failed first read leaves the fallback", current)
+	}
+	docSpec, _ := doc["spec"].(map[string]any)
+	vars, _ := docSpec["variables"].([]any)
+	for _, v := range vars {
+		name, _ := dig(v, "spec", "name").(string)
+		if q, _ := json.Marshal(dig(v, "spec", "query")); name != "spanread" && strings.Contains(string(q), "$__range_s") {
+			t.Errorf("variable %s reads $__range_s, want spanread the only read of the range length", name)
 		}
-		if q := variableQuery(doc, v.name); !strings.Contains(q, "$__range_s") {
-			t.Errorf("variable %s query %.120s does not read $__range_s", v.name, q)
+	}
+	if !strings.Contains(variableQuery(doc, "spanread"), "$__range_s") {
+		t.Error("spanread does not read $__range_s")
+	}
+	ref := regexp.MustCompile(`\$\{?(\w+)`)
+	for _, name := range rangeWordVars {
+		kind, vs := variable(doc, name)
+		query, _ := vs["query"].(string)
+		if kind != "CustomVariable" || vs["hide"] != "hideVariable" {
+			t.Errorf("variable %s is %s hide %v, want a hidden CustomVariable", name, cmp.Or(kind, "missing"), vs["hide"])
 		}
-		current, _ := vs["current"].(map[string]any)
-		if current["text"] != v.saved || current["value"] != v.saved {
-			t.Errorf("variable %s saves %v, want %q so a title reads the range while the query fails", v.name, current, v.saved)
+		refs := ref.FindAllStringSubmatch(query, -1)
+		for _, m := range refs {
+			if m[1] != "spanread" {
+				t.Errorf("variable %s query %q reads $%s, want it to depend only on spanread", name, query, m[1])
+			}
 		}
-		pattern, _ := vs["regex"].(string)
-		re, err := regexp.Compile(strings.TrimSuffix(strings.TrimPrefix(pattern, "/"), "/"))
-		if err != nil {
-			t.Errorf("variable %s regex %q: %v", v.name, pattern, err)
-			continue
+		if len(refs) == 0 {
+			t.Errorf("variable %s query %q does not read spanread", name, query)
 		}
-		if m := re.FindStringSubmatch(v.row); len(m) != 2 || m[1] != v.fromRow {
-			t.Errorf("variable %s regex %q takes %v from %s, want %q", v.name, pattern, m, v.row, v.fromRow)
+	}
+	lengths := []struct {
+		rangeS int
+		want   string
+	}{
+		{45, "45 seconds"},
+		{119, "119 seconds"},
+		{120, "2 minutes"},
+		{150, "3 minutes"},
+		{7199, "120 minutes"},
+		{7200, "2 hours"},
+		{19980, "5.6 hours"},
+		{172799, "48 hours"},
+		{172800, "2 days"},
+		{216000, "2.5 days"},
+		{280800, "3.3 days"},
+		{2592000, "30 days"},
+	}
+	reads := make([]map[string]string, len(lengths))
+	for i, l := range lengths {
+		reads[i] = rangeWords(t, doc, queryResultRow(t, variableQuery(doc, "spanread"), l.rangeS))
+	}
+	none := rangeWords(t, doc, "")
+	for _, name := range rangeWordVars {
+		_, vs := variable(doc, name)
+		if current, _ := vs["current"].(map[string]any); current["text"] != none[name] || current["value"] != none[name] {
+			t.Errorf("variable %s saves %v, want %q, its text before spanread reads a length", name, current, none[name])
 		}
+	}
+	render := func(title string, words map[string]string) string {
+		fill := strings.NewReplacer("${span}", words["span"], "${spanunit}", words["spanunit"], "${spanthe}", words["spanthe"])
+		return strings.Join(strings.Fields(fill.Replace(title)), " ")
 	}
 	figures := 0
 	for name, p := range loadPanels(t) {
 		title := p.Spec.Title
-		if strings.Contains(title, "${span}") && !strings.Contains(title, spanTitle) {
-			t.Errorf("%s title %q names ${span} without its unit, want %q", name, title, spanTitle)
+		ranged := p.Spec.VizConfig.Group != "timeseries" && slices.ContainsFunc(p.Spec.Data.Spec.Queries, func(q dashQuery) bool {
+			return strings.Contains(q.Spec.Query.Spec.Expr, "$__range")
+		})
+		if ranged {
+			figures++
 		}
-		if strings.Contains(strings.ToLower(title), "the "+spanTitle) {
-			t.Errorf("%s title %q reads \"the the range\" while the span query fails, want ${spanthe} before %s", name, title, spanTitle)
-		}
-		if p.Spec.VizConfig.Group == "timeseries" {
+		if !ranged && !strings.Contains(title, "${span") {
 			continue
 		}
-		for _, q := range p.Spec.Data.Spec.Queries {
-			if strings.Contains(q.Spec.Query.Spec.Expr, "$__range") {
-				figures++
-				if !strings.Contains(title, spanTitle) {
-					t.Errorf("%s %q query %s reads $__range, want the title to name %s", name, title, q.Spec.RefID, spanTitle)
-				}
+		fallback := render(title, none)
+		if strings.Count(fallback, "the range") != 1 || strings.Contains(fallback, "the the") {
+			t.Errorf("%s title %q reads %q before the length is read, want it to name \"the range\" once", name, title, fallback)
+		}
+		article := ""
+		if strings.Contains(fallback, "the range before") {
+			article = "the "
+		}
+		for i, l := range lengths {
+			named := render(title, reads[i])
+			if want := strings.Replace(fallback, "the range", article+l.want, 1); named != want {
+				t.Errorf("%s title %q reads %q over %d s, want %q", name, title, named, l.rangeS, want)
 				break
 			}
 		}
@@ -893,22 +1149,36 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 
 type shippedRule struct{ expr, forDur string }
 
-// shippedRules reads the single-line expr and the for of each alert in alerts/promql.yaml.
+// shippedRules reads the expr and the for of each alert in alerts/promql.yaml. A block
+// expr is joined into one line, with no space inside its parentheses.
 func shippedRules(t *testing.T) map[string]shippedRule {
 	t.Helper()
 	raw, err := os.ReadFile("alerts/promql.yaml")
 	if err != nil {
 		t.Fatalf("Setup: read rules: %v", err)
 	}
-	rules, name := map[string]shippedRule{}, ""
+	rules, name, blockIndent := map[string]shippedRule{}, "", -1
 	for line := range strings.Lines(string(raw)) {
-		key, value, _ := strings.Cut(strings.TrimSpace(line), ": ")
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if blockIndent >= 0 && indent > blockIndent && trimmed != "" {
+			r := rules[name]
+			r.expr = strings.TrimSpace(r.expr + " " + trimmed)
+			r.expr = strings.NewReplacer("( ", "(", " )", ")").Replace(r.expr)
+			rules[name] = r
+			continue
+		}
+		blockIndent = -1
+		key, value, _ := strings.Cut(trimmed, ": ")
 		switch key {
 		case "- alert":
 			name = value
 		case "expr":
 			r := rules[name]
 			r.expr = value
+			if value == "|" {
+				r.expr, blockIndent = "", indent
+			}
 			rules[name] = r
 		case "for":
 			r := rules[name]
@@ -919,7 +1189,11 @@ func shippedRules(t *testing.T) map[string]shippedRule {
 	return rules
 }
 
-var regressedWindow = regexp.MustCompile(`max_over_time\(registrystats_image_pulls_total\[(\w+)\]\)`)
+var (
+	regressedWindow = regexp.MustCompile(`max_over_time\(registrystats_image_pulls_total\[(\w+)\]\)`)
+	degradedWindow  = regexp.MustCompile(`^increase\(registrystats_collect_errors_total\[(\w+)\]\) > 0 or \(`)
+	degradedUptime  = regexp.MustCompile(`and on \(job, instance\) \(time\(\) - process_start_time_seconds < [^)]+\)`)
+)
 
 // nowTileSignals lists the tiles that mirror a shipped rule and the part of the rule each
 // tile's query must hold. Only these tiles may keep a rule's fixed windows.
@@ -930,7 +1204,21 @@ var nowTileSignals = []struct {
 	{"Collector not reporting", "RegistryStatsTargetDown", func(r shippedRule) string { return r.expr }},
 	{"Collector not reporting", "RegistryStatsTargetAbsent", func(r shippedRule) string { return r.expr }},
 	{"Checks stalled", "RegistryStatsCollectStalled", func(r shippedRule) string { return strings.TrimSuffix(r.expr, " == 0") }},
-	{"Checks stalled", "RegistryStatsCollectStalled", func(r shippedRule) string { return "[" + r.forDur + ":1m]" }},
+	{"Checks stalled", "RegistryStatsCollectStalled", func(r shippedRule) string { return "[" + heldWindow(r.forDur) + ":1m]" }},
+	{"Checks failing", "RegistryStatsSourceDegraded", func(r shippedRule) string {
+		w := "no window"
+		if m := degradedWindow.FindStringSubmatch(r.expr); m != nil {
+			w = m[1]
+		}
+		return `increase(registrystats_collect_errors_total{source=~"$registry"}[` + w + `]) > 0 or (`
+	}},
+	{"Checks failing", "RegistryStatsSourceDegraded", func(r shippedRule) string {
+		uptime := "no uptime arm"
+		if m := degradedUptime.FindStringSubmatch(r.expr); m != nil {
+			uptime = m[0]
+		}
+		return uptime
+	}},
 	{"Counts that went down", "RegistryStatsPullCountRegressed", func(r shippedRule) string {
 		w := "no window"
 		if m := regressedWindow.FindStringSubmatch(r.expr); m != nil {
@@ -961,6 +1249,29 @@ func TestDashboard_NowTilesReadTheirRuleSignal(t *testing.T) {
 	}
 }
 
+// A rule-backed tile shows while its alert fires, and checks the rule's condition itself,
+// held at every minute of the rule's for:, only where no ruler wrote that alert within the
+// for:, so the tile and the alert agree and neither lights for a blip shorter than the for:.
+func TestDashboard_RuleTilesShowWhileTheirAlertFires(t *testing.T) {
+	rules := shippedRules(t)
+	panels := loadPanels(t)
+	for _, c := range nowTileSignals {
+		r := rules[c.rule]
+		expr := panelByTitle(t, panels, c.tile).Spec.Data.Spec.Queries[0].Spec.Query.Spec.Expr
+		held := int(promDuration(r.forDur).Minutes())
+		for _, want := range []string{
+			`ALERTS{alertname="` + c.rule + `", alertstate="firing"`,
+			"[" + heldWindow(r.forDur) + ":1m]) > " + strconv.Itoa(held),
+			`unless on () `,
+			`count(max_over_time(ALERTS{alertname="` + c.rule + `"}[` + r.forDur + `]))`,
+		} {
+			if held == 0 || !strings.Contains(expr, want) {
+				t.Errorf("%q does not hold %s for its for: %q, want %q in %.200s", c.tile, c.rule, r.forDur, want, expr)
+			}
+		}
+	}
+}
+
 var (
 	fixedPeriod  = regexp.MustCompile(`\[((?:\d+(?:ms|[smhdwy]))+)(?::(?:\d+(?:ms|[smhdwy]))*)?\]|(offset -?\d+(?:ms|[smhdwy])|@ \d+(?:\.\d+)?)`)
 	ruleWindow   = regexp.MustCompile(`\[((?:\d+(?:ms|[smhdwy]))+)[\]:]`)
@@ -969,13 +1280,6 @@ var (
 		`\b(?:hourly|daily|weekly|monthly|yearly|today|yesterday)\b|` +
 		`\b(?:per|a|an|one|last|past|this|next) (?:second|minute|hour|day|week|fortnight|month|quarter|year)s?\b`)
 )
-
-// justifiedWindows holds each fixed window kept for a reason the rule's cases do not cover,
-// by panel. The panel's description states the length, so a reader knows the time picker
-// does not set it there.
-var justifiedWindows = map[string]struct{ window, stated string }{
-	"panel-26": {"7d", "7 days"},
-}
 
 // enclosingCall names the function whose parentheses hold expr[at], skipping quoted strings.
 func enclosingCall(expr string, at int) string {
@@ -999,6 +1303,21 @@ func enclosingCall(expr string, at int) string {
 	return ""
 }
 
+// heldWindow returns the subquery range that checks a condition at every minute of forDur.
+// A subquery range is open at its start, so [3h:1m] holds 180 samples over 179 minutes and
+// would light a tile a minute before its rule fires; one more minute holds 181 over 180.
+func heldWindow(forDur string) string {
+	d := promDuration(forDur) + time.Minute
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	switch {
+	case h == 0:
+		return strconv.Itoa(m) + "m"
+	case m == 0:
+		return strconv.Itoa(h) + "h"
+	}
+	return strconv.Itoa(h) + "h" + strconv.Itoa(m) + "m"
+}
+
 // promDuration reads a PromQL duration such as 1h30m.
 func promDuration(s string) time.Duration {
 	unit := map[string]time.Duration{
@@ -1016,9 +1335,8 @@ func promDuration(s string) time.Duration {
 // A figure that counts, sums or compares over time measures the time picker's range, except
 // a tile in nowTileSignals, which measures its rule's own windows and for: so it shows
 // exactly while the alert's condition holds. Any other fixed window passes only as
-// last_over_time reaching back at most a day to the newest sample, a rate's smoothing
-// interval of at most 5 minutes, or an entry of justifiedWindows. No title names a fixed
-// length.
+// last_over_time reaching back at most a day to the newest sample, or a rate's smoothing
+// interval of at most 5 minutes. No title names a fixed length.
 func TestDashboard_PeriodsFollowTheTimePicker(t *testing.T) {
 	rules := shippedRules(t)
 	windows := 0
@@ -1035,12 +1353,8 @@ func TestDashboard_PeriodsFollowTheTimePicker(t *testing.T) {
 				ruled[m[1]] = true
 			}
 			if f := rules[s.rule].forDur; f != "" {
-				ruled[f] = true
+				ruled[f], ruled[heldWindow(f)] = true, true
 			}
-		}
-		justified, isJustified := justifiedWindows[name]
-		if isJustified && !strings.Contains(p.Spec.Description, justified.stated) {
-			t.Errorf("%s %q keeps a fixed %s, want its description to state %q", name, p.Spec.Title, justified.window, justified.stated)
 		}
 		for _, q := range p.Spec.Data.Spec.Queries {
 			e := q.Spec.Query.Spec.Expr
@@ -1054,7 +1368,7 @@ func TestDashboard_PeriodsFollowTheTimePicker(t *testing.T) {
 				switch d := promDuration(w); {
 				case call == "last_over_time" && d <= 24*time.Hour:
 				case (call == "rate" || call == "irate") && d <= 5*time.Minute:
-				case ruled[w], isJustified && justified.window == w:
+				case ruled[w]:
 				default:
 					t.Errorf("%s %q query %s measures %s(...%s), want $__range or $__interval", name, p.Spec.Title, q.Spec.RefID, call, e[m[0]:m[1]])
 				}
@@ -1220,40 +1534,64 @@ func TestDashboard_DownloadFiguresKeepTheirSignificantDigits(t *testing.T) {
 	}
 }
 
-// On a large install the packages outside the top five outweigh them many times over, so
-// their one series sits unstacked on its own axis, leaving the five bars the left axis.
-func TestDashboard_OtherPackagesKeepTheirOwnAxis(t *testing.T) {
-	ps := panelSpecs(t)["panel-3"]
-	queries, _ := dig(ps, "data", "spec", "queries").([]any)
-	others := ""
-	for _, q := range queries {
-		if legend, _ := dig(q, "spec", "query", "spec", "legendFormat").(string); strings.HasPrefix(legend, "Other packages") {
-			others, _ = dig(q, "spec", "refId").(string)
+var (
+	packageRanking = regexp.MustCompile(`\b(and|unless) on \(owner, repo\$\{split\}\) topk\((\d+),`)
+	titleTopN      = regexp.MustCompile(`\btop (\d+)\b`)
+)
+
+// A chart of the most downloaded packages draws only them, with no series lumping the
+// rest, and its title states how many it ranks, so no reader takes it for every package.
+func TestDashboard_PackageChartsNameTheirTopN(t *testing.T) {
+	charts := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group != "timeseries" {
+			continue
 		}
-	}
-	if others == "" {
-		t.Fatalf("panel-3 %v has no Other packages query", ps["title"])
-	}
-	overrides, _ := dig(ps, "vizConfig", "spec", "fieldConfig", "overrides").([]any)
-	got := map[string]any{}
-	for _, o := range overrides {
-		if dig(o, "matcher", "id") == "byFrameRefID" && dig(o, "matcher", "options") == others {
-			props, _ := dig(o, "properties").([]any)
-			for _, p := range props {
-				id, _ := dig(p, "id").(string)
-				got[id] = dig(p, "value")
+		for _, q := range p.Spec.Data.Spec.Queries {
+			for _, m := range packageRanking.FindAllStringSubmatch(q.Spec.Query.Spec.Expr, -1) {
+				charts++
+				if m[1] == "unless" {
+					t.Errorf("%s %q query %s draws the packages outside its top %s as one series", name, p.Spec.Title, q.Spec.RefID, m[2])
+				}
+				if tm := titleTopN.FindStringSubmatch(p.Spec.Title); tm == nil || tm[1] != m[2] {
+					t.Errorf("%s title %q does not name the top %s its query %s ranks", name, p.Spec.Title, m[2], q.Spec.RefID)
+				}
+				// A range query's end() is its end aligned to the step, so it would rank another
+				// window than Package downloads, whose instant query runs at the dashboard's end.
+				if e := q.Spec.Query.Spec.Expr; strings.Contains(e, "@ end()") || !strings.Contains(e, "@ ${__to:date:seconds}") {
+					t.Errorf("%s %q query %s ranks at %q, want @ ${__to:date:seconds}", name, p.Spec.Title, q.Spec.RefID, e)
+				}
 			}
 		}
 	}
-	if got["custom.axisPlacement"] != "right" || dig(got["custom.stacking"], "mode") != "none" {
-		t.Errorf("Other packages (query %s) axisPlacement %v stacking %v, want right and mode none",
-			others, got["custom.axisPlacement"], got["custom.stacking"])
+	if charts == 0 {
+		t.Error("no ranked package chart found; the pattern no longer reads the dashboard")
 	}
-	// A range of about an hour holds one bucket, and a one-point line draws nothing but its point.
-	size, _ := got["custom.pointSize"].(float64)
-	if got["custom.drawStyle"] == "line" && (got["custom.showPoints"] == "never" || size < 5) {
-		t.Errorf("Other packages (query %s) is a line with showPoints %v and pointSize %v, want points of at least 5 px",
-			others, got["custom.showPoints"], got["custom.pointSize"])
+}
+
+var roundedChange = regexp.MustCompile(`(\w*)\(delta\(\(max by \(owner, repo, registry\) \(registrystats_image_pulls_total\{[^}]*\}\)\)\[\$__range:1m\]`)
+
+// Package downloads lists every package's downloads and the Downloads tile states their
+// total, so both round each package and registry before any sum: rounding after it
+// would leave the rows a few downloads off the tile.
+func TestDashboard_RangeTotalsAddUpFromRoundedPackages(t *testing.T) {
+	figures := 0
+	for name, p := range loadPanels(t) {
+		if p.Spec.VizConfig.Group == "timeseries" {
+			continue
+		}
+		for _, q := range p.Spec.Data.Spec.Queries {
+			for _, m := range roundedChange.FindAllStringSubmatch(q.Spec.Query.Spec.Expr, -1) {
+				figures++
+				if m[1] != "round" {
+					t.Errorf("%s %q query %s takes the range change inside %q, want round( around each package and registry",
+						name, p.Spec.Title, q.Spec.RefID, m[1])
+				}
+			}
+		}
+	}
+	if figures == 0 {
+		t.Error("no range total found; the pattern no longer reads the dashboard")
 	}
 }
 
