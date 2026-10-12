@@ -401,8 +401,8 @@
         "kind": "Panel",
         "spec": {
           "id": 21,
-          "title": "Change from ${spanthe} ${spanunit} before",
-          "description": "Downloads in the dashboard time range against the span of the same length that ends where the range starts, in percent and as the difference in downloads. The percent is green from 0 up, yellow from -20 to 0 and red below -20, and the difference keeps the text colour. A rise with no release behind it usually means an automated reader started polling, and No earlier range yet means the counts do not reach back that far. The percent is left out when the earlier span counted no downloads, common on ranges of a few hours, where each span holds one check or none at the default hourly interval.",
+          "title": "Change",
+          "description": "The difference in downloads compared with ${spanthe:text} ${spanunit:text} before. It is the downloads of the dashboard time range, which the Downloads tile names, minus those of the span of the same length that ends where the range starts. It keeps the text colour. A rise with no release behind it usually means an automated reader started polling, and No earlier range yet means the counts do not reach back that far.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -490,32 +490,6 @@
                 },
                 {
                   "kind": "Transformation",
-                  "group": "calculateField",
-                  "spec": {
-                    "options": {
-                      "mode": "binary",
-                      "alias": "Percent",
-                      "replaceFields": false,
-                      "binary": {
-                        "left": {
-                          "matcher": {
-                            "id": "byName",
-                            "options": "Difference"
-                          }
-                        },
-                        "operator": "/",
-                        "right": {
-                          "matcher": {
-                            "id": "byName",
-                            "options": "Before"
-                          }
-                        }
-                      }
-                    }
-                  }
-                },
-                {
-                  "kind": "Transformation",
                   "group": "organize",
                   "spec": {
                     "options": {
@@ -525,8 +499,7 @@
                         "Before": true
                       },
                       "indexByName": {
-                        "Percent": 0,
-                        "Difference": 1
+                        "Difference": 0
                       }
                     }
                   }
@@ -603,12 +576,221 @@
                   "titleSize": 14,
                   "valueSize": 28
                 },
-                "textMode": "value_and_name"
+                "textMode": "value"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "noValue": "No earlier range yet",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "fixed",
+                    "fixedColor": "text"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-22": {
+        "kind": "Panel",
+        "spec": {
+          "id": 22,
+          "title": "Growth",
+          "description": "The change in percent compared with ${spanthe:text} ${spanunit:text} before. It sets the downloads of the dashboard time range, which the Downloads tile names, against those of the span of the same length that ends where the range starts. It is green from 0 up, yellow from -20 to 0 and red below -20. No earlier downloads means the counts do not reach back that far, or the earlier span counted no downloads, as on ranges of a few hours at the default hourly check.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "-- Dashboard --"
+                      },
+                      "spec": {
+                        "panelId": 21,
+                        "withTransforms": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "Time",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "calculateField",
+                  "spec": {
+                    "options": {
+                      "mode": "binary",
+                      "alias": "Difference",
+                      "replaceFields": false,
+                      "binary": {
+                        "left": {
+                          "matcher": {
+                            "id": "byName",
+                            "options": "Range"
+                          }
+                        },
+                        "operator": "-",
+                        "right": {
+                          "matcher": {
+                            "id": "byName",
+                            "options": "Before"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "calculateField",
+                  "spec": {
+                    "options": {
+                      "mode": "binary",
+                      "alias": "Percent",
+                      "replaceFields": false,
+                      "binary": {
+                        "left": {
+                          "matcher": {
+                            "id": "byName",
+                            "options": "Difference"
+                          }
+                        },
+                        "operator": "/",
+                        "right": {
+                          "matcher": {
+                            "id": "byName",
+                            "options": "Before"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "Range": true,
+                        "Before": true,
+                        "Difference": true
+                      },
+                      "indexByName": {
+                        "Percent": 0
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "reduce",
+                  "spec": {
+                    "options": {
+                      "mode": "seriesToRows",
+                      "reducers": [
+                        "lastNotNull"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "filterByValue",
+                  "spec": {
+                    "options": {
+                      "type": "include",
+                      "match": "all",
+                      "filters": [
+                        {
+                          "fieldName": "Last *",
+                          "config": {
+                            "id": "isNotNull",
+                            "options": {}
+                          }
+                        },
+                        {
+                          "fieldName": "Last *",
+                          "config": {
+                            "id": "between",
+                            "options": {
+                              "from": -1e+300,
+                              "to": 1e+300
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "rowsToFields",
+                  "spec": {
+                    "options": {}
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "center",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "text": {
+                  "titleSize": 14,
+                  "valueSize": 28
+                },
+                "textMode": "value"
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "percentunit",
-                  "noValue": "No earlier range yet",
+                  "noValue": "No earlier downloads",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
@@ -642,27 +824,7 @@
                     }
                   ]
                 },
-                "overrides": [
-                  {
-                    "matcher": {
-                      "id": "byName",
-                      "options": "Difference"
-                    },
-                    "properties": [
-                      {
-                        "id": "unit",
-                        "value": "short"
-                      },
-                      {
-                        "id": "color",
-                        "value": {
-                          "mode": "fixed",
-                          "fixedColor": "text"
-                        }
-                      }
-                    ]
-                  }
-                ]
+                "overrides": []
               }
             }
           }
@@ -781,7 +943,7 @@
                       },
                       {
                         "id": "custom.width",
-                        "value": 104
+                        "value": 140
                       }
                     ]
                   },
@@ -803,7 +965,7 @@
                       },
                       {
                         "id": "custom.minWidth",
-                        "value": 208
+                        "value": 198
                       },
                       {
                         "id": "custom.wrapText",
@@ -2406,9 +2568,9 @@
                         "layout": {
                           "kind": "AutoGridLayout",
                           "spec": {
-                            "maxColumnCount": 2,
+                            "maxColumnCount": 3,
                             "columnWidthMode": "custom",
-                            "columnWidth": 300,
+                            "columnWidth": 280,
                             "rowHeightMode": "custom",
                             "rowHeight": 106,
                             "fillScreen": false,
@@ -2428,6 +2590,15 @@
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-21"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "AutoGridLayoutItem",
+                                "spec": {
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-22"
                                   }
                                 }
                               }
