@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"encoding/json"
+	"maps"
 	"net/url"
 	"os"
 	"regexp"
@@ -29,10 +30,12 @@ type dashOverride struct {
 		ID      string `json:"id"`
 		Options any    `json:"options"`
 	} `json:"matcher"`
-	Properties []struct {
-		ID    string          `json:"id"`
-		Value json.RawMessage `json:"value"`
-	} `json:"properties"`
+	Properties []dashProperty `json:"properties"`
+}
+
+type dashProperty struct {
+	ID    string          `json:"id"`
+	Value json.RawMessage `json:"value"`
 }
 
 // unsetsMin reports whether an override clears the panel's min for the frames
@@ -519,6 +522,35 @@ func TestDashboard_TablesFitAPhone(t *testing.T) {
 	}
 	if tables == 0 {
 		t.Error("no table found; the pattern no longer reads the dashboard")
+	}
+}
+
+// relativeTimeColumnPx fits "a few seconds ago", the longest time the dateTimeFromNow unit
+// prints: 127.4 px of 14 px Inter plus 6 px of cell padding each side, measured in Grafana
+// 13.2.3. The column is right-aligned, so a narrower one cuts the start of the text.
+const relativeTimeColumnPx = 140
+
+// Every "x minutes ago" column is wide enough for the longest relative time.
+func TestDashboard_RelativeTimeColumnsFitTheLongestTime(t *testing.T) {
+	columns := 0
+	for name, p := range loadPanels(t) {
+		overrides := p.Spec.VizConfig.Spec.FieldConfig.Overrides
+		for _, o := range overrides {
+			relative := slices.ContainsFunc(o.Properties, func(p dashProperty) bool {
+				return p.ID == "unit" && string(p.Value) == `"dateTimeFromNow"`
+			})
+			column, _ := o.Matcher.Options.(string)
+			if !relative || o.Matcher.ID != "byName" {
+				continue
+			}
+			columns++
+			if w := columnFloor(overrides, column); w < relativeTimeColumnPx {
+				t.Errorf("%s %q column %q is %d px wide, want at least %d for %q", name, p.Spec.Title, column, w, relativeTimeColumnPx, "a few seconds ago")
+			}
+		}
+	}
+	if columns == 0 {
+		t.Error("no relative time column found; the pattern no longer reads the dashboard")
 	}
 }
 
@@ -1037,13 +1069,24 @@ func rangeWords(t *testing.T, doc map[string]any, row string) map[string]string 
 	return words
 }
 
+// namedByTheirRow are range figures titled without the length, because a tile in the same
+// row names it; each description names the span it compares with instead.
+var namedByTheirRow = map[string]string{
+	"Change": "Downloads beside it names the range",
+	"Growth": "Downloads beside it names the range",
+}
+
+// comparedWith is how a namedByTheirRow description names its span. Grafana renders a
+// description with each variable's value, so the words take the text format.
+const comparedWith = "compared with ${spanthe:text} ${spanunit:text} before"
+
 // A figure over the dashboard time range reads only with the range's length, so every
 // panel outside the charts whose query reads $__range names it, "Downloads in 30 days",
 // and reads "Downloads in the range" until the length is read or when its first read
-// fails. A comparison keeps its article, "Change from the 30 days before". Every word
-// comes from the one answer of spanread, so no title mixes two reads ("in 30 range")
-// while they arrive. The lengths are spanread's query run at each side of every unit's
-// threshold and at decimal roundings.
+// fails; a tile in namedByTheirRow says "compared with the 30 days before" in its
+// description. Every word comes from the one answer of spanread, so no title mixes two
+// reads ("in 30 range") while they arrive. The lengths are spanread's query run at each
+// side of every unit's threshold and at decimal roundings.
 func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 	doc := loadDoc(t)
 	kind, read := variable(doc, "spanread")
@@ -1114,14 +1157,45 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 		fill := strings.NewReplacer("${span}", words["span"], "${spanunit}", words["spanunit"], "${spanthe}", words["spanthe"])
 		return strings.Join(strings.Fields(fill.Replace(title)), " ")
 	}
-	figures := 0
-	for name, p := range loadPanels(t) {
+	renderText := func(text string, words map[string]string) string {
+		fill := strings.NewReplacer("${spanthe:text}", words["spanthe"], "${spanunit:text}", words["spanunit"])
+		return fill.Replace(text)
+	}
+	panels := loadPanels(t)
+	rows := rowsPlacing(t, doc)
+	specs := panelSpecs(t)
+	figures, exempt := 0, 0
+	for name, p := range panels {
 		title := p.Spec.Title
-		ranged := p.Spec.VizConfig.Group != "timeseries" && slices.ContainsFunc(p.Spec.Data.Spec.Queries, func(q dashQuery) bool {
-			return strings.Contains(q.Spec.Query.Spec.Expr, "$__range")
+		ranged := p.Spec.VizConfig.Group != "timeseries" && slices.ContainsFunc(queriesOf(specs, specs[name]), func(q any) bool {
+			expr, _ := dig(q, "spec", "query", "spec", "expr").(string)
+			return strings.Contains(expr, "$__range")
 		})
 		if ranged {
 			figures++
+		}
+		if _, ok := namedByTheirRow[title]; ok && ranged {
+			exempt++
+			beside := slices.ContainsFunc(slices.Collect(maps.Keys(rows)), func(other string) bool {
+				return other != name && rows[name] != nil && rows[other] != nil && rows[other]["title"] == rows[name]["title"] &&
+					strings.Contains(panels[other].Spec.Title, "${span}")
+			})
+			if !beside {
+				t.Errorf("%s %q names no length and no tile in its row %v does", name, title, rows[name]["title"])
+			}
+			if !strings.Contains(p.Spec.Description, comparedWith) {
+				t.Errorf("%s %q description does not say %q: %.120q", name, title, comparedWith, p.Spec.Description)
+			}
+			if got := renderText(comparedWith, none); got != "compared with the range before" {
+				t.Errorf("%s %q description reads %q before the length is read, want \"compared with the range before\"", name, title, got)
+			}
+			for i, l := range lengths {
+				if got, want := renderText(comparedWith, reads[i]), "compared with the "+l.want+" before"; got != want {
+					t.Errorf("%s %q description reads %q over %d s, want %q", name, title, got, l.rangeS, want)
+					break
+				}
+			}
+			continue
 		}
 		if !ranged && !strings.Contains(title, "${span") {
 			continue
@@ -1130,13 +1204,9 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 		if strings.Count(fallback, "the range") != 1 || strings.Contains(fallback, "the the") {
 			t.Errorf("%s title %q reads %q before the length is read, want it to name \"the range\" once", name, title, fallback)
 		}
-		article := ""
-		if strings.Contains(fallback, "the range before") {
-			article = "the "
-		}
 		for i, l := range lengths {
 			named := render(title, reads[i])
-			if want := strings.Replace(fallback, "the range", article+l.want, 1); named != want {
+			if want := strings.Replace(fallback, "the range", l.want, 1); named != want {
 				t.Errorf("%s title %q reads %q over %d s, want %q", name, title, named, l.rangeS, want)
 				break
 			}
@@ -1144,6 +1214,9 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 	}
 	if figures == 0 {
 		t.Error("no range figure found; the pattern no longer reads the dashboard")
+	}
+	if exempt != len(namedByTheirRow) {
+		t.Errorf("%d range figures are titled as in namedByTheirRow, want %d, one per entry", exempt, len(namedByTheirRow))
 	}
 }
 
@@ -1494,6 +1567,160 @@ func TestDashboard_ComputedPercentsNeverShowInfinityOrNaN(t *testing.T) {
 	}
 	if divisions == 0 {
 		t.Error("no computed division found; the pattern no longer reads the dashboard")
+	}
+}
+
+// summaryTiles are the Overview's always-visible figures, in their order on screen.
+var summaryTiles = []string{
+	"Downloads in ${span} ${spanunit}",
+	"Change",
+	"Growth",
+}
+
+// tabletGridPx is the width an Overview auto grid fills on a 1024 px tablet, and
+// autoGridGapPx the gap between two tiles, both measured in Grafana 13.2.3.
+const tabletGridPx, autoGridGapPx = 912, 8
+
+// rowSpec returns the spec of the first RowsLayoutRow titled title.
+func rowSpec(t *testing.T, title string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	var walk func(v any)
+	walk = func(v any) {
+		switch n := v.(type) {
+		case map[string]any:
+			if spec, _ := n["spec"].(map[string]any); n["kind"] == "RowsLayoutRow" && spec["title"] == title && found == nil {
+				found = spec
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(loadDoc(t))
+	if found == nil {
+		t.Fatalf("Setup: no row titled %q", title)
+	}
+	return found
+}
+
+// The Summary row is always on screen, so its tiles share one line wherever the grid holds
+// three columns: one column per tile, all of them within the 912 px grid of a 1024 px tablet.
+// A grid too narrow for three columns but wide enough for two shows 2 + 1, which happens on
+// some widths below 1024 px and on some laptop widths with the menu docked; a phone stacks them.
+func TestDashboard_SummaryTilesShareOneLine(t *testing.T) {
+	grid, _ := dig(rowSpec(t, "Summary"), "layout").(map[string]any)
+	if grid["kind"] != "AutoGridLayout" {
+		t.Fatalf("Summary is a %v, want an AutoGridLayout", grid["kind"])
+	}
+	specs := panelSpecs(t)
+	items, _ := dig(grid, "spec", "items").([]any)
+	titles := []string{}
+	for _, it := range items {
+		name, _ := dig(it, "spec", "element", "name").(string)
+		title, _ := specs[name]["title"].(string)
+		titles = append(titles, title)
+	}
+	if !slices.Equal(titles, summaryTiles) {
+		t.Errorf("Summary holds %q, want %q", titles, summaryTiles)
+	}
+	columns, _ := dig(grid, "spec", "maxColumnCount").(float64)
+	width, _ := dig(grid, "spec", "columnWidth").(float64)
+	if int(columns) != len(titles) {
+		t.Errorf("Summary has %v columns for %d tiles, want one per tile", columns, len(titles))
+	}
+	if line := len(titles)*int(width) + (len(titles)-1)*autoGridGapPx; dig(grid, "spec", "columnWidthMode") != "custom" || line > tabletGridPx {
+		t.Errorf("Summary's %d tiles of %v px (%v) take %d px, want at most %d, a tablet's grid",
+			len(titles), width, dig(grid, "spec", "columnWidthMode"), line, tabletGridPx)
+	}
+}
+
+// readsPanel returns the id of the panel whose raw results spec's one query reads through
+// Grafana's Dashboard data source, or 0 when it runs its own queries.
+func readsPanel(spec map[string]any) float64 {
+	queries, _ := dig(spec, "data", "spec", "queries").([]any)
+	if len(queries) != 1 || dig(queries[0], "spec", "query", "datasource", "name") != "-- Dashboard --" ||
+		dig(queries[0], "spec", "query", "spec", "withTransforms") != false {
+		return 0
+	}
+	id, _ := dig(queries[0], "spec", "query", "spec", "panelId").(float64)
+	return id
+}
+
+// queriesOf returns the queries whose results a panel reads: its own, or those of the panel
+// it reads through the Dashboard data source.
+func queriesOf(specs map[string]map[string]any, spec map[string]any) []any {
+	if id := readsPanel(spec); id != 0 {
+		for _, other := range specs {
+			if other["id"] == id {
+				spec = other
+			}
+		}
+	}
+	queries, _ := dig(spec, "data", "spec", "queries").([]any)
+	return queries
+}
+
+// shownFields returns the fields a panel's transformations leave: each query's legend and each
+// calculated field, less those the organize step excludes.
+func shownFields(specs map[string]map[string]any, spec map[string]any) []string {
+	var fields []string
+	for _, q := range queriesOf(specs, spec) {
+		legend, _ := dig(q, "spec", "query", "spec", "legendFormat").(string)
+		fields = append(fields, legend)
+	}
+	steps, _ := dig(spec, "data", "spec", "transformations").([]any)
+	excluded := map[string]any{}
+	for _, s := range steps {
+		switch dig(s, "group") {
+		case "calculateField":
+			alias, _ := dig(s, "spec", "options", "alias").(string)
+			fields = append(fields, alias)
+		case "organize":
+			excluded, _ = dig(s, "spec", "options", "excludeByName").(map[string]any)
+		}
+	}
+	return slices.DeleteFunc(fields, func(f string) bool { return excluded[f] == true })
+}
+
+// Change and Growth each show one value and no label inside the tile: Change the difference
+// in downloads in the text colour, Growth the percent coloured by its thresholds. Growth reads
+// Change's raw results, so the Overview's heaviest queries run once for both.
+func TestDashboard_ChangeAndGrowthShowOneValueEach(t *testing.T) {
+	all := panelSpecs(t)
+	specs := map[string]map[string]any{}
+	for _, spec := range all {
+		title, _ := spec["title"].(string)
+		specs[title] = spec
+	}
+	if change, growth := specs[summaryTiles[1]], specs[summaryTiles[2]]; change == nil || growth == nil ||
+		readsPanel(change) != 0 || readsPanel(growth) != change["id"] {
+		t.Errorf("Growth reads panel %v, want Change's id %v with withTransforms false", readsPanel(growth), change["id"])
+	}
+	for _, c := range []struct{ title, field, unit, colour string }{
+		{summaryTiles[1], "Difference", "short", "fixed"},
+		{summaryTiles[2], "Percent", "percentunit", "thresholds"},
+	} {
+		spec, ok := specs[c.title]
+		if !ok {
+			t.Errorf("no panel titled %q", c.title)
+			continue
+		}
+		if got := shownFields(all, spec); !slices.Equal(got, []string{c.field}) {
+			t.Errorf("%q shows %q, want only %s", c.title, got, c.field)
+		}
+		viz := dig(spec, "vizConfig", "spec")
+		if mode := dig(viz, "options", "textMode"); mode != "value" {
+			t.Errorf("%q textMode = %v, want value, so no field name shows in the tile", c.title, mode)
+		}
+		defaults := dig(viz, "fieldConfig", "defaults")
+		if unit, colour := dig(defaults, "unit"), dig(defaults, "color", "mode"); unit != c.unit || colour != c.colour {
+			t.Errorf("%q is unit %v, colour %v, want %s and %s", c.title, unit, colour, c.unit, c.colour)
+		}
 	}
 }
 
