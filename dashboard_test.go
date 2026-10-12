@@ -132,9 +132,11 @@ var perRegistryByDesign = map[string]string{
 }
 
 // Every downloads query groups an image by owner and repo, and adds the registry
-// only through the Split by registry switch.
+// only through the Split by registry switch. A total over every package groups by
+// (__name__${split}): no series keeps __name__ after an aggregation, so with the
+// switch off the total is one series, and with it on one series per registry.
 func TestDashboard_DownloadGroupingsFollowTheSplitSwitch(t *testing.T) {
-	groupings := 0
+	groupings, totals := 0, 0
 	for name, p := range loadPanels(t) {
 		if _, ok := perRegistryByDesign[p.Spec.Title]; ok {
 			continue
@@ -150,6 +152,12 @@ func TestDashboard_DownloadGroupingsFollowTheSplitSwitch(t *testing.T) {
 					continue // the one-copy-per-collector step, which TestDashboard_DownloadReadsCountEachPackageOnce pins
 				}
 				if !strings.Contains(labels, "owner") && !strings.Contains(labels, "repo") {
+					if strings.Contains(labels, "registry") || labels == "__name__${split}" {
+						totals++
+						if labels != "__name__${split}" {
+							t.Errorf("%s %q query %s groups by (%s), want (__name__${split})", name, p.Spec.Title, q.Spec.RefID, labels)
+						}
+					}
 					continue
 				}
 				groupings++
@@ -161,6 +169,9 @@ func TestDashboard_DownloadGroupingsFollowTheSplitSwitch(t *testing.T) {
 	}
 	if groupings == 0 {
 		t.Error("no per-package grouping found; the pattern no longer reads the dashboard")
+	}
+	if totals == 0 {
+		t.Error("no downloads total over every package found; the pattern no longer reads the dashboard")
 	}
 }
 
