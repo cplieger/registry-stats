@@ -401,8 +401,8 @@
         "kind": "Panel",
         "spec": {
           "id": 21,
-          "title": "Change",
-          "description": "The difference in downloads compared with ${spanthe:text} ${spanunit:text} before. It is the downloads of the dashboard time range, which the Downloads tile names, minus those of the span of the same length that ends where the range starts. It keeps the text colour. A rise with no release behind it usually means an automated reader started polling, and No earlier range yet means the counts do not reach back that far.",
+          "title": "Change over ${spanthe} ${spanunit}",
+          "description": "The difference in downloads compared with ${spanthe:text} ${spanunit:text} before. It is the downloads of the dashboard time range minus those of the span of the same length that ends where the range starts. It keeps the text colour. A rise with no release behind it usually means an automated reader started polling, and No earlier range yet means the counts do not reach back that far.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -606,8 +606,8 @@
         "kind": "Panel",
         "spec": {
           "id": 22,
-          "title": "Growth",
-          "description": "The change in percent compared with ${spanthe:text} ${spanunit:text} before. It sets the downloads of the dashboard time range, which the Downloads tile names, against those of the span of the same length that ends where the range starts. It is green from 0 up, yellow from -20 to 0 and red below -20. No earlier downloads means the counts do not reach back that far, or the earlier span counted no downloads, as on ranges of a few hours at the default hourly check.",
+          "title": "Growth over ${spanthe} ${spanunit}",
+          "description": "The change in percent compared with ${spanthe:text} ${spanunit:text} before. It sets the downloads of the dashboard time range against those of the span of the same length that ends where the range starts. It is green from 0 up, yellow from -20 to 0 and red below -20. No earlier downloads means the counts do not reach back that far, or the earlier span counted no downloads, as on ranges of a few hours at the default hourly check.",
           "links": [],
           "data": {
             "kind": "QueryGroup",

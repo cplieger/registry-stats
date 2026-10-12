@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"encoding/json"
-	"maps"
 	"net/url"
 	"os"
 	"regexp"
@@ -1069,22 +1068,10 @@ func rangeWords(t *testing.T, doc map[string]any, row string) map[string]string 
 	return words
 }
 
-// namedByTheirRow are range figures titled without the length, because a tile in the same
-// row names it; each description names the span it compares with instead.
-var namedByTheirRow = map[string]string{
-	"Change": "Downloads beside it names the range",
-	"Growth": "Downloads beside it names the range",
-}
-
-// comparedWith is how a namedByTheirRow description names its span. Grafana renders a
-// description with each variable's value, so the words take the text format.
-const comparedWith = "compared with ${spanthe:text} ${spanunit:text} before"
-
 // A figure over the dashboard time range reads only with the range's length, so every
-// panel outside the charts whose query reads $__range names it, "Downloads in 30 days",
-// and reads "Downloads in the range" until the length is read or when its first read
-// fails; a tile in namedByTheirRow says "compared with the 30 days before" in its
-// description. Every word comes from the one answer of spanread, so no title mixes two
+// panel outside the charts whose query reads $__range names it, "Downloads in 30 days" or
+// "Change over the 30 days", and reads "... the range" until the length is read or when its
+// first read fails. Every word comes from the one answer of spanread, so no title mixes two
 // reads ("in 30 range") while they arrive. The lengths are spanread's query run at each
 // side of every unit's threshold and at decimal roundings.
 func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
@@ -1157,14 +1144,9 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 		fill := strings.NewReplacer("${span}", words["span"], "${spanunit}", words["spanunit"], "${spanthe}", words["spanthe"])
 		return strings.Join(strings.Fields(fill.Replace(title)), " ")
 	}
-	renderText := func(text string, words map[string]string) string {
-		fill := strings.NewReplacer("${spanthe:text}", words["spanthe"], "${spanunit:text}", words["spanunit"])
-		return fill.Replace(text)
-	}
 	panels := loadPanels(t)
-	rows := rowsPlacing(t, doc)
 	specs := panelSpecs(t)
-	figures, exempt := 0, 0
+	figures := 0
 	for name, p := range panels {
 		title := p.Spec.Title
 		ranged := p.Spec.VizConfig.Group != "timeseries" && slices.ContainsFunc(queriesOf(specs, specs[name]), func(q any) bool {
@@ -1173,29 +1155,6 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 		})
 		if ranged {
 			figures++
-		}
-		if _, ok := namedByTheirRow[title]; ok && ranged {
-			exempt++
-			beside := slices.ContainsFunc(slices.Collect(maps.Keys(rows)), func(other string) bool {
-				return other != name && rows[name] != nil && rows[other] != nil && rows[other]["title"] == rows[name]["title"] &&
-					strings.Contains(panels[other].Spec.Title, "${span}")
-			})
-			if !beside {
-				t.Errorf("%s %q names no length and no tile in its row %v does", name, title, rows[name]["title"])
-			}
-			if !strings.Contains(p.Spec.Description, comparedWith) {
-				t.Errorf("%s %q description does not say %q: %.120q", name, title, comparedWith, p.Spec.Description)
-			}
-			if got := renderText(comparedWith, none); got != "compared with the range before" {
-				t.Errorf("%s %q description reads %q before the length is read, want \"compared with the range before\"", name, title, got)
-			}
-			for i, l := range lengths {
-				if got, want := renderText(comparedWith, reads[i]), "compared with the "+l.want+" before"; got != want {
-					t.Errorf("%s %q description reads %q over %d s, want %q", name, title, got, l.rangeS, want)
-					break
-				}
-			}
-			continue
 		}
 		if !ranged && !strings.Contains(title, "${span") {
 			continue
@@ -1206,7 +1165,11 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 		}
 		for i, l := range lengths {
 			named := render(title, reads[i])
-			if want := strings.Replace(fallback, "the range", l.want, 1); named != want {
+			length := l.want
+			if strings.Contains(title, "${spanthe}") {
+				length = "the " + l.want
+			}
+			if want := strings.Replace(fallback, "the range", length, 1); named != want {
 				t.Errorf("%s title %q reads %q over %d s, want %q", name, title, named, l.rangeS, want)
 				break
 			}
@@ -1214,9 +1177,6 @@ func TestDashboard_RangeFiguresNameTheirSpan(t *testing.T) {
 	}
 	if figures == 0 {
 		t.Error("no range figure found; the pattern no longer reads the dashboard")
-	}
-	if exempt != len(namedByTheirRow) {
-		t.Errorf("%d range figures are titled as in namedByTheirRow, want %d, one per entry", exempt, len(namedByTheirRow))
 	}
 }
 
@@ -1573,8 +1533,8 @@ func TestDashboard_ComputedPercentsNeverShowInfinityOrNaN(t *testing.T) {
 // summaryTiles are the Overview's always-visible figures, in their order on screen.
 var summaryTiles = []string{
 	"Downloads in ${span} ${spanunit}",
-	"Change",
-	"Growth",
+	"Change over ${spanthe} ${spanunit}",
+	"Growth over ${spanthe} ${spanunit}",
 }
 
 // tabletGridPx is the width an Overview auto grid fills on a 1024 px tablet, and
