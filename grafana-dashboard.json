@@ -1165,8 +1165,8 @@
         "kind": "Panel",
         "spec": {
           "id": 28,
-          "title": "Downloads by registry",
-          "description": "New downloads on each registry, stacked, in bars that span an hour on a day or less, 6 hours on a week, a day on 30 days and a week on 6 months. The Downloads tile gives the exact total, for one registry when the Registry filter picks it. A jump on one registry alone points at an automated reader or a release that reached one registry first. A bar below zero means a registry restated its total lower.",
+          "title": "Downloads",
+          "description": "New downloads in bars that span an hour on a day or less, 6 hours on a week, a day on 30 days and a week on 6 months. With Split by registry on, each registry gets its own stacked bar, and the Downloads tile gives the exact total. A jump on one registry alone points at an automated reader or a release that reached one registry first, and a bar below zero means a registry restated its total lower.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1183,7 +1183,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(label_replace(label_replace(sum by (registry) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__interval:1m])), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\")) and on () (vector(time()) > $__from / 1000)",
+                        "expr": "(label_replace(label_replace(label_replace(sum by (__name__${split}) (delta((max by (owner, repo, registry) (registrystats_image_pulls_total{repo=~\"$repo\",owner=~\"$owner\",registry=~\"$registry\"}))[$__interval:1m])), \"name\", \"Docker Hub\", \"registry\", \"dockerhub\"), \"name\", \"GHCR\", \"registry\", \"ghcr\"), \"name\", \"Downloads\", \"registry\", \"\")) and on () (vector(time()) > $__from / 1000)",
                         "legendFormat": "{{name}}",
                         "interval": "1h"
                       }
@@ -1262,6 +1262,21 @@
                         "value": {
                           "mode": "fixed",
                           "fixedColor": "purple"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Downloads"
+                    },
+                    "properties": [
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "fixed",
+                          "fixedColor": "green"
                         }
                       }
                     ]
