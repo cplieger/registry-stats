@@ -83,16 +83,13 @@ func TestClient_ScrapePackage_BoundsErrorLog(t *testing.T) {
 	}
 }
 
-// TestClient_Collect_pacesAtProductionDefaults drives Collect with the
-// production pacing constants against an in-memory test server inside a
-// synctest bubble, so the real delays run on the synthetic clock rather than
-// costing wall time per package. It pins that the first request issues without
+// TestClient_Collect_pacesAtProductionDefaults pins the production pacing
+// constants inside a synctest bubble: the first request issues without
 // advancing the clock, and every later interval lands in
 // [DefaultMinPacing, DefaultMinPacing+DefaultPacingJitter).
-//
 // httptest.NewTestServer's in-memory network is synctest-compatible and
-// routes every request to the handler regardless of host, so the
-// production github.com URLs reach it unrewritten.
+// routes every host to the handler, so the production github.com URLs
+// reach it unrewritten.
 func TestClient_Collect_pacesAtProductionDefaults(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var stamps []time.Time
@@ -328,6 +325,8 @@ func testCollectClientTimeoutDoesNotSetListingFailed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users/owner/packages/container/package/slow", func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
+		// A returning handler sends an empty 200 the client can still receive.
+		panic(http.ErrAbortHandler)
 	})
 	mux.HandleFunc("GET /users/owner/packages/container/package/fast", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(downloadsHTML("9")))

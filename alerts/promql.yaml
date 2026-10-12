@@ -50,26 +50,30 @@ groups:
             exporter is up. It keeps serving its last values. Check `docker logs
             registry-stats` for scrape or listing errors. With no repos
             configured, RegistryStatsConfigRejected fires instead.
+      # Fires only on a sustained failure: a failed check within every 90
+      # minutes for 3 hours, about three hourly checks in a row. A single
+      # failed check during a short registry outage never fires it.
       # The uptime arm covers a failure before the first scrape, when
       # increase() has no earlier sample to subtract.
       - alert: RegistryStatsSourceDegraded
         expr: |
-          increase(registrystats_collect_errors_total[3h]) > 0
+          increase(registrystats_collect_errors_total[90m]) > 0
           or (
             registrystats_collect_errors_total > 0
             and on (job, instance)
-            (time() - process_start_time_seconds < 3 * 60 * 60)
+            (time() - process_start_time_seconds < 90 * 60)
           )
-        for: 0m
+        for: 3h
         labels:
           severity: warning
         annotations:
           summary: "registry-stats collection failing for {{ $labels.source }}"
           description: >
-            A wildcard owner listing failed, or most per-image fetches failed,
-            for this source. Those repos leave /metrics until a later cycle
-            succeeds, and other owners keep updating. Check `docker logs
-            registry-stats` for the owner and the reason.
+            For 3 hours, checks of this source kept failing: a wildcard owner
+            listing failed, or most per-image fetches failed. Those repos leave
+            /metrics until a later cycle succeeds, and other owners keep
+            updating. Check `docker logs registry-stats` for the owner and the
+            reason. A registry outage clears on its own.
       # registrystats_image_pulls_total is a gauge despite its _total suffix.
       # Use delta() over a window, never rate() or increase(), which read the
       # downward restatement this rule detects as a counter reset.

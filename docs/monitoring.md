@@ -9,15 +9,12 @@ This page lists what registry-stats emits, how to load its Grafana dashboard, an
 - `registrystats_image_pulls_total{registry,owner,repo}`: the current pull count of each image.
 - `registrystats_collects_total{source}`: checks per registry, successful and failed.
 - `registrystats_collect_errors_total{source}`: failed checks per registry.
-- `registrystats_collect_duration_seconds`: a histogram of check durations, tag and version reads included.
+- `registrystats_collect_duration_seconds`: a histogram of check durations.
 - `registrystats_collect_last_success_timestamp_seconds{source}`: the last check in which most reads got an answer, a 404 included.
 - `registrystats_collect_complete{source}`: 1 when every read of the last check got an answer.
 - `registrystats_image_present{source,owner,repo}`: 1 when read, 0 when definitively absent.
 - `registrystats_image_last_pushed_timestamp_seconds{registry,owner,repo}`: GHCR's "Last published" time.
 - `registrystats_dockerhub_repository_updated_timestamp_seconds{owner,repo}`: Docker Hub's `last_updated` time.
-- `registrystats_dockerhub_tags{owner,repo}`: Docker Hub tag counts.
-- `registrystats_ghcr_versions{owner,repo,state}`: GHCR version counts.
-- `registrystats_details_oldest_read_timestamp_seconds{source}`: when the oldest count on show was read.
 - `registrystats_image_details_omitted{source}`: images past the detail cap.
 - `go_goroutines`, `go_memstats_heap_alloc_bytes`, `process_uptime_seconds` and the other `process_*` series: runtime metrics.
 
@@ -27,7 +24,7 @@ A registry with no configured repos has no per-registry series.
 
 `GET /api/health` is the readiness check, which [How registry-stats works](how-it-works.md#health-and-readiness) explains.
 
-[Tags and versions](how-it-works.md#tags-and-versions) explains the 250-name cap on detail series and when presence reads 0.
+[Push times and presence](how-it-works.md#push-times-and-presence) explains the 250-name cap on detail series and when presence reads 0.
 
 ## Logs
 
@@ -41,17 +38,31 @@ registry-stats writes logfmt records to standard error, with UTC timestamps. Lev
 | `skipping unusable repo ref` | WARN | A repo list entry was rejected at start |
 | `ghcr HTML format may be changing, majority of scrapes hit format errors` | ERROR | GitHub changed its package pages |
 | `ghcr package field unreadable` | WARN | A package page had no readable push time |
-| `docker hub tag read failed`, `ghcr version read failed` | WARN or ERROR | A count read failed, at ERROR on a format change |
-| `detail reads stopped` | WARN | A rate limit stopped the tag or version reads until the next check |
 | `image details omitted` | WARN | More than 250 names are tracked |
 
 ## Dashboard
 
-[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It filters by registry, owner and repo, and adds Docker Hub and GHCR together per package until you turn on Split by registry. Its five tabs are Overview, Packages, History over the last year, Registries and tags, and Collector health, whose Job list scopes it to one scrape job.
+[`grafana-dashboard.json`](../grafana-dashboard.json) needs Grafana 13.2 or newer. It uses PromQL and needs only a Prometheus data source, with no plugin. It filters by registry, owner and repo, and adds Docker Hub and GHCR together per package until you turn on Split by registry. Its three tabs are Overview, Packages and Collector health, whose Job list scopes it to one scrape job. Every download figure covers the dashboard time range, except the all-time total that Not pulled, on the Packages tab, shows beside each image. A panel over the range names its length in the title, such as Downloads in 7 days, in days from 2 days, hours from 2 hours, minutes from 2 minutes and seconds below that, and reads "the range" while it loads and when the data source cannot answer as the dashboard opens. If the data source stops answering after a title has named a length, Grafana keeps that length until it answers again, while every panel shows the query error. A chart's bar counts a whole span that grows with the range, an hour on a day or less, 6 hours on a week, a day on 30 days and a week on 6 months, so the first bar can start before the range and the newest part of the range waits for its bar. A change compares it with the span of the same length just before it, and shows only once the counts reach back to the start of that earlier span.
 
-Registries out of step lists a package that one registry has and the other definitively does not, pairing images by owner and name. A GHCR package with a slash in its name is never compared, because a Docker Hub repository name cannot hold one. With `owner/*` on both, a package you publish to one registry on purpose stays listed while the configuration covers it. A stale or incomplete read, or a stopped collector, shows an Unknown row.
+The Overview's summary is three tiles, each naming the range: Downloads in 30 days, Change over the 30 days and Growth over the 30 days on a 30-day range. Change is the difference in downloads compared with the span of the same length before the range, and Growth is that change as a percent. Growth reads No earlier downloads when that span counted no downloads, which happens on ranges of a few hours at the default hourly check. Under the summary, a Needs attention row appears only while one of its tiles has something to show, one tile per line, and Downloads follows: one bar per time step, split into one bar per registry when Split by registry is on. A tile shows a problem that holds now and lasts, never a failure that has already recovered. Each tile's description names the shipped alert that reads the same signal, or states its own condition where no alert does:
 
-Collector health shows the worst selected collector, except the checks-per-day and restarts panels, which add collectors up, and Check duration, which pools them. A collector counts once however many tenants hold its series, and a package counts once whether collectors read it together or in turn. The age colours and the 2-hour stale cutoff of Registries out of step assume the default hourly check, so a longer `POLL_INTERVAL_HOURS` reads stale between checks.
+| Tile | Shows when | Alert |
+| --- | --- | --- |
+| Collector not reporting | a target of the scrape job `registry-stats` has not been scraped for 15 minutes, or the job has had no target for 15 minutes | `RegistryStatsTargetDown`, `RegistryStatsTargetAbsent` |
+| Checks stalled | a scraped collector finished no check for 6 hours | `RegistryStatsCollectStalled` |
+| Checks failing | a registry's checks kept failing for 3 hours: a check failed within every 90 minutes | `RegistryStatsSourceDegraded` |
+| Registry data stale | a registry was last read over 2 hours ago | none |
+| Counts that went down | a count has stayed below its highest value of the last 2 days for 30 minutes | `RegistryStatsPullCountRegressed` |
+| Missing from a registry | a package is on one registry and definitively not on the other, at the last complete and fresh check | none |
+| Images past 250 names | images go without push time and presence, so Recent pushes and Missing from a registry leave them out | none |
+
+A tile with an alert shows while that alert fires. Where your ruler does not load the rule, the tile checks the rule's condition itself, held for the rule's `for:`, whatever the time range. So no tile lights for a blip its alert ignores, such as a scrape missed during a restart or one failed check in a short registry outage. Collector not reporting, like its two alerts, needs the scrape job to be called `registry-stats`. Grafana also hides a tile whose query fails, so a data source outage shows as errors on the summary, the package tables and the chart, never as a tile. An outage that starts while the page is open can leave the Needs attention heading on screen with no tile under it until the data source answers again. A tile's link opens the tab that explains it.
+
+On the Packages tab, Package downloads lists every package with its downloads in the range, largest first, in a list that scrolls and sorts by any column. Its rows add up to the Downloads tile, because each package and registry is rounded before any sum. Movers lists the three packages whose downloads changed most up or down, and Recent pushes the three GHCR packages pushed last. Downloads of the top 10 packages draws those 10 as stacked bars. It leaves the others to Package downloads, because the colours of 250 packages cannot be told apart. Below them, an Unused packages row with the Not pulled table appears only while that table has a row, and pages through its rows.
+
+Missing from a registry pairs images by owner and name. A GHCR package with a slash in its name is never compared, because a Docker Hub repository name cannot hold one. With `owner/*` on both, a package you publish to one registry on purpose stays counted while the configuration covers it. A stale or incomplete read counts nothing, and Registry data stale or Collector not reporting shows instead. The tile's link opens the Packages tab with Split by registry on, where Package downloads gives each package a row for every registry that reported it in the range.
+
+Collector health adds up the checks of the selected collectors, pools Check duration, whose median and 95th percentile cover the checks of each point's span, sized as a chart's bar is, and draws memory per collector. A collector counts once however many tenants hold its series, and a package counts once whether collectors read it together or in turn. The 2-hour stale cutoff of Registry data stale and Missing from a registry assumes the default hourly check, so a longer `POLL_INTERVAL_HOURS` reads stale between checks, and one over 6 hours lights Checks stalled between checks, as it does `RegistryStatsCollectStalled`.
 
 1. Add a scrape job named `registry-stats` in Prometheus, Grafana Alloy or any Prometheus-compatible scraper. Its target is `registry-stats:9100` when the scraper shares a Docker network with the container, or the address you published the port on. The example compose publishes the port on `127.0.0.1`, so a collector on another host needs `"<trusted-ip>:9100:9100"` instead.
 2. Load the dashboard, as [Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows.
@@ -118,7 +129,7 @@ registry-stats reports its state in two places, so the rules ship as two files, 
 | `RegistryStatsTargetDown` | `up{job="registry-stats"} == 0` for 15m: the exporter is not being scraped | warning |
 | `RegistryStatsTargetAbsent` | `absent(up{job="registry-stats"})` for 15m: the exporter is not a configured scrape target at all | warning |
 | `RegistryStatsCollectStalled` | no check has completed within the 6h published-data staleness budget, while the exporter is up and serving its last values | warning |
-| `RegistryStatsSourceDegraded` | one registry failed for most of its repos in a check, so those images drop off `/metrics` | warning |
+| `RegistryStatsSourceDegraded` | one registry failed for most of its repos in every check for 3 hours, so those images drop off `/metrics` | warning |
 | `RegistryStatsPullCountRegressed` | a tracked image's pull count falls below its 2-day max: a wrong count that did not error | warning |
 | `RegistryStatsConfigRejected` | a repo entry was skipped, an `owner/*` matched no public images, no repo was set, or `POLL_INTERVAL_HOURS` was invalid or above 8,760 | warning |
 | `RegistryStatsError` | the container logged an `ERROR`, other than the readiness check's 503 at startup and shutdown | warning |
@@ -144,7 +155,9 @@ Drop the rule in one-shot mode, `POLL_INTERVAL_HOURS=0`, where the counter advan
 
 `registrystats_collect_errors_total` advances once for a check in which a wildcard owner listing wholly fails, or more than half of the registry's image requests fail. Docker Hub rows read from an owner listing count on neither side of that ratio. A minority of failed image requests does not move this counter, and `RegistryStatsCollectionIncomplete` covers that case.
 
-Other configured owners are unaffected, and their series keep updating. Read the log for the owner rather than assuming the whole registry failed. The log names the reason, such as a rate limit, an HTTP failure or a page-format change.
+The rule fires only on a failure that lasts. Its expression holds while a check failed within the last 90 minutes, which spans one hourly check with room for drift, and the `for: 3h` needs that to hold for 3 hours, about three failed checks in a row. Docker Hub and GHCR both have short outages, and a failed check followed by a passing one never fires the rule. With a longer `POLL_INTERVAL_HOURS`, raise the 90 minutes above the interval.
+
+Other configured owners are unaffected, and their series keep updating. Read the log for the owner rather than assuming the whole registry failed. The log names the reason, such as a rate limit, an HTTP failure or a page-format change. An outage of the registry itself clears on its own.
 
 Both per-registry counters start at zero in process memory, but that zero is not a scrape sample. If the first failure happens before the first scrape, the first sample is already positive and `increase()` has no earlier sample to subtract. The uptime arm of the expression covers that startup window, and the `increase()` arm covers later failures.
 
@@ -165,7 +178,7 @@ None of these conditions has a metric, as the Alerting list above explains. A sk
 
 #### `RegistryStatsError`
 
-The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. A tag or version read whose response format changed is an `ERROR` too. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
+The rule is level-wide. It covers a failed registry request or parse, a changed GHCR page, an unusable configuration, a check in which every registry failed, and a 5xx from registry-stats' own endpoint. Both level comparisons are case-sensitive. The log writes levels in uppercase, so a lowercase matcher matches nothing.
 
 `/api/health` answers 503 at every start until the first check completes, and again during shutdown. The HTTP access log reports a 5xx at `ERROR`, so the second line filter excludes that one access record. The exclusion keys on the access record's own `msg`, so diagnostics a failing hook logs for the same request still reach the rule.
 

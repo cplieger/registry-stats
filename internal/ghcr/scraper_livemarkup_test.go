@@ -10,12 +10,10 @@ import (
 	"time"
 )
 
-// liveMarkup reads a gzipped GitHub response from the URLs listingURL,
-// scrapePackage and ReadDetail build. live-listing (cplieger's listing, its
-// authenticity_token masked) and live-package (the registry-stats page, nothing
-// masked) were captured 2026-09-09, live-versions (plex-exporter's tagged
-// versions, html-safe-nonce, visitor-payload and visitor-hmac masked) 2026-10-07.
-// To recapture, mask whichever of those four values a page carries, and gzip.
+// liveMarkup reads a gzipped GitHub response from the URLs listingURL and
+// scrapePackage build. live-listing (cplieger's listing, its authenticity_token
+// masked) and live-package (the registry-stats page, nothing masked) were captured
+// 2026-09-09. To recapture, mask the listing's authenticity_token, and gzip.
 // cplieger is a user, so the orgs listing answers 404 and these bytes exercise
 // the user-form fallback.
 func liveMarkup(t *testing.T, name string) string {
@@ -91,21 +89,8 @@ func TestParsePublished_ReadsTheServedPackagePage(t *testing.T) {
 	}
 }
 
-// TestParseVersionCounts_ReadsTheServedVersionsPage pins the version-count reader on
-// the largest tracked package, whose counts GitHub prints with thousands separators.
-func TestParseVersionCounts_ReadsTheServedVersionsPage(t *testing.T) {
-	html := liveMarkup(t, "live-versions")
-	if len(html) >= ghcrBodyCap {
-		t.Errorf("served versions page is %d bytes, want it under the %d-byte body cap", len(html), ghcrBodyCap)
-	}
-	tagged, untagged, err := parseVersionCounts(html)
-	if err != nil || tagged != 1002 || untagged != 2215 {
-		t.Errorf("parseVersionCounts(served versions page) = (%d, %d, %v), want (1002, 2215, nil)", tagged, untagged, err)
-	}
-}
-
 func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
-	listing, pkg, versions := liveMarkup(t, "live-listing"), liveMarkup(t, "live-package"), liveMarkup(t, "live-versions")
+	listing, pkg := liveMarkup(t, "live-listing"), liveMarkup(t, "live-package")
 	for _, tc := range []struct {
 		construct string
 		handledBy string
@@ -117,7 +102,7 @@ func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 		{"<?", "unsupported processing-instruction markup"},
 	} {
 		t.Run(tc.construct, func(t *testing.T) {
-			for page, html := range map[string]string{"listing": listing, "package": pkg, "versions": versions} {
+			for page, html := range map[string]string{"listing": listing, "package": pkg} {
 				if n := strings.Count(html, tc.construct); n != 0 {
 					t.Errorf("served %s page carries %q %d time(s); %s is exercised by real input after all",
 						page, tc.construct, n, tc.handledBy)
@@ -129,9 +114,8 @@ func TestServedMarkupCarriesNoExoticConstructs(t *testing.T) {
 
 func TestServedMarkupRawTextBodiesCarryNoLessThanBytes(t *testing.T) {
 	pages := map[string]string{
-		"listing":  liveMarkup(t, "live-listing"),
-		"package":  liveMarkup(t, "live-package"),
-		"versions": liveMarkup(t, "live-versions"),
+		"listing": liveMarkup(t, "live-listing"),
+		"package": liveMarkup(t, "live-package"),
 	}
 	for page, html := range pages {
 		for _, element := range []string{"script", "style", "textarea", "title"} {

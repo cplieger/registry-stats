@@ -49,8 +49,8 @@ func TestSetImage_PublishesRegistryTimesForDetailedImagesOnly(t *testing.T) {
 }
 
 // TestSetImage_RetiresEveryPerImageSeriesOfADepartedImage pins the departure rule:
-// an image a cycle did not measure loses its pull count, push time, update time and
-// its tag and version counts in the same cycle.
+// an image a cycle did not measure loses its pull count, push time and update time in
+// the same cycle.
 func TestSetImage_RetiresEveryPerImageSeriesOfADepartedImage(t *testing.T) {
 	m := New()
 	m.SetImage([]ImageMetric{
@@ -58,17 +58,11 @@ func TestSetImage_RetiresEveryPerImageSeriesOfADepartedImage(t *testing.T) {
 		{Registry: registry.DockerHub, Owner: "o", Repo: "gone", Pulls: 2, Updated: updatedAt, Detailed: true},
 		{Registry: registry.GHCR, Owner: "o", Repo: "kept", Pulls: 3, LastPushed: pushedAt, Detailed: true},
 	})
-	m.SetDetails([]DetailMetric{
-		{Registry: registry.GHCR, Owner: "o", Repo: "gone", Detail: registry.Detail{Tagged: 4, Untagged: 5}},
-		{Registry: registry.DockerHub, Owner: "o", Repo: "gone", Detail: registry.Detail{Tagged: 6}},
-		{Registry: registry.GHCR, Owner: "o", Repo: "kept", Detail: registry.Detail{Tagged: 7, Untagged: 8}},
-	}, nil)
 
 	m.SetImage([]ImageMetric{{Registry: registry.GHCR, Owner: "o", Repo: "kept", Pulls: 3, LastPushed: pushedAt, Detailed: true}})
 
 	body := scrapeBody(t, m)
 	assertLines(t, "SetImage(after departure)", body, []string{
-		`registrystats_ghcr_versions{owner="o",repo="kept",state="untagged"} 8`,
 		`registrystats_image_last_pushed_timestamp_seconds{owner="o",registry="ghcr",repo="kept"}`,
 	}, nil)
 	if strings.Contains(body, `repo="gone"`) {
@@ -112,25 +106,4 @@ func TestSetSources_StampsOnlyAnsweredSources(t *testing.T) {
 	if body := scrapeBody(t, only); strings.Contains(body, `source="ghcr"`) {
 		t.Errorf("SetSources(Docker Hub only) exposed a ghcr series:\n%s", body)
 	}
-}
-
-func TestSetDetails_PublishesEachRegistrysShapeAndTheOldestRead(t *testing.T) {
-	m := New()
-	oldest := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
-	m.SetDetails([]DetailMetric{
-		{Registry: registry.DockerHub, Owner: "o", Repo: "a", Detail: registry.Detail{Tagged: 341}},
-		{Registry: registry.GHCR, Owner: "o", Repo: "a", Detail: registry.Detail{Tagged: 1002, Untagged: 2215}},
-	}, []DetailAge{{Source: registry.GHCR, Oldest: oldest}})
-
-	assertLines(t, "SetDetails", scrapeBody(t, m), []string{
-		`registrystats_dockerhub_tags{owner="o",repo="a"} 341`,
-		`registrystats_ghcr_versions{owner="o",repo="a",state="tagged"} 1002`,
-		`registrystats_ghcr_versions{owner="o",repo="a",state="untagged"} 2215`,
-		`registrystats_details_oldest_read_timestamp_seconds{source="ghcr"} 1791244800`,
-	}, []string{`registrystats_details_oldest_read_timestamp_seconds{source="dockerhub"}`})
-
-	m.SetDetails(nil, nil)
-	assertLines(t, "SetDetails(nil)", scrapeBody(t, m), nil, []string{
-		`registrystats_dockerhub_tags{`, `registrystats_ghcr_versions{`, `registrystats_details_oldest_read_timestamp_seconds{`,
-	})
 }

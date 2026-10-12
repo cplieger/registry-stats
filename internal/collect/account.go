@@ -2,6 +2,7 @@ package collect
 
 import (
 	"cmp"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -9,12 +10,35 @@ import (
 	"github.com/cplieger/registry-stats/internal/registry"
 )
 
-// MaxDetailedNames caps the owner/repo names that get push-time, presence,
-// tag and version series, so those families stay bounded however many
-// images a wildcard expands to. Names are taken in byte order of
-// "owner/repo", and a name's images on both registries are in or out
-// together, so a cross-registry comparison never sees half a pair.
+// MaxDetailedNames caps the owner/repo names that get push-time and presence
+// series, so those families stay bounded however many images a wildcard
+// expands to. Names are taken in byte order of "owner/repo", and a name's
+// images on both registries are in or out together, so a cross-registry
+// comparison never sees half a pair.
 const MaxDetailedNames = 250
+
+// CapWatch logs the onset of each source's overflow past MaxDetailedNames, once
+// per onset rather than every cycle. Construct via NewCapWatch; one goroutine at
+// a time.
+type CapWatch struct {
+	logger *slog.Logger
+	over   map[registry.ID]bool
+}
+
+// NewCapWatch returns a CapWatch that logs through logger.
+func NewCapWatch(logger *slog.Logger) *CapWatch {
+	return &CapWatch{logger: logger, over: make(map[registry.ID]bool)}
+}
+
+// Note records one published cycle's omitted counts.
+func (w *CapWatch) Note(sources []obs.SourceCycle) {
+	for _, s := range sources {
+		if s.Omitted > 0 && !w.over[s.Source] {
+			w.logger.Warn("image details omitted", "source", s.Source.String(), "omitted", s.Omitted)
+		}
+		w.over[s.Source] = s.Omitted > 0
+	}
+}
 
 // sourceResult is one invoked source's collection and the refs it was given.
 type sourceResult struct {

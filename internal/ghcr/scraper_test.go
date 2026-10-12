@@ -772,6 +772,8 @@ func testClientCollectCancelledListingIsNotListingFailure(t *testing.T) {
 		}
 		cancel()
 		<-r.Context().Done()
+		// A returning handler sends an empty 200 the client can still receive.
+		panic(http.ErrAbortHandler)
 	}), capturingLogger(&buf))
 
 	collection := c.Collect(ctx, []registry.RepoRef{{Owner: "owner", Repo: "*"}})
