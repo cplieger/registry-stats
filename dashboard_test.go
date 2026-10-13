@@ -690,14 +690,17 @@ var badCaseFilter = regexp.MustCompile(`\s(?:[<>]=?|[!=]=)\s+-?\d|\bunless\b`)
 // hiddenTables are the tables whose normal state is empty, so they show only with rows.
 var hiddenTables = []string{"Not pulled in ${span} ${spanunit}"}
 
-// hiddenPanels returns the attention tiles, stats painted on a coloured background, and
-// the hiddenTables.
+// isAttentionTile reports whether p is an attention tile: a stat painted on a coloured background.
+func isAttentionTile(p dashPanel) bool {
+	return p.Spec.VizConfig.Group == "stat" && p.Spec.VizConfig.Spec.Options.ColorMode == "background"
+}
+
+// hiddenPanels returns the attention tiles and the hiddenTables.
 func hiddenPanels(t *testing.T) map[string]dashPanel {
 	t.Helper()
 	hidden := map[string]dashPanel{}
 	for name, p := range loadPanels(t) {
-		tile := p.Spec.VizConfig.Group == "stat" && p.Spec.VizConfig.Spec.Options.ColorMode == "background"
-		if tile || slices.Contains(hiddenTables, p.Spec.Title) {
+		if isAttentionTile(p) || slices.Contains(hiddenTables, p.Spec.Title) {
 			hidden[name] = p
 		}
 	}
@@ -1028,6 +1031,67 @@ func TestDashboard_HiddenPanelRowsShowWhileAnyPanelHasData(t *testing.T) {
 			t.Errorf("variable %s counts %d arms, want %d, one per hidden panel query", variable, got, want)
 		}
 	}
+}
+
+// A header that folds one chart or table costs a click and hides whether more sits behind
+// it, so a row whose header shows holds at least two always-visible panels. A row of
+// attention tiles is exempt: each shows only with data, and together they light several.
+func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
+	var rows []map[string]any
+	var walk func(v any)
+	walk = func(v any) {
+		switch n := v.(type) {
+		case map[string]any:
+			if spec, _ := n["spec"].(map[string]any); n["kind"] == "RowsLayoutRow" {
+				rows = append(rows, spec)
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(loadDoc(t))
+	if len(rows) == 0 {
+		t.Fatal("no row found; the pattern no longer reads the dashboard")
+	}
+	panels := loadPanels(t)
+	for _, row := range rows {
+		if row["hideHeader"] == true {
+			continue
+		}
+		items, _ := dig(row, "layout", "spec", "items").([]any)
+		shown, tiles := 0, 0
+		for _, it := range items {
+			rule := dig(it, "spec", "conditionalRendering")
+			name, _ := dig(it, "spec", "element", "name").(string)
+			switch {
+			case rule == nil:
+				shown++
+			case showsOnData(rule) && isAttentionTile(panels[name]):
+				tiles++
+			}
+		}
+		if shown < 2 && (shown > 0 || tiles < 2 || tiles != len(items)) {
+			t.Errorf("row %q shows its header over %d always-visible panels and %d attention tiles of %d, "+
+				"want two always-visible panels, a row of attention tiles, or hideHeader",
+				row["title"], shown, tiles, len(items))
+		}
+	}
+}
+
+// showsOnData reports whether rule holds a has-data rule that shows its item.
+func showsOnData(rule any) bool {
+	items, _ := dig(rule, "spec", "items").([]any)
+	for _, it := range items {
+		if dig(it, "kind") == "ConditionalRenderingData" && dig(it, "spec", "value") == true {
+			return true
+		}
+	}
+	return false
 }
 
 // rangeWordVars are the variables a title names the range's length with.

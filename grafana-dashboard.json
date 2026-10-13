@@ -2874,6 +2874,7 @@
                       "spec": {
                         "title": "Downloads over time",
                         "collapse": false,
+                        "hideHeader": true,
                         "layout": {
                           "kind": "GridLayout",
                           "spec": {
@@ -2980,6 +2981,7 @@
                       "spec": {
                         "title": "Unused packages",
                         "collapse": false,
+                        "hideHeader": true,
                         "conditionalRendering": {
                           "kind": "ConditionalRenderingGroup",
                           "spec": {
