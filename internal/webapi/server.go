@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/internal/obs"
-	"github.com/cplieger/webhttp/v3"
+	"github.com/cplieger/webhttp/v4"
 )
 
 // webhttp leaves ReadTimeout/WriteTimeout unset for streaming handlers and defaults
