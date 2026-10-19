@@ -62,6 +62,35 @@ func TestRegistryClient_refusesOffAllowlistRedirect(t *testing.T) {
 	}
 }
 
+// An IP literal's zone is not a DNS name, so an allowlisted suffix inside it
+// must not admit the hop.
+func TestRegistryClient_refusesRedirectToZonedIPLiteral(t *testing.T) {
+	via, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://hub.docker.com/v2/repositories/", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext via: %v", err)
+	}
+	checkRedirect := registryClient(func() {}).CheckRedirect
+	for _, tc := range []struct {
+		name    string
+		target  string
+		refused bool
+	}{
+		{name: "allowlisted_host", target: "https://registry-1.docker.com/v2/", refused: false},
+		{name: "zone_ends_in_allowed_suffix", target: "https://[::1%25.docker.com]/v2/", refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tc.target, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext %s: %v", tc.target, err)
+			}
+			err = checkRedirect(req, []*http.Request{via})
+			if got := err != nil; got != tc.refused {
+				t.Errorf("CheckRedirect(%s) error = %v, want refused = %t", tc.target, err, tc.refused)
+			}
+		})
+	}
+}
+
 func TestRegistryClient_refreshesPresentMarkerOnEveryRequest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".healthy")
 	marker := health.NewMarker(path)
