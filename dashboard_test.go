@@ -1063,7 +1063,7 @@ func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
 		if row["hideHeader"] == true {
 			continue
 		}
-		items := rowItems(row)
+		items, _ := dig(row, "layout", "spec", "items").([]any)
 		shown, tiles := 0, 0
 		for _, it := range items {
 			rule := dig(it, "spec", "conditionalRendering")
@@ -1081,21 +1081,6 @@ func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
 				row["title"], shown, tiles, len(items))
 		}
 	}
-}
-
-// rowItems returns the layout items a row folds, its nested rows' items included.
-func rowItems(row any) []any {
-	layout := dig(row, "layout")
-	if dig(layout, "kind") != "RowsLayout" {
-		items, _ := dig(layout, "spec", "items").([]any)
-		return items
-	}
-	rows, _ := dig(layout, "spec", "rows").([]any)
-	var items []any
-	for _, nested := range rows {
-		items = append(items, rowItems(dig(nested, "spec"))...)
-	}
-	return items
 }
 
 // showsOnData reports whether rule holds a has-data rule that shows its item.
@@ -1627,10 +1612,6 @@ var summaryTiles = []string{
 	"Growth over ${spanthe} ${spanunit}",
 }
 
-// tabletGridPx is the width an Overview auto grid fills on a 1024 px tablet, and
-// autoGridGapPx the gap between two tiles, both measured in Grafana 13.2.3.
-const tabletGridPx, autoGridGapPx = 912, 8
-
 // rowSpec returns the spec of the first RowsLayoutRow titled title.
 func rowSpec(t *testing.T, title string) map[string]any {
 	t.Helper()
@@ -1658,48 +1639,37 @@ func rowSpec(t *testing.T, title string) map[string]any {
 	return found
 }
 
-// The Summary row is always on screen, so its tiles share one line wherever the grid holds
-// three columns: one column per tile, all of them within the 912 px grid of a 1024 px tablet.
-// A grid too narrow for three columns but wide enough for two shows 2 + 1, which happens on
-// some widths below 1024 px and on some laptop widths with the menu docked; a phone stacks them.
-func TestDashboard_SummaryTilesShareOneLine(t *testing.T) {
-	grid, _ := dig(rowSpec(t, "Summary figures"), "layout").(map[string]any)
-	if grid["kind"] != "AutoGridLayout" {
-		t.Fatalf("Summary figures is a %v, want an AutoGridLayout", grid["kind"])
+// The Summary row is always on screen and folds the figures with the Downloads chart under
+// them: the tiles split one line into equal thirds, and the chart spans the line below.
+func TestDashboard_SummaryHoldsTilesOverDownloads(t *testing.T) {
+	grid, _ := dig(rowSpec(t, "Summary"), "layout").(map[string]any)
+	if grid["kind"] != "GridLayout" {
+		t.Fatalf("Summary is a %v, want a GridLayout", grid["kind"])
+	}
+	type place struct {
+		title      string
+		x, y, w, h float64
 	}
 	specs := panelSpecs(t)
 	items, _ := dig(grid, "spec", "items").([]any)
-	titles := []string{}
+	var got []place
 	for _, it := range items {
 		name, _ := dig(it, "spec", "element", "name").(string)
 		title, _ := specs[name]["title"].(string)
-		titles = append(titles, title)
+		x, _ := dig(it, "spec", "x").(float64)
+		y, _ := dig(it, "spec", "y").(float64)
+		w, _ := dig(it, "spec", "width").(float64)
+		h, _ := dig(it, "spec", "height").(float64)
+		got = append(got, place{title, x, y, w, h})
 	}
-	if !slices.Equal(titles, summaryTiles) {
-		t.Errorf("Summary holds %q, want %q", titles, summaryTiles)
+	want := []place{
+		{summaryTiles[0], 0, 0, 8, 3},
+		{summaryTiles[1], 8, 0, 8, 3},
+		{summaryTiles[2], 16, 0, 8, 3},
+		{"Downloads", 0, 3, 24, 8},
 	}
-	columns, _ := dig(grid, "spec", "maxColumnCount").(float64)
-	width, _ := dig(grid, "spec", "columnWidth").(float64)
-	if int(columns) != len(titles) {
-		t.Errorf("Summary has %v columns for %d tiles, want one per tile", columns, len(titles))
-	}
-	if line := len(titles)*int(width) + (len(titles)-1)*autoGridGapPx; dig(grid, "spec", "columnWidthMode") != "custom" || line > tabletGridPx {
-		t.Errorf("Summary's %d tiles of %v px (%v) take %d px, want at most %d, a tablet's grid",
-			len(titles), width, dig(grid, "spec", "columnWidthMode"), line, tabletGridPx)
-	}
-}
-
-// Folding Summary folds the figures and the Downloads chart under them, and nothing else.
-func TestDashboard_SummaryFoldsFiguresThenDownloads(t *testing.T) {
-	specs := panelSpecs(t)
-	titles := []string{}
-	for _, it := range rowItems(rowSpec(t, "Summary")) {
-		name, _ := dig(it, "spec", "element", "name").(string)
-		title, _ := specs[name]["title"].(string)
-		titles = append(titles, title)
-	}
-	if want := append(slices.Clone(summaryTiles), "Downloads"); !slices.Equal(titles, want) {
-		t.Errorf("Summary folds %q, want %q", titles, want)
+	if !slices.Equal(got, want) {
+		t.Errorf("Summary places %+v, want %+v", got, want)
 	}
 }
 

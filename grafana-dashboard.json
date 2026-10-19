@@ -2581,82 +2581,58 @@
                         "title": "Summary",
                         "collapse": false,
                         "layout": {
-                          "kind": "RowsLayout",
+                          "kind": "GridLayout",
                           "spec": {
-                            "rows": [
+                            "items": [
                               {
-                                "kind": "RowsLayoutRow",
+                                "kind": "GridLayoutItem",
                                 "spec": {
-                                  "title": "Summary figures",
-                                  "collapse": false,
-                                  "hideHeader": true,
-                                  "layout": {
-                                    "kind": "AutoGridLayout",
-                                    "spec": {
-                                      "maxColumnCount": 3,
-                                      "columnWidthMode": "custom",
-                                      "columnWidth": 280,
-                                      "rowHeightMode": "custom",
-                                      "rowHeight": 106,
-                                      "fillScreen": false,
-                                      "items": [
-                                        {
-                                          "kind": "AutoGridLayoutItem",
-                                          "spec": {
-                                            "element": {
-                                              "kind": "ElementReference",
-                                              "name": "panel-20"
-                                            }
-                                          }
-                                        },
-                                        {
-                                          "kind": "AutoGridLayoutItem",
-                                          "spec": {
-                                            "element": {
-                                              "kind": "ElementReference",
-                                              "name": "panel-21"
-                                            }
-                                          }
-                                        },
-                                        {
-                                          "kind": "AutoGridLayoutItem",
-                                          "spec": {
-                                            "element": {
-                                              "kind": "ElementReference",
-                                              "name": "panel-22"
-                                            }
-                                          }
-                                        }
-                                      ]
-                                    }
+                                  "x": 0,
+                                  "y": 0,
+                                  "width": 8,
+                                  "height": 3,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-20"
                                   }
                                 }
                               },
                               {
-                                "kind": "RowsLayoutRow",
+                                "kind": "GridLayoutItem",
                                 "spec": {
-                                  "title": "Downloads over time",
-                                  "collapse": false,
-                                  "hideHeader": true,
-                                  "layout": {
-                                    "kind": "GridLayout",
-                                    "spec": {
-                                      "items": [
-                                        {
-                                          "kind": "GridLayoutItem",
-                                          "spec": {
-                                            "x": 0,
-                                            "y": 0,
-                                            "width": 24,
-                                            "height": 8,
-                                            "element": {
-                                              "kind": "ElementReference",
-                                              "name": "panel-28"
-                                            }
-                                          }
-                                        }
-                                      ]
-                                    }
+                                  "x": 8,
+                                  "y": 0,
+                                  "width": 8,
+                                  "height": 3,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-21"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 16,
+                                  "y": 0,
+                                  "width": 8,
+                                  "height": 3,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-22"
+                                  }
+                                }
+                              },
+                              {
+                                "kind": "GridLayoutItem",
+                                "spec": {
+                                  "x": 0,
+                                  "y": 3,
+                                  "width": 24,
+                                  "height": 8,
+                                  "element": {
+                                    "kind": "ElementReference",
+                                    "name": "panel-28"
                                   }
                                 }
                               }
