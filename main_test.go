@@ -8,8 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +26,7 @@ import (
 	"github.com/cplieger/registry-stats/internal/config"
 	"github.com/cplieger/registry-stats/internal/obs"
 	"github.com/cplieger/registry-stats/internal/registry"
+	"github.com/cplieger/slogx/capture"
 	"github.com/cplieger/webhttp/v3"
 )
 
@@ -272,54 +271,9 @@ func (f *mainFakeSource) Collect(_ context.Context, _ []registry.RepoRef) regist
 	}
 }
 
-// saveLogGlobals captures the three globals slog.SetDefault mutates and restores
-// them when the test ends; call it before the swap.
-//
-// SetDefault also aims the log package at the installed handler and skips that
-// redirect for slog's own default handler, so reinstalling the previous logger
-// cannot undo it; slog's default handler emits through log.Output, so a dead log
-// writer silences the package. slog restores first because a non-default previous
-// handler re-runs the redirect.
-func saveLogGlobals(t *testing.T) {
-	t.Helper()
-	prevLogger, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
-	t.Cleanup(func() {
-		slog.SetDefault(prevLogger)
-		log.SetOutput(prevWriter)
-		log.SetFlags(prevFlags)
-	})
-}
-
-// TestSaveLogGlobals_restoresTheLogPackageToo red-checks the two restores saveLogGlobals owns
-// beyond slog's own; drop either and this test fails.
-func TestSaveLogGlobals_restoresTheLogPackageToo(t *testing.T) {
-	prevWriter, prevFlags := log.Writer(), log.Flags()
-	t.Cleanup(func() {
-		log.SetOutput(prevWriter)
-		log.SetFlags(prevFlags)
-	})
-	// Neither the process default nor what SetDefault installs (a slog
-	// handlerWriter and 0), so neither assertion can pass by coincidence.
-	log.SetOutput(io.Discard)
-	log.SetFlags(log.Lshortfile)
-
-	t.Run("swap", func(t *testing.T) {
-		saveLogGlobals(t)
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	})
-
-	if got := log.Writer(); got != io.Discard {
-		t.Errorf("log.Writer() = %T, want the writer set before the swap: slog.SetDefault aimed log at its own handler and restoring slog alone leaves it there", got)
-	}
-	if got := log.Flags(); got != log.Lshortfile {
-		t.Errorf("log.Flags() = %d, want %d: slog.SetDefault zeroes them and restoring slog alone leaves them at zero", got, log.Lshortfile)
-	}
-}
-
 func TestLogWarnings_sanitizesAndCapsStringAttrs(t *testing.T) {
 	buf := &bytes.Buffer{}
-	saveLogGlobals(t)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	capture.SwapDefault(t, slog.New(slog.NewJSONHandler(buf, nil)))
 
 	raw := "bad\n" + strings.Repeat("x", 4096)
 	warning := config.Warning{
@@ -368,8 +322,7 @@ func TestLoadConfig_emitsWarningsBeforeApplyingLogLevel(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	levelVar := &slog.LevelVar{}
-	saveLogGlobals(t)
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: levelVar})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: levelVar})))
 
 	cfg := loadConfig(levelVar)
 
@@ -678,8 +631,7 @@ func TestLogConfig_noReposLogsError(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	saveLogGlobals(t)
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})))
 
 	logConfig(&config.Config{})
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/registry-stats/internal/registry"
+	"github.com/cplieger/slogx/capture"
 )
 
 // capturingLogger returns a logger that records every record (Debug and
@@ -44,9 +45,7 @@ func testNewClientCustomLoggerIsUsed(t *testing.T) {
 	}))
 
 	var defaultBuf bytes.Buffer
-	oldDefault := slog.Default()
-	slog.SetDefault(capturingLogger(&defaultBuf))
-	t.Cleanup(func() { slog.SetDefault(oldDefault) })
+	capture.SwapDefault(t, capturingLogger(&defaultBuf))
 
 	var injectedBuf bytes.Buffer
 	c := NewClient(srv.Client(), Options{Logger: capturingLogger(&injectedBuf)})
