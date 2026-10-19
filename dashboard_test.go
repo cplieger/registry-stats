@@ -1063,7 +1063,7 @@ func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
 		if row["hideHeader"] == true {
 			continue
 		}
-		items, _ := dig(row, "layout", "spec", "items").([]any)
+		items := rowItems(row)
 		shown, tiles := 0, 0
 		for _, it := range items {
 			rule := dig(it, "spec", "conditionalRendering")
@@ -1081,6 +1081,21 @@ func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
 				row["title"], shown, tiles, len(items))
 		}
 	}
+}
+
+// rowItems returns the layout items a row folds, its nested rows' items included.
+func rowItems(row any) []any {
+	layout := dig(row, "layout")
+	if dig(layout, "kind") != "RowsLayout" {
+		items, _ := dig(layout, "spec", "items").([]any)
+		return items
+	}
+	rows, _ := dig(layout, "spec", "rows").([]any)
+	var items []any
+	for _, nested := range rows {
+		items = append(items, rowItems(dig(nested, "spec"))...)
+	}
+	return items
 }
 
 // showsOnData reports whether rule holds a has-data rule that shows its item.
@@ -1648,9 +1663,9 @@ func rowSpec(t *testing.T, title string) map[string]any {
 // A grid too narrow for three columns but wide enough for two shows 2 + 1, which happens on
 // some widths below 1024 px and on some laptop widths with the menu docked; a phone stacks them.
 func TestDashboard_SummaryTilesShareOneLine(t *testing.T) {
-	grid, _ := dig(rowSpec(t, "Summary"), "layout").(map[string]any)
+	grid, _ := dig(rowSpec(t, "Summary figures"), "layout").(map[string]any)
 	if grid["kind"] != "AutoGridLayout" {
-		t.Fatalf("Summary is a %v, want an AutoGridLayout", grid["kind"])
+		t.Fatalf("Summary figures is a %v, want an AutoGridLayout", grid["kind"])
 	}
 	specs := panelSpecs(t)
 	items, _ := dig(grid, "spec", "items").([]any)
@@ -1671,6 +1686,20 @@ func TestDashboard_SummaryTilesShareOneLine(t *testing.T) {
 	if line := len(titles)*int(width) + (len(titles)-1)*autoGridGapPx; dig(grid, "spec", "columnWidthMode") != "custom" || line > tabletGridPx {
 		t.Errorf("Summary's %d tiles of %v px (%v) take %d px, want at most %d, a tablet's grid",
 			len(titles), width, dig(grid, "spec", "columnWidthMode"), line, tabletGridPx)
+	}
+}
+
+// Folding Summary folds the figures and the Downloads chart under them, and nothing else.
+func TestDashboard_SummaryFoldsFiguresThenDownloads(t *testing.T) {
+	specs := panelSpecs(t)
+	titles := []string{}
+	for _, it := range rowItems(rowSpec(t, "Summary")) {
+		name, _ := dig(it, "spec", "element", "name").(string)
+		title, _ := specs[name]["title"].(string)
+		titles = append(titles, title)
+	}
+	if want := append(slices.Clone(summaryTiles), "Downloads"); !slices.Equal(titles, want) {
+		t.Errorf("Summary folds %q, want %q", titles, want)
 	}
 }
 
