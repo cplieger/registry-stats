@@ -690,14 +690,17 @@ var badCaseFilter = regexp.MustCompile(`\s(?:[<>]=?|[!=]=)\s+-?\d|\bunless\b`)
 // hiddenTables are the tables whose normal state is empty, so they show only with rows.
 var hiddenTables = []string{"Not pulled in ${span} ${spanunit}"}
 
-// hiddenPanels returns the attention tiles, stats painted on a coloured background, and
-// the hiddenTables.
+// isAttentionTile reports whether p is an attention tile: a stat painted on a coloured background.
+func isAttentionTile(p dashPanel) bool {
+	return p.Spec.VizConfig.Group == "stat" && p.Spec.VizConfig.Spec.Options.ColorMode == "background"
+}
+
+// hiddenPanels returns the attention tiles and the hiddenTables.
 func hiddenPanels(t *testing.T) map[string]dashPanel {
 	t.Helper()
 	hidden := map[string]dashPanel{}
 	for name, p := range loadPanels(t) {
-		tile := p.Spec.VizConfig.Group == "stat" && p.Spec.VizConfig.Spec.Options.ColorMode == "background"
-		if tile || slices.Contains(hiddenTables, p.Spec.Title) {
+		if isAttentionTile(p) || slices.Contains(hiddenTables, p.Spec.Title) {
 			hidden[name] = p
 		}
 	}
@@ -1028,6 +1031,67 @@ func TestDashboard_HiddenPanelRowsShowWhileAnyPanelHasData(t *testing.T) {
 			t.Errorf("variable %s counts %d arms, want %d, one per hidden panel query", variable, got, want)
 		}
 	}
+}
+
+// A header that folds one chart or table costs a click and hides whether more sits behind
+// it, so a row whose header shows holds at least two always-visible panels. A row of
+// attention tiles is exempt: each shows only with data, and together they light several.
+func TestDashboard_RowHeadersFoldSeveralPanels(t *testing.T) {
+	var rows []map[string]any
+	var walk func(v any)
+	walk = func(v any) {
+		switch n := v.(type) {
+		case map[string]any:
+			if spec, _ := n["spec"].(map[string]any); n["kind"] == "RowsLayoutRow" {
+				rows = append(rows, spec)
+			}
+			for _, child := range n {
+				walk(child)
+			}
+		case []any:
+			for _, child := range n {
+				walk(child)
+			}
+		}
+	}
+	walk(loadDoc(t))
+	if len(rows) == 0 {
+		t.Fatal("no row found; the pattern no longer reads the dashboard")
+	}
+	panels := loadPanels(t)
+	for _, row := range rows {
+		if row["hideHeader"] == true {
+			continue
+		}
+		items, _ := dig(row, "layout", "spec", "items").([]any)
+		shown, tiles := 0, 0
+		for _, it := range items {
+			rule := dig(it, "spec", "conditionalRendering")
+			name, _ := dig(it, "spec", "element", "name").(string)
+			switch {
+			case rule == nil:
+				shown++
+			case showsOnData(rule) && isAttentionTile(panels[name]):
+				tiles++
+			}
+		}
+		if shown < 2 && (shown > 0 || tiles < 2 || tiles != len(items)) {
+			t.Errorf("row %q shows its header over %d always-visible panels and %d attention tiles of %d, "+
+				"want two always-visible panels, a row of attention tiles, or hideHeader",
+				row["title"], shown, tiles, len(items))
+		}
+	}
+}
+
+// showsOnData reports whether rule holds a has-data rule that shows its item.
+func showsOnData(rule any) bool {
+	items, _ := dig(rule, "spec", "items").([]any)
+	for _, it := range items {
+		if dig(it, "kind") == "ConditionalRenderingData" && dig(it, "spec", "value") == true {
+			return true
+		}
+	}
+	return false
 }
 
 // rangeWordVars are the variables a title names the range's length with.
@@ -1548,10 +1612,6 @@ var summaryTiles = []string{
 	"Growth over ${spanthe} ${spanunit}",
 }
 
-// tabletGridPx is the width an Overview auto grid fills on a 1024 px tablet, and
-// autoGridGapPx the gap between two tiles, both measured in Grafana 13.2.3.
-const tabletGridPx, autoGridGapPx = 912, 8
-
 // rowSpec returns the spec of the first RowsLayoutRow titled title.
 func rowSpec(t *testing.T, title string) map[string]any {
 	t.Helper()
@@ -1579,34 +1639,37 @@ func rowSpec(t *testing.T, title string) map[string]any {
 	return found
 }
 
-// The Summary row is always on screen, so its tiles share one line wherever the grid holds
-// three columns: one column per tile, all of them within the 912 px grid of a 1024 px tablet.
-// A grid too narrow for three columns but wide enough for two shows 2 + 1, which happens on
-// some widths below 1024 px and on some laptop widths with the menu docked; a phone stacks them.
-func TestDashboard_SummaryTilesShareOneLine(t *testing.T) {
+// The Summary row is always on screen and folds the figures with the Downloads chart under
+// them: the tiles split one line into equal thirds, and the chart spans the line below.
+func TestDashboard_SummaryHoldsTilesOverDownloads(t *testing.T) {
 	grid, _ := dig(rowSpec(t, "Summary"), "layout").(map[string]any)
-	if grid["kind"] != "AutoGridLayout" {
-		t.Fatalf("Summary is a %v, want an AutoGridLayout", grid["kind"])
+	if grid["kind"] != "GridLayout" {
+		t.Fatalf("Summary is a %v, want a GridLayout", grid["kind"])
+	}
+	type place struct {
+		title      string
+		x, y, w, h float64
 	}
 	specs := panelSpecs(t)
 	items, _ := dig(grid, "spec", "items").([]any)
-	titles := []string{}
+	var got []place
 	for _, it := range items {
 		name, _ := dig(it, "spec", "element", "name").(string)
 		title, _ := specs[name]["title"].(string)
-		titles = append(titles, title)
+		x, _ := dig(it, "spec", "x").(float64)
+		y, _ := dig(it, "spec", "y").(float64)
+		w, _ := dig(it, "spec", "width").(float64)
+		h, _ := dig(it, "spec", "height").(float64)
+		got = append(got, place{title, x, y, w, h})
 	}
-	if !slices.Equal(titles, summaryTiles) {
-		t.Errorf("Summary holds %q, want %q", titles, summaryTiles)
+	want := []place{
+		{summaryTiles[0], 0, 0, 8, 3},
+		{summaryTiles[1], 8, 0, 8, 3},
+		{summaryTiles[2], 16, 0, 8, 3},
+		{"Downloads", 0, 3, 24, 8},
 	}
-	columns, _ := dig(grid, "spec", "maxColumnCount").(float64)
-	width, _ := dig(grid, "spec", "columnWidth").(float64)
-	if int(columns) != len(titles) {
-		t.Errorf("Summary has %v columns for %d tiles, want one per tile", columns, len(titles))
-	}
-	if line := len(titles)*int(width) + (len(titles)-1)*autoGridGapPx; dig(grid, "spec", "columnWidthMode") != "custom" || line > tabletGridPx {
-		t.Errorf("Summary's %d tiles of %v px (%v) take %d px, want at most %d, a tablet's grid",
-			len(titles), width, dig(grid, "spec", "columnWidthMode"), line, tabletGridPx)
+	if !slices.Equal(got, want) {
+		t.Errorf("Summary places %+v, want %+v", got, want)
 	}
 }
 
